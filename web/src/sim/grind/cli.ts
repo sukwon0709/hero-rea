@@ -94,6 +94,13 @@ function loadAb(): HintAb | undefined {
   const p = join(OUT, 'hint-ab.json');
   return existsSync(p) ? (JSON.parse(readFileSync(p, 'utf8')) as HintAb) : undefined;
 }
+/** The other A/Bs (hint-ab-<label>.json), oldest first. */
+function loadAbs(): HintAb[] {
+  return readdirSync(OUT)
+    .filter((f) => /^hint-ab-.*\.json$/.test(f))
+    .map((f) => JSON.parse(readFileSync(join(OUT, f), 'utf8')) as HintAb)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
 
 function writeProgress(st: EvolveState, live?: LiveStatus, saveState = !live) {
   if (saveState) atomicWrite(statePath(), JSON.stringify(st));
@@ -102,8 +109,9 @@ function writeProgress(st: EvolveState, live?: LiveStatus, saveState = !live) {
     .filter((f) => /^bench-.*\.json$/.test(f))
     .map((f) => JSON.parse(readFileSync(join(OUT, f), 'utf8')) as Bench)
     .sort((a, b) => a.date.localeCompare(b.date));
-  atomicWrite(join(OUT, 'progress.json'), JSON.stringify(progressJson(st, live, ab, benches), null, 1));
-  atomicWrite(join(OUT, 'progress.html'), progressHtml(st, live, ab, benches));
+  const abs = loadAbs();
+  atomicWrite(join(OUT, 'progress.json'), JSON.stringify(progressJson(st, live, ab, benches, abs), null, 1));
+  atomicWrite(join(OUT, 'progress.html'), progressHtml(st, live, ab, benches, abs));
 }
 
 /** Summary of one campaign for the hint A/B comparison. */
@@ -115,7 +123,15 @@ function abSide(params: GrindParams, c: CampaignResult): HintAb['with'] {
     exp += b.expTotal;
     for (const g of b.gains) healExp += g.heals;
   }
-  return { params, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, heals, tactics, healExp, exp, seconds: Math.round(c.ms / 1000), roster: c.roster.slice(0, 15).map((r) => ({ name: r.name, level: r.level })) };
+  let gainsFired = 0, gainsOpen = 0, bonuses = 0, control = 0;
+  for (const b of c.battles) {
+    for (const [t, n] of Object.entries(b.tactics)) if (Number(t) >= 15 && Number(t) <= 20) control += n;
+    if (!b.won || !b.script) continue;
+    for (const g of b.script.gains) if (!g.automatic) (gainsOpen++, g.fired && gainsFired++);
+    if (b.script.bonus) bonuses++;
+  }
+  const liuBei = c.roster.find((r) => r.officer === 0)?.level;
+  return { params, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, heals, tactics, healExp, exp, seconds: Math.round(c.ms / 1000), roster: c.roster.slice(0, 15).map((r) => ({ name: r.name, level: r.level })), gainsFired, gainsOpen, bonuses, liuBei, control };
 }
 
 /** One campaign in a child process (parallel candidates); falls back to in-process for workers=1. */
@@ -179,7 +195,12 @@ async function main() {
     const files = loadFiles();
     const snaps = loadCaptures();
     const snap = snaps[opt('index', 0)];
-    const o = await runGrindBattle(files, snap, { ...defaultParams(), finish: opt('finish', defaultParams().finish) }, null, flag('trace') ? (l) => console.log(l) : undefined);
+    // hint defaults, and the bench's reference carry for that battle when there is one (realistic levels)
+    const fx = join(OUT, 'cache', 'bench-carry.v8');
+    const carries = existsSync(fx) ? (deserialize(readFileSync(fx)) as Record<number, CarryState | null>) : {};
+    const params: GrindParams = { ...defaultParams(), ...(flag('nohints') ? {} : loadHints(snaps).defaults ?? {}), finish: opt('finish', defaultParams().finish) };
+    const o = await runGrindBattle(files, snap, params, carries[snap.index] ?? null, flag('trace') ? (l) => console.log(l) : undefined);
+    if (o.script) console.log(JSON.stringify(o.script));
     console.log(JSON.stringify({ name: snap.name, won: o.won, turns: o.turns, limit: o.turnLimit, finish: o.finishTurn, exp: o.expTotal, ms: Math.round(o.ms), actions: o.actions, kept: o.kept }));
     for (const g of o.gains) console.log(`  ${g.name} ${g.levelBefore} -> ${g.levelAfter} (+${g.expGained}: hits ${g.hits} kills ${g.kills} tactics ${g.tactics} heals ${g.heals})`);
     return;
@@ -237,13 +258,17 @@ async function main() {
     // defaults, same search seed and budget, run side by side in two workers
     const snaps = loadCaptures();
     const hints = loadHints(snaps);
-    const without = defaultParams();
-    const withHint: GrindParams = { ...without, ...(hints.defaults ?? {}) };
+    // --label NAME --base JSON: a further A/B (hint-ab-NAME.json) whose "without" side is the defaults + JSON
+    const label = sopt('label', '');
+    const base = label ? (JSON.parse(sopt('base', '{}')) as Partial<GrindParams>) : {};
+    const without: GrindParams = { ...defaultParams(), ...base };
+    const withHint: GrindParams = { ...defaultParams(), ...(hints.defaults ?? {}), ...(JSON.parse(sopt('with', '{}')) as Partial<GrindParams>) };
     const variants = opt('variants', 3), seed = opt('seed', 1) * 1000, limit = opt('limit', 0);
     const job = (params: GrindParams): Job => ({ params, variants, seed, limit, elites: {}, frozen: [], hints: {}, rescue: opt('retries', opt('rescue', 10)) });
     const [a, b] = await Promise.all([campaignInChild(job(without)), campaignInChild(job(withHint))]);
     const ab: HintAb = { hint: hints.defaults ?? {}, without: abSide(without, a), with: abSide(withHint, b), date: new Date().toISOString() };
-    atomicWrite(join(OUT, 'hint-ab.json'), JSON.stringify(ab, null, 1));
+    if (label) Object.assign(ab, { label, base, title: sopt('title', label) });
+    atomicWrite(join(OUT, label ? `hint-ab-${label}.json` : 'hint-ab.json'), JSON.stringify(ab, null, 1));
     console.log(JSON.stringify({ without: { ...ab.without, roster: undefined }, with: { ...ab.with, roster: undefined } }));
     if (existsSync(statePath())) writeProgress(loadState(), undefined, false);
     return;

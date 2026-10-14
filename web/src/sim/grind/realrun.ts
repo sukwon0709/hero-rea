@@ -11,6 +11,7 @@ import { playHooked } from './capture';
 import { shopVisit, type Purchase } from './shop';
 import { makeHeadless } from './sandbox';
 import { searchBattle, SearchRng, type BattleOutcome } from './battle';
+import { scriptNotes } from './battle';
 import { GrindPolicy, analyseBattle, pickFormation, type GrindParams } from './policy';
 import type { CampaignBattle } from './campaign';
 
@@ -144,6 +145,7 @@ export async function realRun(
           predicted: { won: plan.won, turns: plan.turns, expTotal: plan.expTotal },
           matched: plan.won && won && plan.turns === turns && plan.expTotal === expTotal,
           purchases,
+          script: pol ? scriptNotes(pol, g.state, won, plan.turnLimit) : plan.script,
           outcome: fellBack ? `planned win lost; harness ${rec?.outcome ?? r}` : (rec?.outcome ?? r),
         };
         battles.push(b);

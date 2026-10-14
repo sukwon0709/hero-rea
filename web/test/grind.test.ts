@@ -34,4 +34,16 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     const c = await runGrindBattle(files, { ...snap, rngSeed: 777 }, defaultParams());
     expect(c.rngAfter).not.toBe(a.rngAfter);
   }, 300_000);
+
+  it('reads the script gains of 사수관: the 관우-화웅 duel (+1 level)', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const o = await runGrindBattle(files, snap, defaultParams());
+    const duel = o.script?.gains.find((g) => g.kind === 'duel');
+    expect(duel).toBeDefined();
+    expect(duel!.gives).toContain('Lv+1');
+  }, 300_000);
 });

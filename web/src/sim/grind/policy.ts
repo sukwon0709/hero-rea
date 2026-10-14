@@ -142,8 +142,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'guard', min: 0.3, max: 1.3, def: 0.8 },
   { key: 'escort', min: 0, max: 3, def: 0.6 },
   { key: 'event', min: 0, max: 3, def: 1 },
-  { key: 'feed', min: 0, max: 3, def: 0.5 },
-  { key: 'safe', min: 0, max: 3, def: 0.3 },
+  { key: 'feed', min: 0, max: 3, def: 0 },
+  { key: 'safe', min: 0, max: 3, def: 0 },
 ];
 
 export function defaultParams(): GrindParams {

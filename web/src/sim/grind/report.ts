@@ -164,6 +164,10 @@ export interface LiveStatus {
 /** One campaign from the plain defaults vs one from defaults + the hints.json defaults (cli ab). */
 export interface HintAb {
   hint: Partial<GrindParams>;
+  /** A/B other than the first (heal) one: its name (hint-ab-<label>.json), what the "without" side was, and a Korean title. */
+  label?: string;
+  base?: Partial<GrindParams>;
+  title?: string;
   date: string;
   without: AbSide;
   with: AbSide;
@@ -180,6 +184,12 @@ interface AbSide {
   exp: number;
   seconds: number;
   roster: { name: string; level: number }[];
+  /** Script gains the bot got / could have had (won battles), victory bonuses received, 유비's final level. */
+  gainsFired?: number;
+  gainsOpen?: number;
+  bonuses?: number;
+  liuBei?: number;
+  control?: number;
 }
 
 function abHtml(ab: HintAb | undefined, st: EvolveState): string {
@@ -195,6 +205,46 @@ function abHtml(ab: HintAb | undefined, st: EvolveState): string {
 ${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('정책 승리 / 강제 진행', (x) => `${x.wins} / ${x.forced}`)}
 ${row('회복 책략 사용(회)', (x) => x.heals)}${row('회복으로 얻은 경험치', (x) => x.healExp)}${row('공격·상태 책략(회)', (x) => x.tactics)}${row('총 경험치', (x) => x.exp)}
 ${row('상위 장수', (x) => esc(x.roster.slice(0, 6).map((r) => `${r.name}${r.level}`).join(' ')))}</table>${learned}</div>`;
+}
+
+/** The other A/Bs (user tips): plain table, same columns plus the script gains. */
+export function tipsAbHtml(abs: HintAb[]): string {
+  if (!abs.length) return '<div class="card"><p class="dim">유저 팁 비교 실행(<code>cli.ts ab --label tips</code>)이 아직 없습니다.</p></div>';
+  return abs
+    .map((ab) => {
+      const row = (t: string, f: (x: AbSide) => string | number | undefined) => `<tr><td>${t}</td><td class="num">${f(ab.without) ?? '-'}</td><td class="num">${f(ab.with) ?? '-'}</td></tr>`;
+      return `<div class="card"><h3>${esc(ab.title ?? ab.label ?? '')}</h3><p>팁 없음: <code>${esc(JSON.stringify(ab.base ?? {}))}</code><br>팁 적용: <code>${esc(JSON.stringify(ab.hint))}</code><br><span class="dim">같은 탐색 시드·예산, 학습 없이 시작값 그대로 ${esc(ab.date.slice(0, 16))}</span></p>
+<table><tr><th></th><th class="num">팁 없음</th><th class="num">팁 적용</th></tr>
+${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('정책 승리 / 강제 진행', (x) => `${x.wins} / ${x.forced}`)}${row('유비 최종 레벨', (x) => x.liuBei)}
+${row('스크립트 이득 달성 / 가능(이긴 전투)', (x) => (x.gainsFired === undefined ? undefined : `${x.gainsFired} / ${x.gainsOpen}`))}${row('전원 경험치 보너스 받은 전투', (x) => x.bonuses)}
+${row('견제 책략(혼란·사기, 회)', (x) => x.control)}${row('회복 책략(회)', (x) => x.heals)}${row('총 경험치', (x) => x.exp)}${row('상위 장수', (x) => esc(x.roster.slice(0, 6).map((r) => `${r.name}${r.level}`).join(' ')))}</table></div>`;
+    })
+    .join('\n');
+}
+
+/** Per battle: the script's gains (bonus exp, duels, persuasions; got or not) and what ends it early. */
+export function scriptHtml(battles: CampaignBattle[]): string {
+  const rows = battles
+    .filter((b) => b.script && (b.script.gains.length || b.script.early.length))
+    .map((b) => {
+      const g = b.script!.gains.map((x) => `${x.automatic ? '<span class="dim">' : ''}${esc(x.when)} → ${esc(x.gives)} ${x.automatic ? '(자동)</span>' : !b.won ? '<span class="dim">(패배)</span>' : x.fired ? '<b>✓</b>' : '✗'}`).join('<br>');
+      return `<tr><td>${b.index + 1}. ${esc(b.name)}</td><td>${b.won ? '승리' : '강제'}</td><td class="dim">${g}</td><td class="num">${b.script!.bonus || ''}</td><td class="dim">${esc(b.script!.early.join(' · '))}</td></tr>`;
+    })
+    .join('');
+  return `<div class="card"><p>각 전투 스크립트(이벤트 블록)에서 찾은 이득: <b>전원 경험치</b>(DATA 4 → 승리 시 전장의 아군 전원이 받는 보너스, 4a30), <b>일기토</b>(지정 장수가 지정 적 옆에서 행동 → 그 장수 Lv+1, 적 퇴장), <b>설득</b>(유비가 지정 적 옆에서 행동 → 아군 합류, 유비 Lv+1), 그 밖의 레벨 증가. ✓ = 최고 실행의 봇이 달성, ✗ = 못 함. 오른쪽 열은 제한 턴보다 먼저 끝나거나 판이 바뀌는 조건(봇은 큰 증원 전에 마무리를 시작).</p>
+<table><tr><th>전투</th><th>결과</th><th>조건 → 이득</th><th class="num">받은 보너스</th><th>일찍 끝나는 조건</th></tr>${rows || '<tr><td colspan="5" class="dim">아직 기록 없음(이 기능 이후의 세대부터 채워짐)</td></tr>'}</table></div>`;
+}
+
+export function scriptMarkdown(battles: CampaignBattle[]): string[] {
+  const L: string[] = ['## 전투별 스크립트 이득(전원 경험치·일기토·설득)과 일찍 끝나는 조건', '', '| 전투 | 조건 → 이득 | 봇 | 일찍 끝나는 조건 |', '|---|---|---|---|'];
+  for (const b of battles) {
+    if (!b.script || (!b.script.gains.length && !b.script.early.length)) continue;
+    const g = b.script.gains.map((x) => `${x.when} → ${x.gives}${x.automatic ? ' (자동)' : ''}`).join('<br>');
+    const got = b.script.gains.map((x) => (x.automatic ? '-' : !b.won ? '패배' : x.fired ? '✓' : '✗')).join('<br>');
+    L.push(`| ${b.index + 1}. ${b.name} | ${g} | ${got} | ${b.script.early.join(' · ')} |`);
+  }
+  L.push('');
+  return L;
 }
 
 export interface BenchRow {
@@ -233,10 +283,11 @@ function benchHtml(benches: Bench[]): string {
   return `<div class="card"><p>같은 출발 레벨(기준 캠페인의 그 전투 시작 시점)에서 난수 시드만 바꿔 여러 번 싸운 승리 수. 왼쪽이 이전, 오른쪽이 나중 측정(전투 정책 수정 전후).</p><table><tr><th>전투</th><th>방식</th>${head}</tr>${rows}</table></div>`;
 }
 
-export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, benches: Bench[] = []) {
+export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, benches: Bench[] = [], abs: HintAb[] = []) {
   return {
     benches,
     hintAb: ab ?? null,
+    tipsAb: abs,
     updated: new Date().toISOString(),
     running: live ?? null,
     start: st.start ?? null,
@@ -296,8 +347,8 @@ const HINTS_EXAMPLE = `{
   }
 }`;
 
-export function progressHtml(st: EvolveState, live?: LiveStatus, ab?: HintAb, benches: Bench[] = []): string {
-  const data = progressJson(st, live, ab, benches);
+export function progressHtml(st: EvolveState, live?: LiveStatus, ab?: HintAb, benches: Bench[] = [], abs: HintAb[] = []): string {
+  const data = progressJson(st, live, ab, benches, abs);
   const json = JSON.stringify(data).replace(/</g, '\\u003c');
   const rules = [...data.rules, ...data.facts].map((r) => `<li>${esc(r)}</li>`).join('\n');
   const roster = (data.best?.roster ?? [])
@@ -363,6 +414,8 @@ li{margin:4px 0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@medi
 <li><b>공통 난수(CRN)</b>: 한 세대의 모든 후보는 같은 탐색 시드로 평가한다. 점수 차이가 운이 아니라 파라미터 차이에서 나오도록.</li>
 <li><b>커리큘럼</b>: 이야기 순서대로, 엘리트 작전이 2세대 연속 유지된 앞쪽 전투는 "고정"되어 그 작전만 다시 돌린다(탐색 비용 절약). 고정된 전투에서 작전이 지면 다시 전체 탐색.</li>
 <li><b>상점·도구·승진</b>: 전투 사이에 상점이 있는 마을을 지나면 금을 써서 산다(가격 ×10, 빈 칸에, 원작 상점 규칙 그대로). 우선순위는 ① 승진 도구(장창·연노·마개·무술교본 Lv15, 보병차·투석기·근위개·의협교본 Lv30, 해당 병종일 때) ② 병력 회복 도구(유비 2개, 주력 1개씩) ③ 남는 금으로 폭탄류. 전투 중 정책은 승진 도구를 쓸 수 있게 되면 바로 쓰고, 크게 다친 아군(특히 유비)에게 회복 도구를, 공격 대신 폭탄을 쓸 수 있다(폭탄 타격도 경험치). 보물 칸(밟으면 도구를 주는 칸)도 찾아간다.</li>
+<li><b>스크립트 이득과 일찍 끝나는 조건</b>: 전투마다 이벤트 블록을 읽어 전원 경험치 조건(특정 칸 도착·특정 적 격파 등), 일기토(지정 장수가 지정 적 옆에서 행동 → Lv+1), 설득(유비가 옆에서 행동 → 합류, 유비 Lv+1)을 찾고, 해당 장수를 그 칸·그 적 옆으로 보낸다(event 가중). 턴 이벤트(N턴 패배·N턴 승리·대규모 증원·아군 이탈)와 "이 장수가 쓰러지면 패배"도 읽어서, 6턴 이후 5부대 이상 증원이 오면 그 전에 마무리하고, 지켜야 할 아군은 유비처럼 보호한다.</li>
+<li><b>견제 책략</b>: 혼란·사기 저하(15–20)는 공격 책략과 따로 가중(control)한다. 적을 죽이지 않고 묶어 두면서 +8을 받으므로 사냥을 오래 할 수 있다(유저 팁).</li>
 <li><b>재도전</b>: 모든 작전이 지면, 플레이어처럼 전투 시작부터 다시 한다(시작 직후 총퇴각으로 난수를 바꿔 정책·게임 AI 번갈아, 최대 K번). 그래도 지면 강제 진행.</li>
 <li><b>적응형 개체 수</b>: 분포가 넓을 때(초반)는 후보를 많이, 수렴하면 적게 뽑는다(--pop이 상한, 최소 4).</li>
 </ol>
@@ -374,6 +427,12 @@ li{margin:4px 0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@medi
 
 <h2>사람의 힌트가 준 효과: 회복 책략 적극 사용</h2>
 ${abHtml(ab, st)}
+
+<h2>유저 팁의 효과: 전원 경험치·일기토·설득, 견제 책략, 유비 안전과 막타</h2>
+${tipsAbHtml(abs)}
+
+<h2>전투별 스크립트 이득과 일찍 끝나는 조건</h2>
+${scriptHtml(st.best?.campaign.battles ?? [])}
 
 <h2>파라미터 변화(평균 ± 표준편차)</h2>
 <div class="card"><div class="dim" style="margin-bottom:8px">선은 분포의 평균, 띠는 ±1 표준편차, 점은 그 세대 최고 후보의 값. 띠가 좁아지면 그 값에 수렴한 것.</div><div class="minis" id="minis"></div></div>
@@ -401,6 +460,7 @@ ${benchHtml(benches)}
 <li><b>상한</b>: 레벨은 99를 넘지 못한다(한 번에 받는 경험치가 최대 64, Lv99부터는 경험치를 받지 않음, 스크립트의 능력치 증가도 99에서 멈춤).</li>
 <li><b>행동 수</b>: 48전투의 제한 턴 합은 1847턴, 기본 출진 인원으로 곱하면 아군 장수 행동 기회가 약 16,800번. 15명을 Lv1→99로 올리려면 약 147,000 경험치가 필요하다. 상대가 5레벨 이상 높을 때의 타격 16을 매 행동마다 받아도 약 269,000이 상한이고, 아군이 적보다 높아지면 타격은 4, 책략은 8로 떨어진다(행동당 평균 8이면 134,000). 즉 이론상 가능 범위의 끝자락이고, 거의 모든 턴에 전원이 경험치 행동을 해야 한다.</li>
 <li><b>지금 막히는 곳</b>: 강제 진행 전투의 대부분은 <b>유비 퇴각</b>으로 진다(위 표의 실패 원인). 유비가 Lv1~5에 머물러 병력 500으로는 장(3장) 이후 적 한 번의 공격에 쓰러진다.</li>
+<li><b>유비의 경험치원(스크립트·엔진 조사)</b>: ① 승리 보너스(DATA 4, 보통 50)는 승리 순간 전장에 있는 아군 <i>전원</i>에게 주어진다(4a30). 유비는 모든 전투에 출진하므로 매번 받는다. ② 설득 이벤트는 유비가 지정 적 옆에서 행동하면 그 적이 합류하고 유비 Lv+1(태산·하구·팽성, 신도1 3회, 부 5회, 정군산 등 약 13레벨). ③ 레벨이 낮을수록 타격 경험치가 크다((레벨차+3)×2, 최대 16, 상대가 높으면 처치 32). 그래서 실제 플레이에서는 늘 출진하는 유비가 오히려 99를 찍기 쉽다. 봇은 이제 유비를 안전한 칸에만 두되(위험 비용, 닿는 적 1명당 비용, 유비 우선 회복) 다른 장수가 적을 깎아 두고 막타를 유비에게 넘긴다(feed). 유비도 15×99 목표에 포함된다.</li>
 <li><b>장비</b>: 이 게임의 상점은 무기·방어구·말을 팔지 않는다(이야기로만 얻음). 상점에서 사는 것은 승진 도구, 회복·사기 도구, 책략서(폭탄류)다. 승진은 Lv15/30이 필요해서 레벨이 낮은 초반에는 도움이 안 된다. 상점 방문은 "그 마을에 상점 목록이 있으면 들른다"로 근사했다(포트의 필드 엔진은 도구상 건물 진입을 아직 구현하지 않음).</li>
 <li><b>강제 진행의 취급</b>: 정책이 못 이긴 전투는 경험치 0, 레벨 그대로 다음 전투로 간다(실제로는 이길 때까지 재도전). 그래서 앞에서 막히면 뒤 전투도 줄줄이 막힌다.</li>
 </ul></div>
@@ -488,7 +548,7 @@ export function resultsJson(r: RealRunResult, st: EvolveState) {
     n99: r.n99,
     top15: r.top15,
     roster: r.roster,
-    battles: battleRows(r.battles).map((b, i) => ({ ...b, predicted: r.battles[i].predicted, exact: r.battles[i].matched, outcome: r.battles[i].outcome })),
+    battles: battleRows(r.battles).map((b, i) => ({ ...b, predicted: r.battles[i].predicted, exact: r.battles[i].matched, outcome: r.battles[i].outcome, script: r.battles[i].script ?? null })),
     simulatedBest: st.best ? { n99: st.best.result.n99, top15: st.best.result.top15, roster: st.best.campaign.roster } : null,
     issues: r.issues,
   };
@@ -520,6 +580,10 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
   L.push('- 혼란·사기저하·회복 책략: 시전하면 +8(군악대·수송대의 단일 회복은 +12). 성공 여부와 무관. 범위 회복은 아군(자신 포함)이 범위에 있기만 하면 시전된다.');
   L.push('- 경험치 100마다 1레벨. Lv99가 되면 더 이상 오르지 않는다(한 번에 100 이상을 받는 경우가 없어 99를 넘지 못함).');
   L.push('- MP는 매 턴 회복되지 않고 전투 시작 시 가득 찬다 → 전투 안에서 다 쓰는 것이 이득. 군악대 옆 장수는 매 턴 MP를 회복한다.');
+  L.push('- 승리 보너스(전원 경험치): 스크립트의 DATA 4가 정한 값(보통 50)을 승리 순간 전장의 아군 전원이 받는다. 조건(특정 칸 도착, 특정 적 격파 등)은 아래 표 참고. 한 전투에 하나만(덮어쓰기).');
+  L.push('- 일기토: 지정 장수가 지정 적 옆에서 행동하면 일어나고 그 장수 Lv+1, 적은 퇴장(승리 조건 장수면 그대로 승리). 설득: 유비가 지정 적 옆에서 행동하면 그 적이 합류하고 유비 Lv+1.');
+  L.push('- 유비는 모든 전투에 나가므로 승리 보너스를 매번 받고, 레벨이 낮을 때는 타격 16·처치 32를 받는다. 안전한 칸에서 다른 장수가 깎아 둔 적에게 막타를 치게 하면 99까지 키우기 쉽다.');
+  L.push('- 견제 책략(혼란·사기 저하)은 적을 죽이지 않고 +8을 준다: 공격 책략보다 먼저, 회복과 함께 쓴다.');
   L.push('');
   if (p) {
     L.push('## 기본 작전');
@@ -527,6 +591,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
     for (const rule of learnedRules(st)) L.push(`- ${rule}`);
     L.push('');
   }
+  L.push(...scriptMarkdown(r.battles));
   L.push('## 전투별 작전');
   L.push('');
   for (const b of r.battles) {
