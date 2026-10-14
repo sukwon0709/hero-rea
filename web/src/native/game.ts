@@ -64,6 +64,8 @@ export class Game implements GameContext {
   private pictureSaved: { data: Uint8Array } | null = null;
   /** The map view shows the current location (cleared on a location change, set by SCREEN_MAP). */
   private mapShown = false;
+  /** The world map was just loaded: SCREEN_MAP centres it on 유비. */
+  private focusPending = false;
   /** Set by a load until the loaded map is on screen. */
   private loadedGame = false;
   private inputLocked = false;
@@ -360,6 +362,12 @@ export class Game implements GameContext {
   /** SCREEN_MAP (0cf5:97cc): draw the map and show it. */
   private async showMap() {
     this.closePicture();
+    if (this.focusPending && this.field.kind === 'world') {
+      // the world map opens on 유비 (placed by the event after MAP)
+      const a = this.field.actors.get(0);
+      if (a) this.field.focusOn(a.x, a.y);
+    }
+    this.focusPending = false;
     this.mapShown = true;
     this.field.render();
     if (this.video.dark) await this.video.fadeIn(this.palette(), 8);
@@ -444,6 +452,7 @@ export class Game implements GameContext {
     s.map = (mode << 12) | loc.map;
     s.area = loc.key;
     if (mode === 3) return;
+    this.focusPending = mode === 1;
     if (mode === 1) this.field.loadWorld(this.state.progress.chapter);
     else if (mode === 0) this.field.loadRoom(0, this.state.towns[loc.map]?.smapEntry ?? 0);
     else this.field.loadRoom(2, loc.map);
