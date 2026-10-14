@@ -3,7 +3,8 @@ import { parseChapter, parseTownsfolk, readStageTitles, isKnownOpcode, type Comm
 import { gameFile, hasGame } from './gamedir';
 
 describe.skipIf(!hasGame)('scenario', () => {
-  const chapters = [0, 1, 2, 3, 4].map((c) => parseChapter(c, gameFile(`SNR${c}D.R3`), gameFile(`SNR${c}M.R3`)));
+  // describe bodies run during collection even when skipped, so only read files when present
+  const chapters = hasGame ? [0, 1, 2, 3, 4].map((c) => parseChapter(c, gameFile(`SNR${c}D.R3`), gameFile(`SNR${c}M.R3`))) : [];
 
   it('parses every chapter without unknown opcodes', () => {
     expect(chapters.map((c) => c.stages.length)).toEqual([1, 5, 4, 5, 3]);
