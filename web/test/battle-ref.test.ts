@@ -64,11 +64,6 @@ function aiCheck(F: any, slot: number, ref: any, run: 'eval' | 'nearest', learn:
   if (run === 'eval') evaluateReachable(s, u, ref.mp);
   else planAttackNearest(s, u, ref.mp);
   expect(Array.from(s.foeMap)).toEqual(ref.foe);
-  if (process.env.BATTLE_DEBUG && Array.from(s.influence).join() !== ref.infl.join()) {
-    for (let i = 0; i < ref.infl.length; i++)
-      if (s.influence[i] !== ref.infl[i])
-        console.log('cell', i % F.w, Math.floor(i / F.w), 'terrain', F.terrain[i], 'ts', s.influence[i], 'ref', ref.infl[i], 'unit', s.unitAt[i], 'mode', u.mode, 'pos', u.x, u.y);
-  }
   expect(Array.from(s.influence)).toEqual(ref.infl);
   expect(Array.from(s.grid)).toEqual(ref.grid);
   const [e51c, e51e, e51f, e520, e521, e522, e523, e524] = ref.ai;
