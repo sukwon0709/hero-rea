@@ -25,6 +25,7 @@ import type { GameState } from '../../engine/state';
 import type { ScriptState } from '../../engine/script';
 import type { Stage } from '../../formats/scenario';
 import { recordCommands } from '../../native/battle/dev/setup';
+import { scriptGains, recordIndexOf, turnEvents, type ScriptGain, type TurnEvent } from './events';
 import { S } from '../../native/battle/strings';
 import { floodMove, rangeCells, terrainAt, unitAt, unitsInRange, sideOf } from '../../engine/battle/hex';
 import {
@@ -72,6 +73,8 @@ export interface GrindParams {
   finish: number;
   /** Multiplier on the exp of tactics (MP is spent once per battle). */
   tactic: number;
+  /** Multiplier on the exp of control tactics (견제: confusion 15..17, morale 18..20): they stall the enemy and keep it alive. */
+  control: number;
   /** Multiplier on heal exp. */
   heal: number;
   /** Multiplier on kill exp (a kill removes a source of later hits). */
@@ -92,6 +95,12 @@ export interface GrindParams {
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
   escort: number;
+  /** Weight of the battle scripts' gains (events.ts): victory bonus cells, duels, persuasions, level-ups. */
+  event: number;
+  /** Feeding the leader: others soften enemies the leader can finish safely, and leave those kills to it. */
+  feed: number;
+  /** Leader safety beyond the worst case: cost per enemy that can reach the leader's cell. */
+  safe: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -121,6 +130,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'keep', min: 1, max: 8, def: 2, int: true },
   { key: 'finish', min: 2, max: 16, def: 7, int: true },
   { key: 'tactic', min: 0.2, max: 2.5, def: 1 },
+  { key: 'control', min: 0.2, max: 3, def: 1 },
   { key: 'heal', min: 0.2, max: 2.5, def: 1 },
   { key: 'kill', min: 0, max: 2, def: 0.6 },
   { key: 'conserve', min: 0, max: 3, def: 0.8 },
@@ -131,6 +141,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'strong', min: 0, max: 8, def: 3, int: true },
   { key: 'guard', min: 0.3, max: 1.3, def: 0.8 },
   { key: 'escort', min: 0, max: 3, def: 0.6 },
+  { key: 'event', min: 0, max: 3, def: 1 },
+  { key: 'feed', min: 0, max: 3, def: 0.5 },
+  { key: 'safe', min: 0, max: 3, def: 0.3 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -167,6 +180,14 @@ export interface BattleKnowledge {
   endsAt: number | null;
   /** Treasure cells: arrival events (trigger 6) that give an item (ADD_ITEM) and do not end the battle. */
   treasure: { officer: number; x: number; y: number }[];
+  /** The block's gains (bonus exp, duels, persuasions, levels), with the stage for matching the records the VM runs. */
+  gains: ScriptGain[];
+  /** Turn events and defeat events that lose the battle (events.ts). */
+  turns: TurnEvent[];
+  /** Turn of a big enemy wave (5+ units, turn 6 or later): the grinding finishes before it. */
+  soft: number | null;
+  stage?: Stage;
+  block?: number;
 }
 
 function winning(stage: Stage, code: number, victory: number | null): boolean {
@@ -180,7 +201,7 @@ function winning(stage: Stage, code: number, victory: number | null): boolean {
 
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [] };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -240,6 +261,10 @@ export interface GrindStats {
   kept: number[];
   /** Tactics cast (tactic id -> count). */
   tactics: Map<number, number>;
+  /** Records of the block's gains that ran (events.ts ScriptGain.record). */
+  gainsFired?: number[];
+  /** The victory bonus set when the battle ended (given to every unit on the field on a win). */
+  bonus?: number;
 }
 
 interface Action {
@@ -271,6 +296,8 @@ export class GrindPolicy {
     byOfficer: new Map(),
     kept: [],
     tactics: new Map(),
+    gainsFired: [],
+    bonus: 0,
   };
   private finishing = false;
   private idleTurns = 0;
@@ -295,6 +322,22 @@ export class GrindPolicy {
         }
       return false;
     });
+    // sides of the turn events' officers: a defeat event that loses names one of ours to keep alive
+    // (or an enemy never to kill); a big enemy wave late in the battle is a soft deadline
+    for (const e of know.turns) {
+      if (e.officer !== null && e.gameOver) {
+        const s = scene.b.slotOfOfficer(e.officer);
+        if (s !== NONE && s < PLAYER_SLOTS) know.guarded.add(e.officer);
+        else if (s !== NONE) know.protect.add(e.officer);
+      }
+      if (e.turn !== null && e.turn >= 6) {
+        const foes = e.reinforce.filter((o) => {
+          const s = scene.b.slotOfOfficer(o);
+          return s !== NONE && s >= PLAYER_SLOTS;
+        }).length;
+        if (foes >= 5) know.soft = Math.min(know.soft ?? 999, e.turn);
+      }
+    }
   }
 
   private looted = new Set<number>();
@@ -305,6 +348,134 @@ export class GrindPolicy {
   install(): void {
     const sc = this.scene as unknown as Record<string, unknown>;
     sc.playerPhase = () => this.playerPhase();
+    // which records the VM runs (for the gains fired): the 10 bytes it copies into ScriptState.record
+    const ctx = this.scene.ctx;
+    const run = ctx.runEvent.bind(ctx);
+    ctx.runEvent = async (t) => {
+      const r = await run(t);
+      if (r !== 'none' && this.know.stage && this.know.block !== undefined) {
+        const i = recordIndexOf(this.know.stage, this.know.block, ctx.vm.state.record);
+        if (i !== null && this.know.gains.some((g) => g.record === i) && !this.fired.has(i)) {
+          this.fired.add(i);
+          this.stats.gainsFired!.push(i);
+          this.log?.(`gain: record ${i} fired`);
+        }
+      }
+      this.stats.bonus = this.b.info.bonus;
+      return r;
+    };
+  }
+
+  private fired = new Set<number>();
+
+  /** What a gain not yet had is worth now (0 when fired, automatic, or a way to win: the finish takes those). */
+  private gainValue(g: ScriptGain): number {
+    if (this.fired.has(g.record) || g.automatic || g.ends) return 0;
+    const b = this.b;
+    let v = 0;
+    if (g.bonus > b.info.bonus) {
+      let ws = 0;
+      for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) if (u.status === Status.Field) ws += this.weight(u.slot);
+      v += (g.bonus - b.info.bonus) * ws * 0.5;
+    }
+    for (const l of g.levels) {
+      const s = b.slotOfOfficer(l.officer);
+      const w = s !== NONE && s < PLAYER_SLOTS ? this.weight(s) : 1;
+      v += l.value * 100 * w;
+    }
+    v += g.recruits.length * 150;
+    if (g.needsFlags.length) v *= 0.5;
+    return v * this.p.event;
+  }
+
+  /** Gains a unit standing at (x, y) after its action would fire (adjacency, cell, area). */
+  private gainAt(u: Unit, x: number, y: number): number {
+    if (!this.p.event) return 0;
+    const b = this.b;
+    let v = 0;
+    for (const g of this.know.gains) {
+      if (g.actor !== u.officer && !(g.actor === 0x400 && u.slot < PLAYER_SLOTS)) continue;
+      if (g.trigger === 4 && g.other !== null) {
+        const s = b.slotOfOfficer(g.other);
+        if (s === NONE || this.scene.units[s].status !== Status.Field) continue;
+        const o = this.scene.units[s];
+        if (Math.abs(o.x - x) + Math.abs(o.y - y) !== 1) continue;
+      } else if ((g.trigger === 6 || g.trigger === 11) && g.cell) {
+        if (x < g.cell.x0 || x > g.cell.x1 || y < g.cell.y0 || y > g.cell.y1) continue;
+      } else continue;
+      v += this.gainValue(g);
+    }
+    return v;
+  }
+
+  /** Where a unit's best open gain is (for the pull towards it), with its value. */
+  private gainGoal(u: Unit): { at: [number, number]; value: number } | null {
+    if (!this.p.event) return null;
+    const b = this.b;
+    let best: { at: [number, number]; value: number } | null = null;
+    for (const g of this.know.gains) {
+      if (g.actor !== u.officer && !(g.actor === 0x400 && u.slot < PLAYER_SLOTS && g.trigger !== 4)) continue;
+      const v = this.gainValue(g);
+      if (v <= 0) continue;
+      let at: [number, number] | null = null;
+      if (g.trigger === 4 && g.other !== null) {
+        const s = b.slotOfOfficer(g.other);
+        if (s !== NONE && this.scene.units[s].status === Status.Field) at = [this.scene.units[s].x, this.scene.units[s].y];
+      } else if ((g.trigger === 6 || g.trigger === 11) && g.cell) at = [(g.cell.x0 + g.cell.x1) >> 1, (g.cell.y0 + g.cell.y1) >> 1];
+      if (at && (!best || v > best.value)) best = { at, value: v };
+    }
+    return best;
+  }
+
+  /** A defeat event (trigger 12) of this enemy gives something. */
+  private killGain(officer: number): number {
+    let v = 0;
+    for (const g of this.know.gains) if (g.trigger === 12 && g.actor === officer && !this.know.protect.has(officer)) v += this.gainValue(g);
+    return v;
+  }
+
+  /** Enemy slot -> the damage the leader can do to it this phase from a cell within its guard. */
+  private leaderKills = new Map<number, number>();
+  private leaderActed = false;
+
+  private buildLeaderKills() {
+    this.leaderKills.clear();
+    this.leaderActed = false;
+    if (!this.p.feed || this.finishing) return;
+    const b = this.b;
+    const ls = b.slotOfOfficer(0);
+    if (ls === NONE || ls >= PLAYER_SLOTS) return;
+    const L = this.scene.units[ls];
+    if (!this.controllable(L) || L.flags & UnitFlag.Acted) return;
+    const o = b.officerOf(L);
+    const range = CLASS_RANGE[o.cls];
+    if (range === NONE) return;
+    const home: [number, number] = [L.x, L.y];
+    const at = L.y * b.width + L.x;
+    b.s.unitAt[at] = NONE;
+    this.buildThreat();
+    b.s.unitAt[at] = ls;
+    for (const [x, y] of this.reachable(L)) {
+      b.place(ls, null, x, y);
+      const d = this.danger(L, x, y);
+      if (d.worst > o.hp * this.p.guard) continue;
+      for (const e of unitsInRange(b.s, L, range, x, y, false)) {
+        const E = this.scene.units[e];
+        if (!(E.flags & UnitFlag.Visible) || this.know.protect.has(E.officer)) continue;
+        const oe = b.officerOf(E);
+        const dmg = physicalDamage({
+          attack: attackPower(o, L.morale, b.s.items),
+          defence: defencePower(oe, E.morale, b.s.items),
+          attackerClass: o.cls,
+          defenderClass: oe.cls,
+          defenderTerrain: terrainAt(b.s, E.x, E.y),
+          defenderHp: oe.hp,
+          counter: false,
+        });
+        this.leaderKills.set(e, Math.max(this.leaderKills.get(e) ?? 0, dmg));
+      }
+    }
+    b.place(ls, null, home[0], home[1]);
   }
 
   private get b() {
@@ -338,7 +509,7 @@ export class GrindPolicy {
 
   private deadline(): number {
     const lim = this.b.info.turnLimit;
-    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999);
+    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999, this.know.soft ?? 999);
   }
 
   // ---- player phase (1cb6:44de without the input loop)
@@ -370,13 +541,15 @@ export class GrindPolicy {
     }
     this.decideFinish();
     this.buildThreat();
+    this.buildLeaderKills();
+    const feedLast = this.p.feed > 0 && !this.finishing;
     let gained = 0;
     const done = new Set<number>();
     for (let guard = 0; guard < PLAYER_SLOTS * 2 && b.info.result === 0; guard++) {
       const order = sc.units
         .slice(0, PLAYER_SLOTS)
         .filter((u) => this.controllable(u) && !(u.flags & (UnitFlag.Acted | UnitFlag.Confused)) && !done.has(u.slot))
-        .sort((x, y) => this.weight(y.slot) - this.weight(x.slot) || x.slot - y.slot);
+        .sort((x, y) => (feedLast ? (x.officer === 0 ? 1 : 0) - (y.officer === 0 ? 1 : 0) : 0) || this.weight(y.slot) - this.weight(x.slot) || x.slot - y.slot);
       const u = order[0];
       if (!u) break;
       done.add(u.slot);
@@ -387,6 +560,7 @@ export class GrindPolicy {
       this.buildThreat();
       b.s.unitAt[at] = u.slot;
       const act = this.bestAction(u);
+      if (u.officer === 0) this.leaderActed = true;
       gained += await this.execute(act);
       if (b.info.result) return;
       await sc.victoryCheck();
@@ -532,9 +706,9 @@ export class GrindPolicy {
    * Danger at (x, y) for u: `worst` = every enemy that can reach the cell hits u (used for the
    * leader), `expected` = each enemy's damage shared between the units it can reach.
    */
-  private danger(u: Unit, x: number, y: number): { worst: number; expected: number } {
+  private danger(u: Unit, x: number, y: number): { worst: number; expected: number; n?: number } {
     const b = this.b;
-    let worst = 0, expected = 0;
+    let worst = 0, expected = 0, n = 0;
     const k = y * b.width + x;
     const here = this.threat[u.y * b.width + u.x] ?? [];
     const phys = this.threat[k] ?? [];
@@ -545,16 +719,20 @@ export class GrindPolicy {
       const E = this.scene.units[e];
       if (!phys.includes(e) && !tac.includes(e)) {
         // reachable only through our lines: counts for the worst case alone
-        if (E.status === Status.Field && E.officer !== 0xffff) worst += this.hitOn(E, u, x, y);
+        if (E.status === Status.Field && E.officer !== 0xffff) {
+          worst += this.hitOn(E, u, x, y);
+          n++;
+        }
         continue;
       }
       // the map is built at the start of the phase: units removed since then no longer threaten
       if (E.status !== Status.Field || E.officer === 0xffff) continue;
       const d = Math.max(phys.includes(e) ? this.hitOn(E, u, x, y) : 0, tac.includes(e) ? this.tacticOn(E, u, x, y) : 0);
       worst += d;
+      if (d > 0) n++;
       expected += d / Math.max(1, this.targetsOf(e) + (here.includes(e) ? 0 : 1));
     }
-    return { worst, expected };
+    return { worst, expected, n };
   }
 
   // ---- grinding phase: the best (cell, action) for one unit
@@ -631,13 +809,13 @@ export class GrindPolicy {
     // other targets), so the cost rises smoothly from half the troops to one and a half times them
     // expected damage drives the cost for everyone; the leader (유비 / the defeat officer) losing
     // loses the battle, so for it the worst case counts
-    const deathCost = (d: { worst: number; expected: number }, p: number) => {
+    const deathCost = (d: { worst: number; expected: number; n?: number }, p: number) => {
       const r = d.expected / hp;
       const lethal = Math.min(1.5, Math.max(0, r - 0.6));
       let c = this.p.risk * (future * (fin ? 0.3 : 1) * lethal + (w + 0.5) * 4 * Math.min(r, 1) ** 2);
       if (guarded) {
         const rw = d.worst / hp;
-        c += 10000 * Math.min(1, Math.max(0, rw - this.p.guard) * 3) + 100 * Math.min(rw, 1.5) ** 2;
+        c += 10000 * Math.min(1, Math.max(0, rw - this.p.guard) * 3) + 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0);
       }
       return p * c;
     };
@@ -657,7 +835,10 @@ export class GrindPolicy {
         }
       }
     }
-    const plus = (d: { worst: number; expected: number }, extra: number) => ({ worst: d.worst + extra, expected: d.expected + extra });
+    const plus = (d: { worst: number; expected: number; n?: number }, extra: number) => ({ worst: d.worst + extra, expected: d.expected + extra, n: d.n });
+    // the best script gain open to this unit (duel partner, persuasion target, bonus cell): walk to it
+    const gg = !fin ? this.gainGoal(u) : null;
+    const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
     for (const [x, y] of this.reachable(u)) {
       if (!fin && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
@@ -681,6 +862,8 @@ export class GrindPolicy {
       base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
       if (!fin && !guarded && leaderPos) base -= this.p.escort * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 3);
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
+      if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
+      base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       if (fin && this.winAdjacent(u, x, y)) base += 400;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
       if (!fin && this.know.treasure.some((t) => t.x === x && t.y === y && (t.officer === u.officer || t.officer === 0x400) && !this.looted.has(y * b.width + x))) base += 40;
@@ -704,12 +887,19 @@ export class GrindPolicy {
           const lethal = dmg >= od.hp;
           // the leader may always take a kill (except a protected enemy): a kill is its safest exp
           // (the target cannot hit back) and a low-level leader is the usual reason battles are lost
-          if (lethal && !this.killOk(d) && !(guarded && !this.know.protect.has(D.officer))) continue;
+          const kg = lethal ? this.killGain(D.officer) : 0;
+          if (lethal && !kg && !this.killOk(d) && !(guarded && !this.know.protect.has(D.officer))) continue;
           const hit = combatExp(true, o.level, od.level, false, d);
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
           if (fin) v += w * all + (d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
           else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od));
+          v += kg;
+          // leave the leader a safe finishing blow: soften what it can kill from a guarded cell, and do not take it
+          if (feeding && this.leaderKills.has(d)) {
+            if (lethal) v -= this.p.feed * 30;
+            else if (od.hp - dmg <= (this.leaderKills.get(d) ?? 0)) v += this.p.feed * 40;
+          }
           // a dead target does not hit back: its threat leaves this cell
           if (lethal && (this.threat[y * b.width + x] ?? []).includes(d)) {
             const h = this.hitOn(D, u, x, y);
@@ -892,7 +1082,7 @@ export class GrindPolicy {
         }
         if (bad) continue;
         void od;
-        return { value: w * 8 * this.p.tactic, target: d, exp: 8, lethal: false };
+        return { value: w * 8 * this.p.control, target: d, exp: 8, lethal: false };
       }
       return null;
     }
@@ -911,7 +1101,9 @@ export class GrindPolicy {
         }
       }
       if (pick === NONE) return null;
-      return { value: w * bonus * this.p.heal, target: pick, exp: bonus, lethal: false };
+      // the leader first: its troops are the battle
+      const lead = this.know.guarded.has(this.scene.units[pick].officer) ? this.p.safe * 30 * Math.max(0, 1 - worst) : 0;
+      return { value: w * bonus * this.p.heal + lead, target: pick, exp: bonus, lethal: false };
     }
     const list = unitsInRange(b.s, u, ((tc - 30) % 3) | 0x80, x, y, true);
     if (!list.length) return null;

@@ -38,6 +38,8 @@ export interface CampaignBattle {
   purchases?: { officer: number; item: number; price: number }[];
   /** Attempts until the win (1 = first try); the retries a player would make. */
   attempts?: number;
+  /** Script gains (bonus exp, duels, persuasions) and early endings of the played try. */
+  script?: BattleOutcome['script'];
 }
 
 export interface CampaignResult {
@@ -188,6 +190,7 @@ export async function runCampaign(
       ms: b.ms,
       purchases: b.purchases,
       attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
+      script: b.script,
       lossReasons: forced ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
     o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);

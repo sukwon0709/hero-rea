@@ -8,6 +8,8 @@ import { battleNameLines } from '../../engine/battle/map';
 import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
+import { describeGain } from './events';
+import type { GameState } from '../../engine/state';
 import { GrindPolicy, analyseBattle, clampParams, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
@@ -48,6 +50,35 @@ export interface BattleOutcome {
   purchases: Purchase[];
   rngAfter: number;
   ms: number;
+  /** The battle script's gains and early endings, and which gains the bot got. */
+  script?: ScriptNotes;
+}
+
+export interface ScriptNotes {
+  gains: { record: number; kind: string; when: string; gives: string; fired: boolean; automatic: boolean }[];
+  /** Victory bonus given to every unit on the field (0 if none or lost). */
+  bonus: number;
+  /** Korean notes: what ends or turns the battle before the turn limit. */
+  early: string[];
+}
+
+/** What the policy knew and got from the battle script (for the report). */
+export function scriptNotes(policy: GrindPolicy | null, state: GameState, won: boolean, turnLimit: number): ScriptNotes | undefined {
+  if (!policy) return undefined;
+  const k = policy.know;
+  const name = (o: number) => state.officers[o]?.name ?? `#${o}`;
+  const fired = new Set(policy.stats.gainsFired ?? []);
+  const gains = k.gains.map((g) => ({ record: g.record, kind: g.kind, ...describeGain(g, name), fired: fired.has(g.record), automatic: g.automatic }));
+  const early: string[] = [];
+  if (k.deadline !== null && k.deadline < turnLimit) early.push(`${k.deadline}턴 이벤트로 패배(제한 ${turnLimit}턴보다 이름)`);
+  if (k.endsAt !== null && k.endsAt < turnLimit) early.push(`${k.endsAt}턴에 이벤트로 승리 종료(버티기)`);
+  for (const e of k.turns) {
+    if (e.turn !== null && e.removes.some((o) => o < 0x100 && (state.officers[o]?.dyn.flags ?? 0) & 0x80 && ((state.officers[o].dyn.flags & 0x1f) === (state.officers[0].dyn.flags & 0x1f))))
+      early.push(`${e.turn}턴에 아군 ${e.removes.map(name).join('·')} 이탈`);
+    if (e.turn !== null && e.reinforce.length >= 5) early.push(`${e.turn}턴 증원 ${e.reinforce.length}부대${k.soft === e.turn ? ' → 그 전에 마무리' : ''}`);
+    if (e.officer !== null && e.gameOver) early.push(`${name(e.officer)} 격파되면 패배`);
+  }
+  return { gains, bonus: won ? (policy.stats.bonus ?? 0) : 0, early };
 }
 
 export interface OfficerCarry {
@@ -193,6 +224,7 @@ export async function runGrindBattle(
     purchases,
     rngAfter: run.rng.seed,
     ms: performance.now() - t0,
+    script: scriptNotes(policy, ctx.state, won, scene.b.info.turnLimit),
   };
 }
 
