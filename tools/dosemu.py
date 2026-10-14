@@ -27,6 +27,13 @@ class VGA:
     def read(self, off):
         for p in range(4):
             self.latch[p] = self.planes[p][off]
+        if self.gc[5] & 8:  # read mode 1: colour compare against gc[2], planes selected by gc[7]
+            r = 0xff
+            for p in range(4):
+                if (self.gc[7] >> p) & 1:
+                    cb = 0xff if (self.gc[2] >> p) & 1 else 0
+                    r &= ~(self.latch[p] ^ cb) & 0xff
+            return r
         return self.planes[self.gc[4] & 3][off]
 
     def write(self, off, val):

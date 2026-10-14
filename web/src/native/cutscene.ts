@@ -688,6 +688,9 @@ export class Cutscene {
     const rb = ((w + 7) >> 3) * 4;
     const transparent = this.ropMode === 4;
     for (let yy = 0; yy < h; yy++) {
+      // GRPDRV's put leaves rows from 400 down untouched (END.EXE ending 3 puts 96x64 frames at y 340..356:
+      // the emulator running the real put shows nothing below row 400; the clip code itself is not traced)
+      if (y + yy >= 400) break;
       for (let xx = 0; xx < w; xx++) {
         const b = (off + yy * rb + (xx >> 3) * 4) & 0xffff;
         const bit = 7 - (xx & 7);

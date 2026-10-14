@@ -525,6 +525,26 @@ the row conversion.
   maps, town sprites, MARK, fonts with a live EUC-KR text renderer, and the opening/ending pictures.
 - "auto" uses the palette the game uses for each asset; any MAIN or END palette can be forced instead.
 
+## GRPDRV raster modes and END.EXE blitters (native cutscenes)
+
+These rules are what `web/src/native/cutscene.ts` implements.
+* **put (AH=0Fh).** The mode set by AH=08h picks the routine from the table at GRPDRV `0:4047`: 0 copy
+  (`3B40`), 1 XOR (`3CED`), 2 AND (`3C53`), 3 OR (`3D76`), 4 transparent, colour 0 skipped (`3EDC`), 5 NOT
+  (`3DFF`). Rows from 400 down are left untouched (seen on the emulator; the clip code is not traced).
+* **1-bit images (AH=13h, `0:4431`).** VGA write mode 3 with read mode 1. The function select comes from
+  `0:2F66` (`[0, 18h XOR, 08h AND, 10h OR, 0, 0]`): set bits get the foreground and clear bits the background,
+  both combined with the screen. Mode 4 skips clear bits and mode 5 swaps the two colours.
+* **AH=1Ah** waits for vertical retrace (END `0:2B0B`; inferred from GRPDRV `0:3005`).
+* **END `0:0AC7` mask blit.** One source byte per 8 pixels is applied to the four plane bytes: mode 2 ANDs,
+  mode 4 ORs (it also toggles AH, reproduced), mode 0 copies. Clipping is done by `0:024C`. The source skip after
+  each row is (source width in columns − columns)·4. This looks like an original bug and is reproduced.
+* **END `0:0E26`/`0:0DBC`** write planes straight to VRAM. Arguments are in 8-pixel columns and the raster
+  mode is ignored.
+* **Emulator caveat.** The repo's `tools/dosemu.py` VGA model ignores read mode 1 (colour compare), so GRPDRV
+  1-bit images come out wrong there. A scratch copy with the fix (and a GRPDRV high-level shim that honours the
+  mode-1/2/3/5 function select) was used for the END comparisons above. Porting that fix to the repo tool is
+  left to its owner.
+
 ## Open questions
 
 - Palettes 0, 1 and 3 (town, world map, battle) are confirmed only by the code path, not by screenshots.

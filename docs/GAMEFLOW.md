@@ -273,6 +273,35 @@ wrapper's registers. They are not traced in depth. GRAPHICS.md owns the drawing 
 | 24 | 2f37 | – | read key (int 16h AH=10h) + shift state | – |
 | 25 | 2f43 | AL = two colour nibbles | colour pair through table `0x19c1`, then AH=1Bh | – |
 
+## Native stand-ins for OPEN.EXE, END.EXE and the formation screen
+
+The native mode replays these programs from the original files (`web/src/native/opening.ts`, `ending.ts`,
+`formation.ts`, drawing through `cutscene.ts`). Times use the SBOPL2 int 66h F0h/F1h countdown (60.3 Hz,
+SOUND.md); END's waits compare an absolute tick accumulator (`DS:27B2/27B6/27BA`) through `0:A9FA`.
+
+**The ending (END.EXE, DGROUP = image segment 0xB84, from `mov di,0B84h` at entry+0x0D).**
+* The type is int 65h variable 4, written by MAIN's script op ENDING at `0cf5:9826`; the native host keeps
+  the operand and passes it to `runEnding` (`game.ts`).
+* Dispatch after start-up: type 3 runs `0:61BE` (END2GRP.R3, named at `DS:080A`); any other type runs
+  `0:312A` (END1GRP.R3). `0:312A` only tests `type != 0`, so types 1 and 2 play the same scene. The staff roll
+  `0:7F70` (END1GRP) always follows.
+* A click inside `0:312A`/`0:61BE` jumps to their exit path (`fadeTo(0x6B8)`, cls). The roll's exit path is
+  `musicFade(8)`, `fadeTo(0x6B8)`, cls.
+* Staff roll: 20 pages (pointers `DS:240C..2432`). Each line dissolves in 16 steps two frames after the line
+  above; every odd page dissolves to the next picture (56..64) with `fadeStep` towards `DS:602 + (i/2)*2`. It
+  waits for EDMUSIC song 1 to end (`0:987E`, only with BGM on), then plays song 2. The last pictures are entries
+  0x44 and 0, then `fadeTo(0x818)` and a click.
+* Ending 3 checks its timing once (`0:6B75`, via `0:A8CE`/`0:1256`): if the first frame came more than 0.2 s
+  late it switches to 8 rows per step with delay 0x32. The meaning of the test is inferred.
+* Verification: the port's top-level call sequence equals traces of END.EXE run under the scratch emulator
+  (`tools/dosemu.py` with GRPDRV) for all four types: arguments, wait targets and music times (song 2 starts at
+  252 499 ms for types 0..2 and 246 758 ms for type 3; 1602 / 1601 / 1601 / 1667 waits). Frames at every point
+  where the picture is stable for more than 300 ms are pixel-identical to the emulator: 150 of 150 for type 0 and
+  204 of 204 for type 3. `web/test/native-fidelity.test.ts` checks the waits and song times.
+
+**The opening (OPEN.EXE).** 189 of 190 stable frames are pixel-identical to the emulator run; the test checks
+that both songs play and that the run ends on black.
+
 ## Verification
 
 * Title menu, 기능설정 submenu, frame, talk window, 기능 menu (8 items), 스크롤 단위 submenu (소/중/대/극대),

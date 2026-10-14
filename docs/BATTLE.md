@@ -86,8 +86,33 @@ When close-up battle scenes are enabled (option byte `DS:0x7a84 & 0xf0`, tested 
 - HEXBMAP entry `DS:0x4e56[terrain]` (528 bytes) is copied to +0x21f6.
 
 These are HEXBCHP chip layouts. The tables are `CLOSEUP_BACK` and `CLOSEUP_FRONT`, and
-`closeupBackdrop()` returns the two entries. *Not traced:* how the two layouts are arranged on
-screen.
+`closeupBackdrop()` returns the two entries.
+
+**Close-up screen (traced, not yet ported).** Read from the disassembly; the port still draws a simplified
+panel (`effects.ts closeupScene`).
+* `1cb6:6D34(view, scroll)` draws a grid of 26 × 13 cells of 16 px at (16, 32) in 640×400 coordinates. That is
+  the map view area: VRAM offset `0xC80 + y*80` in `0:7002`. Rows 0..4 come from the 230-byte layout (row stride
+  46, starting at column scroll/3, a parallax layer). Rows 5..12 come from the 528-byte layout (stride 66,
+  starting at column scroll). Each byte is a HEXBCHP chip of 128 bytes.
+* `0:7002` copies the chip, then for 4 sprite layers (map segment +0x1680, 0x2A4 bytes each, a 26×13 word grid,
+  0xFFFF = empty) ANDs the cell's mask and ORs its planes. The cells were converted by `0:5C32` into 160 bytes:
+  a mask of NOT(p0|p1|p2|p3), then the planes. Code < 0x190 picks a cell in handle `0x676E` (code·0xA0),
+  otherwise handle `0x6774`. A cell is redrawn only when the byte map at +0x2406 is 0xFF or differs from its chip.
+* `f690` puts a 4×4-cell soldier at (x, y), code (11·side + pose)·16 + k. Sprite row r goes into layer 3−r, one
+  grid row down, so lower soldiers cover the ones behind. `f5d4` does the same with 3×3 effect cells, code
+  0x160 + 9·pose. Pose 0xFF erases the footprint.
+* `f052` loads HEXBCHR into these banks. The soldier entry base is the sum of `DS:4E08[0..class)`, and the pose
+  counts come from `DS:4DF5`. The arrow entry is 0xA9 + `DS:4E1B[class]`, and the tactic entry is
+  0x9A + 6·element. Left-side banks are mirrored, with the cell order fixed by `DS:4F8C`/`DS:4F94`.
+* `f3c6` draws min(5, troops/600 + 1) soldiers per side. Positions come from `DS:4E2E` (left) and `DS:4E38`
+  (right), with the far side pushed 40 cells off screen. Class 5 is drawn as two 4×4 parts 3 cells apart.
+* Sequence (`e91a`, from `ec37`): `edb8` (setup, info panels `f752` at x 0x18 / 0x168, 1 s or a click). Then
+  for an attack: `fa26` (wind-up), `fb2e` (41 frames: the camera scrolls 0→40 and the defender walks in),
+  `fc3a` (strike). Tactics and bombs use `fcba` (21 frames, 2 cells per frame). `febc` follows: hit frames, about
+  one per 100 damage. Every frame waits `DS:4E6A` = 1 countdown tick (`0cf5:5C38`). None of these routines calls
+  the RNG (`0cf5:48C4`).
+
+
 
 ## RAM layout
 
@@ -876,7 +901,7 @@ animation is not.
 
 ## Open questions
 
-- **The HEXBMAP screen arrangement** of the 230- and 528-byte layouts, still open. The port's
+- **The close-up port.** The screen layout is traced (see *HEXBMAP.R3: close-up backdrops*) but not ported yet. The port's
   close-up is a simplified panel (enlarged unit sprites, troop bar, the original result strings).
 - **Status codes 5/6 and modes 5/6** are not produced by any battle routine that was read.
 - **`MAP_EFFECT`** (`2cb4:0420`) is not traced.
