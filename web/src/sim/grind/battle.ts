@@ -119,7 +119,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
     const fi = snap.formationInfo;
     if (fi) {
       const free = fi.records.length;
-      const picks = pickFormation(state, fi.fixed, free, params.strong);
+      const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0);
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
         fi.records.forEach((r, k) => {

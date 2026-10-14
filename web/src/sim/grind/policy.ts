@@ -34,6 +34,7 @@ import {
   combatExp,
   defencePower,
   maxHp,
+  maxMp,
   moraleDrop,
   movePoints,
   physicalDamage,
@@ -46,6 +47,7 @@ import { healUseful } from '../../engine/battle/combat';
 import {
   AiMode,
   CLASS_ATTACK_TYPE,
+  CLASS_COUNT,
   CLASS_RANGE,
   NONE,
   PLAYER_SLOTS,
@@ -101,6 +103,10 @@ export interface GrindParams {
   feed: number;
   /** Leader safety beyond the worst case: cost per enemy that can reach the leader's cell. */
   safe: number;
+  /** 군악대 (class 12): at each turn start every unit next to it gets MP += its level/10+1 (1cb6:7cc8). Pull of tactic users towards it (and of it towards them); also fields the band officers. */
+  band: number;
+  /** The leader fights like the others: pull per cell towards the nearest enemy (the don't-die check stays). */
+  lead: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -139,11 +145,13 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'retreat', min: 0, max: 0.7, def: 0.35 },
   { key: 'approach', min: 0, max: 3, def: 0.3 },
   { key: 'strong', min: 0, max: 8, def: 3, int: true },
-  { key: 'guard', min: 0.3, max: 1.3, def: 0.8 },
+  { key: 'guard', min: 0.3, max: 1.3, def: 1 },
   { key: 'escort', min: 0, max: 3, def: 0.6 },
   { key: 'event', min: 0, max: 3, def: 1 },
   { key: 'feed', min: 0, max: 3, def: 0 },
   { key: 'safe', min: 0, max: 3, def: 0 },
+  { key: 'band', min: 0, max: 3, def: 1 },
+  { key: 'lead', min: 0, max: 4, def: 1.5 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -230,7 +238,7 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
  * Picks for a FORMATION: the officers already placed by the setup, 유비, then `strong` of the
  * highest-level officers (to keep battles winnable), then the lowest levels below 99.
  */
-export function pickFormation(state: GameState, fixed: number[], free: number, strong: number): number[] {
+export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false): number[] {
   const faction = state.officers[0].dyn.flags & 0x1f;
   const pool = state.officers
     .map((o, i) => ({ i, lv: o.dyn.level, ok: (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction && i < 0x100 }))
@@ -240,6 +248,8 @@ export function pickFormation(state: GameState, fixed: number[], free: number, s
     if (picks.length < free && !picks.includes(i)) picks.push(i);
   };
   if (!fixed.includes(0) && pool.some((o) => o.i === 0)) take(0);
+  // 군악대 officers: their neighbours regain MP every turn (heals and support tactics keep flowing)
+  if (band) for (const o of pool) if (state.officers[o.i].dyn.cls === 12) take(o.i);
   const byHigh = [...pool].sort((a, b) => b.lv - a.lv || a.i - b.i);
   for (const o of byHigh.slice(0, strong)) take(o.i);
   const byLow = [...pool].sort((a, b) => (a.lv >= 99 ? 1 : 0) - (b.lv >= 99 ? 1 : 0) || a.lv - b.lv || a.i - b.i);
@@ -427,6 +437,29 @@ export class GrindPolicy {
     return best;
   }
 
+  /**
+   * 군악대 (1cb6:7cc8): at the next turn start every unit next to a class-12 unit (either side) gets
+   * MP += that unit's level/10 + 1, up to its maximum. Worth about 1.3 exp per MP to a tactic user
+   * (a support tactic gives +8 for 4..10 MP). A band unit values the tactic users next to it.
+   */
+  private bandValue(u: Unit, x: number, y: number, w: number): number {
+    const b = this.b;
+    const o = b.officerOf(u);
+    const learned = (oo: typeof o) => b.learn.some((lv, i) => i % CLASS_COUNT === oo.cls && lv <= oo.level);
+    let v = 0;
+    for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
+      if (nx < 0 || ny < 0 || nx >= b.width || ny >= b.height) continue;
+      const s = unitAt(b.s, nx, ny);
+      if (s === NONE || s === u.slot) continue;
+      const N = this.scene.units[s];
+      if (N.status !== Status.Field || N.officer === 0xffff) continue;
+      const on = b.officerOf(N);
+      if (on.cls === 12 && learned(o)) v += Math.min(Math.trunc(on.level / 10) + 1, Math.max(0, maxMp(o) - u.mp)) * 1.3 * w;
+      if (o.cls === 12 && s < PLAYER_SLOTS && learned(on)) v += Math.min(Math.trunc(o.level / 10) + 1, Math.max(0, maxMp(on) - N.mp)) * 1.3 * this.weight(s);
+    }
+    return v * this.p.band;
+  }
+
   /** A defeat event (trigger 12) of this enemy gives something. */
   private killGain(officer: number): number {
     let v = 0;
@@ -582,7 +615,7 @@ export class GrindPolicy {
       .slice(0, PLAYER_SLOTS)
       .filter((u) => u.officer < 0x100 && u.status !== Status.Empty && u.status !== Status.Reserve && ((this.scene.ctx.state.officers[u.officer]?.dyn.flags ?? 1) & 0x1f) === 0);
     const gone = mine.filter((u) => u.status !== Status.Field).length;
-    const leaderHurt = mine.some((u) => this.know.guarded.has(u.officer) && u.status === Status.Field && b.officerOf(u).hp * 10 < maxHp(b.officerOf(u)) * 6);
+    const leaderHurt = mine.some((u) => this.know.guarded.has(u.officer) && u.status === Status.Field && b.officerOf(u).hp * 100 < maxHp(b.officerOf(u)) * (this.p.lead ? 35 : 60));
     // a survival battle (a turn event wins it before any loss by time): never charge, keep grinding
     // safely until the event; the danger costs already pull a hurt leader back
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
@@ -825,10 +858,12 @@ export class GrindPolicy {
     let healGoal: [number, number] | null = null;
     if (!fin && tactics.some((t) => t >= 21 && t <= 35)) {
       let worst = 0.85;
+      // 격려/응원/고무 (21..23, 30..32) restore morale: a unit below 100 morale is a target too
+      const moraleHeals = tactics.some((t) => (t >= 21 && t <= 23) || (t >= 27 && t <= 29) || (t >= 30 && t <= 32));
       for (const a of this.scene.units.slice(0, PLAYER_SLOTS)) {
         if (a.slot === slot || a.status !== Status.Field) continue;
         const oa = b.officerOf(a);
-        const f = oa.hp / Math.max(1, maxHp(oa));
+        const f = Math.min(oa.hp / Math.max(1, maxHp(oa)), moraleHeals ? a.morale / 100 + 0.1 : 9);
         if (f < worst) {
           worst = f;
           healGoal = [a.x, a.y];
@@ -860,8 +895,11 @@ export class GrindPolicy {
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
+      // the leader levels like the others: it walks up to the fight instead of waiting at the back
+      if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       if (!fin && !guarded && leaderPos) base -= this.p.escort * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 3);
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
+      if (this.p.band) base += this.bandValue(u, x, y, w);
       if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       if (fin && this.winAdjacent(u, x, y)) base += 400;

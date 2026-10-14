@@ -47,7 +47,7 @@ export async function realRun(
     files,
     { seed: opts.seed ?? 12345, botAttempts: 3 },
     {
-      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong),
+      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0),
       // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it
       onShop: (g, items) => {
         const got = shopVisit(g.state, items);

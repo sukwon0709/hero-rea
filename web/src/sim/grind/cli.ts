@@ -198,7 +198,7 @@ async function main() {
     // hint defaults, and the bench's reference carry for that battle when there is one (realistic levels)
     const fx = join(OUT, 'cache', 'bench-carry.v8');
     const carries = existsSync(fx) ? (deserialize(readFileSync(fx)) as Record<number, CarryState | null>) : {};
-    const params: GrindParams = { ...defaultParams(), ...(flag('nohints') ? {} : loadHints(snaps).defaults ?? {}), finish: opt('finish', defaultParams().finish) };
+    const params: GrindParams = { ...defaultParams(), ...(flag('nohints') ? {} : loadHints(snaps).defaults ?? {}), finish: opt('finish', defaultParams().finish), ...(JSON.parse(sopt('set', '{}')) as Partial<GrindParams>) };
     const o = await runGrindBattle(files, snap, params, carries[snap.index] ?? null, flag('trace') ? (l) => console.log(l) : undefined);
     if (o.script) console.log(JSON.stringify(o.script));
     console.log(JSON.stringify({ name: snap.name, won: o.won, turns: o.turns, limit: o.turnLimit, finish: o.finishTurn, exp: o.expTotal, ms: Math.round(o.ms), actions: o.actions, kept: o.kept }));
