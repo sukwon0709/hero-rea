@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hero Native</title>
+  <link rel="stylesheet" href="./src/style.css" />
+  <style>
+    body.native { display: flex; flex-direction: column; min-height: 100vh; }
+    body.native #stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; padding: 8px; min-height: 0; }
+    body.native canvas.game { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: none; }
+    body.native #status { color: var(--muted); font-size: 13px; }
+    body.native .tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    body.native .tools select { font: inherit; }
+  </style>
+</head>
+<body class="native">
+  <header>
+    <a href="./">← 삼국지영걸전 Web</a>
+    <span>Native mode: the engine reimplemented in TypeScript, reading your game files</span>
+    <span class="tools">
+      <select id="slot" aria-label="Save slot"><option value="0">1</option><option value="1">2</option><option value="2">3</option><option value="3">4</option><option value="4">5</option></select>
+      <button id="export" type="button">Export save</button>
+      <label class="btn">Import save<input id="import" type="file" accept=".zip,.R3S,.r3s" multiple hidden /></label>
+      <button id="forget" type="button">Forget game files</button>
+    </span>
+  </header>
+  <section id="picker" class="picker" hidden>
+    <h2>Load your copy of the game</h2>
+    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. It is kept only in this browser.</p>
+    <label class="btn">Choose Hero.zip<input type="file" data-kind="zip" accept=".zip" hidden /></label>
+    <label class="btn">Choose GAME folder<input type="file" data-kind="dir" webkitdirectory hidden /></label>
+    <p class="error"></p>
+  </section>
+  <div id="stage" hidden><canvas id="screen" class="game" width="640" height="480"></canvas></div>
+  <script type="module" src="./src/native/main.ts"></script>
+</body>
+</html>

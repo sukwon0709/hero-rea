@@ -1,0 +1,24 @@
+{
+  "name": "hero-web",
+  "version": "1.0.0",
+  "scripts": {
+    "predev": "node scripts/copy-jsdos.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/copy-jsdos.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "js-dos": "^8.5.3"
+  },
+  "private": true,
+  "type": "module"
+}
