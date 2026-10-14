@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hero Classic</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body class="play">
+  <header>
+    <a href="./">← 삼국지영걸전 Web</a>
+    <span>Classic mode: original DOS executables in DOSBox (WebAssembly)</span>
+    <button id="forget" type="button">Forget game files</button>
+  </header>
+  <section id="picker" class="picker" hidden>
+    <h2>Load your copy of the game</h2>
+    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. It is kept only in this browser.</p>
+    <label class="btn">Choose Hero.zip<input type="file" data-kind="zip" accept=".zip" hidden /></label>
+    <label class="btn">Choose GAME folder<input type="file" data-kind="dir" webkitdirectory hidden /></label>
+    <p class="error"></p>
+  </section>
+  <aside id="codehelp" class="codehelp" hidden>
+    <span>Startup code: click the three characters shown in <b>INPUT CODE [ ]</b></span>
+    <span class="keys"></span>
+    <span class="picked"></span> → <b class="code"></b>
+    <button type="button" class="reset">Clear</button>
+  </aside>
+  <div id="dos" hidden></div>
+  <script type="module" src="./src/play.ts"></script>
+</body>
+</html>
