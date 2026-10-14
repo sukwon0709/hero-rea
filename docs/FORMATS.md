@@ -10,7 +10,7 @@ Text in the data files is Korean in EUC-KR (KS C 5601), e.g. `c1 a6 31 c0 e5` = 
 
 | File | Used by | Contents |
 | --- | --- | --- |
-| `HERO.COM` | | Shell: loads `SBOPL2.COM` (OPL2 driver), `GRPDRV.EXE` (graphics driver), `TFDED.COM` (TF-DCE 5.11 Hangul driver), then runs `OPEN.EXE` → `MAIN.EXE` → `END.EXE` |
+| `HERO.COM` | | Shell: loads `SBOPL2.COM` (OPL2 driver), `GRPDRV.EXE` (graphics driver) and `TFDED.COM` (TF-DCE image decoder), then runs `MAIN.EXE` and acts on its exit code: 0 = run `OPEN.EXE` then MAIN again, 1 = run `END.EXE` and quit, 3 = quit, 4 = restart MAIN (see docs/GAMEFLOW.md) |
 | `OPEN.EXE` / `OPGRP.R3` / `OPMUSIC.R3` | opening | Intro graphics (Ls11) and music |
 | `MAIN.EXE` | game | Engine (MS C 7, large model, 6776 relocations, not packed) |
 | `END.EXE` / `END1GRP.R3` / `END2GRP.R3` / `EDMUSIC.R3` | ending | Ending graphics and music |
