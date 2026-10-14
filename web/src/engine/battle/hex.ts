@@ -8,7 +8,7 @@ import {
   CLASS_MOVE_TYPE,
   DIAGONALS,
   DIRS,
-  MOVE_COST,
+  moveCost,
   NONE,
   Officer,
   PLAYER_SLOTS,
@@ -29,7 +29,7 @@ export interface Field {
 
 export type Pos = [number, number];
 
-/** Side of a slot: true for the player side (2cb6:4f26). */
+/** Side of a slot: true for the player side (1cb6:4f26). */
 export function sideOf(slot: number): boolean {
   return slot < PLAYER_SLOTS;
 }
@@ -47,7 +47,7 @@ export function unitAt(f: Field, x: number, y: number): number {
   return f.unitAt[y * f.width + x];
 }
 
-/** Neighbour in direction 0..3 (N, E, S, W) or null when off the map (2cb6:bdfa). */
+/** Neighbour in direction 0..3 (N, E, S, W) or null when off the map (1cb6:bdfa). */
 export function neighbour(f: Field, x: number, y: number, dir: number): Pos | null {
   const nx = x + DIRS[dir][0];
   const ny = y + DIRS[dir][1];
@@ -60,7 +60,7 @@ export function rebuildUnitMap(f: Field): void {
   for (const u of f.units) if (u.status === Status.Field) f.unitAt[u.y * f.width + u.x] = u.slot;
 }
 
-/** True if a 4-neighbour of (x,y) holds a unit of the other side (2cb6:bd0e). */
+/** True if a 4-neighbour of (x,y) holds a unit of the other side (1cb6:bd0e). */
 export function enemyAdjacent(f: Field, playerSide: boolean, x: number, y: number): boolean {
   for (let d = 0; d < 4; d++) {
     const n = neighbour(f, x, y, d);
@@ -75,10 +75,10 @@ export function moveTypeOf(f: Field, u: Unit): number {
   return CLASS_MOVE_TYPE[f.officers[u.officer].cls];
 }
 
-// ---- range shapes (2cb6:c018 / bf34) ----
+// ---- range shapes (1cb6:c018 / bf34) ----
 
 /**
- * Cells of range shape `rangeType` around (x,y), in the exact order 2cb6:c018 visits them
+ * Cells of range shape `rangeType` around (x,y), in the exact order 1cb6:c018 visits them
  * (off-map cells dropped). Bit 0x80 of rangeType means "one larger, and keep the orthogonal
  * neighbours". With `self` the centre comes first.
  *
@@ -116,7 +116,7 @@ export function rangeCells(f: Field, x: number, y: number, rangeType: number, se
 }
 
 /**
- * Units reachable by `unit`'s shape `rangeType` centred on (x,y) (2cb6:c018). With `allies`
+ * Units reachable by `unit`'s shape `rangeType` centred on (x,y) (1cb6:c018). With `allies`
  * (flag bit 0) the centre is included and same-side units are listed, otherwise enemies.
  * `mark` (the c018 flag bit 0x80 clear) receives unit.slot in every visited cell, which is how
  * the AI builds its "can attack from here" map.
@@ -148,7 +148,7 @@ export function pickTarget(list: number[], previous: number): number {
   return list.includes(previous) ? previous : list[list.length - 1];
 }
 
-// ---- movement (2cb6:c9bc) ----
+// ---- movement (1cb6:c9bc) ----
 
 export const BFS_REACH = 2; // stop with 1 when the target cell is reached; also disables ZOC
 export const BFS_EVALUATE = 4; // call `evaluate` on the start cell and on every newly reached cell
@@ -167,12 +167,12 @@ export interface BfsOptions {
 
 /**
  * Flood fill of movement costs from `start` into `grid` (map segment +0x18bc, 0xff = unreached),
- * exactly as 2cb6:c9bc does it, including its quirks:
+ * exactly as 1cb6:c9bc does it, including its quirks:
  *  - passes go over the whole map row-major and expand only cells whose value equals the
  *    current level d; the next d is the smallest value *set during this pass*, so cells set in
  *    an earlier pass with a value below that are never expanded;
  *  - the fill stops after a pass that sets nothing, or when d >= maxCost;
- *  - a cell next to an enemy (ZOC) is not expanded unless it is the target, flags&3, or the
+ *  - a cell next to an enemy (ZOC) is not expanded unless it is the start cell, flags&3, or the
  *    unit is script-controlled; friendly units can be passed, enemy cells cannot be entered.
  * Returns 0xff, 1 (BFS_REACH hit) or the enemy slot found with BFS_FIND_FOE.
  */
@@ -190,7 +190,7 @@ export function floodMove(f: Field, unit: Unit, start: Pos, grid: Uint8Array, o:
     o.onEvaluateStart?.();
     if (!scripted) o.evaluate?.(start[0], start[1]);
   }
-  if (MOVE_COST[mt][terrainAt(f, start[0], start[1])] === 0xff) return NONE;
+  if (moveCost(mt, terrainAt(f, start[0], start[1])) === 0xff) return NONE;
   let d = 0;
   for (;;) {
     if (d >= o.maxCost) return NONE;
@@ -200,14 +200,14 @@ export function floodMove(f: Field, unit: Unit, start: Pos, grid: Uint8Array, o:
       for (let x = 0; x < W; x++) {
         const v = grid[y * W + x];
         if (v !== d) continue;
-        const isTarget = x === tx && y === ty;
-        if (!isTarget && !(o.flags & 3) && !scripted && enemyAdjacent(f, side, x, y)) continue;
+        const isStart = x === start[0] && y === start[1];
+        if (!isStart && !(o.flags & 3) && !scripted && enemyAdjacent(f, side, x, y)) continue;
         for (let dir = 0; dir < 4; dir++) {
           const n = neighbour(f, x, y, dir);
           if (!n) continue;
           const ni = n[1] * W + n[0];
           if (grid[ni] !== NONE) continue;
-          const c = MOVE_COST[mt][f.terrain[ni]];
+          const c = moveCost(mt, f.terrain[ni]);
           if (c === 0xff || c + v > o.maxCost) continue;
           const occ = f.unitAt[ni];
           if (occ !== NONE && sideOf(occ) !== side) continue;
@@ -237,7 +237,7 @@ export interface PathResult {
 }
 
 /**
- * Walks downhill on a flood-fill grid from `from` towards its origin `to` (2cb6:c772): at each
+ * Walks downhill on a flood-fill grid from `from` towards its origin `to` (1cb6:c772): at each
  * step it takes the neighbour with the smallest grid value below the current one (first in
  * N,E,S,W order on ties) whose terrain cost fits the remaining `budget`, skipping cells next to an
  * enemy unless they are `to` or the unit is script-controlled. The step list is then reversed
@@ -263,7 +263,7 @@ export function walkPath(f: Field, unit: Unit, grid: Uint8Array, from: Pos, to: 
       if (enemyAdjacent(f, side, n[0], n[1]) && !isTo && !scripted) continue;
       const g = grid[n[1] * W + n[0]];
       if (g >= bestVal) continue;
-      const c = MOVE_COST[mt][terrainAt(f, n[0], n[1])];
+      const c = moveCost(mt, terrainAt(f, n[0], n[1]));
       if (c > left) continue;
       bestVal = g;
       best = dir;

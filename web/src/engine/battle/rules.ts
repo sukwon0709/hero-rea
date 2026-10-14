@@ -16,7 +16,7 @@ import {
   TACTIC_MP,
   TACTIC_POWER,
   TACTIC_TERRAIN,
-  TERRAIN_DEFENCE,
+  terrainDefence,
   TERRAIN_FOREST,
   WEATHER_TYPE,
   CLASS_COUNT,
@@ -56,8 +56,8 @@ export function maxHp(o: Officer): number {
 }
 
 /**
- * Maximum tactic points (2cb6:9184): intel*(level+10)*5/200, set to 255 only when above 256 —
- * exactly 256 is returned as is and becomes 0 when stored in the u8 MP field (2cb6:a07a).
+ * Maximum tactic points (1cb6:9184): intel*(level+10)*5/200, set to 255 only when above 256 —
+ * exactly 256 is returned as is and becomes 0 when stored in the u8 MP field (1cb6:a07a).
  */
 export function maxMp(o: Officer): number {
   const v = tdiv(u16(o.intel * u16((o.level + 10) * 5)), 200);
@@ -81,17 +81,17 @@ function power(stat: number, base: number, morale: number, level: number, bonus:
   return u16(Math.max(a, 1));
 }
 
-/** Attack strength (0cf5:6aee, called through 2cb6:7c90 with the unit's morale). */
+/** Attack strength (0cf5:6aee, called through 1cb6:7c90 with the unit's morale). */
 export function attackPower(o: Officer, morale: number, items: ItemLookup): number {
   return power(o.force, CLASS_ATTACK[o.cls], morale, o.level, bestItem(o, items, 0));
 }
 
-/** Defence strength (0cf5:6c1c via 2cb6:7cac): same shape with lead, class defence and armour. */
+/** Defence strength (0cf5:6c1c via 1cb6:7cac): same shape with lead, class defence and armour. */
 export function defencePower(o: Officer, morale: number, items: ItemLookup): number {
   return power(o.lead, CLASS_DEFENCE[o.cls], morale, o.level, bestItem(o, items, 5));
 }
 
-/** Movement points (2cb6:7c1e): class move + the best type-4 item value. Script units use 100. */
+/** Movement points (1cb6:7c1e): class move + the best type-4 item value. Script units use 100. */
 export function movePoints(o: Officer, items: ItemLookup): number {
   return (CLASS_MOVE[o.cls] + bestItem(o, items, 4)) & 0xff;
 }
@@ -105,7 +105,7 @@ function beats(a: number, b: number): boolean {
   return (a === 0 && b === 1) || (a === 1 && b === 2) || (a === 2 && b === 0);
 }
 
-// ---- damage (2cb6:df14) ----
+// ---- damage (1cb6:df14) ----
 
 export interface PhysicalHit {
   attack: number; // attacker attackPower
@@ -117,7 +117,7 @@ export interface PhysicalHit {
   counter: boolean; // attack type 7 (counterattack): half damage
 }
 
-/** Physical damage, kind 1 (2cb6:df14). Never random. */
+/** Physical damage, kind 1 (1cb6:df14). Never random. */
 export function physicalDamage(h: PhysicalHit): number {
   const ga = classGroup(h.attackerClass);
   const gd = classGroup(h.defenderClass);
@@ -126,13 +126,13 @@ export function physicalDamage(h: PhysicalHit): number {
   if (beats(gd, ga)) def += tdiv(def, 4);
   const half = tdiv(def, 2);
   let dmg = h.attack > half ? h.attack - half : 0;
-  dmg = tdiv(dmg * (100 - TERRAIN_DEFENCE[h.defenderTerrain]), 100);
+  dmg = tdiv(dmg * (100 - terrainDefence(h.defenderTerrain)), 100);
   if (h.counter) dmg = tdiv(dmg, 2);
   if (dmg <= 0) dmg = 1;
   return Math.min(dmg, h.defenderHp);
 }
 
-/** Tactic strength term used by 2cb6:df14 / a2aa: intel + level*intel/100 (byte multiply). */
+/** Tactic strength term used by 1cb6:df14 / a2aa: intel + level*intel/100 (byte multiply). */
 export function tacticSkill(o: Officer): number {
   return o.intel + tdiv(u16(o.level * o.intel), 100);
 }
@@ -149,7 +149,7 @@ export interface TacticHit {
 }
 
 /**
- * Tactic damage (2cb6:df14, kinds 2 and 3). Draws rand(skill) first, then rand(dmg/50).
+ * Tactic damage (1cb6:df14, kinds 2 and 3). Draws rand(skill) first, then rand(dmg/50).
  * The u16 wrap of a negative base is reproduced.
  */
 export function tacticDamage(rng: Rng, h: TacticHit): number {
@@ -172,7 +172,7 @@ export function tacticDamage(rng: Rng, h: TacticHit): number {
   return Math.min(dmg, h.targetHp);
 }
 
-/** Morale lost by the defender (2cb6:e26c). Killed: all of it. */
+/** Morale lost by the defender (1cb6:e26c). Killed: all of it. */
 export function moraleLoss(kind: number, dmg: number, defenderHp: number, defenderLevel: number, morale: number): number {
   if (dmg === defenderHp) return morale;
   let loss = 0;
@@ -183,7 +183,7 @@ export function moraleLoss(kind: number, dmg: number, defenderHp: number, defend
 }
 
 /**
- * Experience for a hit (2cb6:e2f4); only player-side attackers earn it. Returns hit + kill
+ * Experience for a hit (1cb6:e2f4); only player-side attackers earn it. Returns hit + kill
  * experience. `defenderSlot` 15 is the enemy commander.
  */
 export function combatExp(attackerPlayer: boolean, attackerLevel: number, defenderLevel: number, killed: boolean, defenderSlot: number): number {
@@ -200,7 +200,7 @@ export function combatExp(attackerPlayer: boolean, attackerLevel: number, defend
 }
 
 /**
- * Counterattack decision (2cb6:e42e). Only physical hits on a class whose attack type is 0
+ * Counterattack decision (1cb6:e42e). Only physical hits on a class whose attack type is 0
  * (bandits, martial artists) roll rand(150) < force; the counter is dropped if the incoming
  * attack type is not 0, 2 or 5, or the defender died.
  */
@@ -216,7 +216,7 @@ export function counterattacks(rng: Rng, kind: number, defender: Officer, attack
 }
 
 /**
- * Tactic success roll (2cb6:a2aa, AL=caster DL=target BL=divisor). The divisor is the whole BL
+ * Tactic success roll (1cb6:a2aa, AL=caster DL=target BL=divisor). The divisor is the whole BL
  * byte, so the AI's quiet probe with BL=0x82 divides by 130, not 2.
  */
 export function tacticSucceeds(rng: Rng, caster: Officer, target: Officer, divisor: number): boolean {
@@ -227,12 +227,15 @@ export function tacticSucceeds(rng: Rng, caster: Officer, target: Officer, divis
   return r > pt;
 }
 
-/** True if element `e` may target terrain `t` (2cb6:a392). */
+/**
+ * True if element `e` may target terrain `t` (1cb6:a392). The 0xff filler entries are compared
+ * too, so water and rock tactics accept the stray terrain 255 cell of map 32.
+ */
 export function tacticTerrainOk(element: number, terrain: number): boolean {
-  return TACTIC_TERRAIN[element].some((x) => x !== 0xff && x === terrain);
+  return TACTIC_TERRAIN[element].includes(terrain);
 }
 
-/** Tactics a unit can cast now: learned at or below its level and affordable (2cb6:c9bc with flag 4). */
+/** Tactics a unit can cast now: learned at or below its level and affordable (1cb6:c9bc with flag 4). */
 export function castableTactics(o: Officer, mp: number, learn: Uint8Array): number[] {
   const out: number[] = [];
   for (let t = 0; t < TACTIC_COUNT; t++) {
@@ -248,7 +251,7 @@ export function tacticsLearnedAt(cls: number, level: number, learn: Uint8Array):
   return out;
 }
 
-/** Heal kind of tactic t (21..35): 1 troops, 2 morale, 3 both (2cb6:b2d6 / baf6). */
+/** Heal kind of tactic t (21..35): 1 troops, 2 morale, 3 both (1cb6:b2d6 / baf6). */
 export function healKind(t: number): number {
   if (t >= 30) return t > 32 ? 1 : 2;
   return t >= 27 ? 3 : t >= 24 ? 1 : 2;
@@ -260,7 +263,7 @@ export interface HealResult {
 }
 
 /**
- * Heal amounts (2cb6:b8c0): troops (power+1)*600 [+ level*intel/20 with a caster] + rand(x/10),
+ * Heal amounts (1cb6:b8c0): troops (power+1)*600 [+ level*intel/20 with a caster] + rand(x/10),
  * capped at the missing troops; morale (power+3)*10 [+ level/10] + rand(x/10), capped at 100-morale.
  * `caster` is null for items. Troops are drawn first.
  */
@@ -288,13 +291,13 @@ export function healAmounts(
   return res;
 }
 
-/** Morale drop of tactics 18..20 on success (2cb6:b2d6): level/10 + (power+2)*10 - targetLevel/10, capped. */
+/** Morale drop of tactics 18..20 on success (1cb6:b2d6): level/10 + (power+2)*10 - targetLevel/10, capped. */
 export function moraleDrop(caster: Officer, target: Officer, power: number, targetMorale: number): number {
   const v = u16(tdiv(caster.level, 10) + (power + 2) * 10 - tdiv(target.level, 10));
   return Math.min(v, targetMorale);
 }
 
-// ---- morale and confusion (2cb6:898c, 8130) ----
+// ---- morale and confusion (1cb6:898c, 8130) ----
 
 export interface MoraleUnit {
   morale: number;
@@ -303,7 +306,7 @@ export interface MoraleUnit {
 }
 
 /**
- * Sets morale like 2cb6:898c: clamps to 0..100; on a drop to below 30 (a negative request does
+ * Sets morale like 1cb6:898c: clamps to 0..100; on a drop to below 30 (a negative request does
  * not count, the compare is unsigned) rand(5) < 3 confuses; a rise (or a set to 100 that does not
  * lower it) tries to cure confusion with rand(100) < (lead+morale)/3 — only if confused and on
  * the field. Returns 'confused', 'cured' or null.
@@ -322,7 +325,7 @@ export function setMorale(rng: Rng, u: MoraleUnit, lead: number, value: number):
   return null;
 }
 
-/** Confusion recovery roll (2cb6:8130). */
+/** Confusion recovery roll (1cb6:8130). */
 export function tryCure(rng: Rng, u: MoraleUnit, lead: number): boolean {
   const chance = tdiv(lead + u.morale, 3);
   if (!(u.flags & 0x02) || u.status !== 2) return false;
@@ -333,12 +336,12 @@ export function tryCure(rng: Rng, u: MoraleUnit, lead: number): boolean {
   return false;
 }
 
-/** A unit leaves the field when it has no troops, or is confused with no morale (2cb6:a0d0). */
+/** A unit leaves the field when it has no troops, or is confused with no morale (1cb6:a0d0). */
 export function mustLeave(o: Officer, u: MoraleUnit): boolean {
   return o.hp === 0 || ((u.flags & 0x02) !== 0 && u.morale === 0);
 }
 
-// ---- start-of-turn recovery (2cb6:7cc8) ----
+// ---- start-of-turn recovery (1cb6:7cc8) ----
 
 export interface RegenResult {
   hp: number; // new troops
@@ -347,7 +350,7 @@ export interface RegenResult {
 }
 
 /**
- * Start-of-turn recovery (2cb6:7cc8). The two draws, rand(11) then rand(5), happen for every
+ * Start-of-turn recovery (1cb6:7cc8). The two draws, rand(11) then rand(5), happen for every
  * unit passed in, even ones not on the field. Village/fortress (8, 13) heal troops and morale,
  * barracks (14) troops; items 0x38 troops, 0x37 morale, 8 both.
  */
@@ -372,7 +375,7 @@ export function regenerate(rng: Rng, o: Officer, morale: number, onField: boolea
 }
 
 /**
- * Weather step at the start of each turn (2cb6:4cac): move one step toward rand(6); a result of
+ * Weather step at the start of each turn (1cb6:4cac): move one step toward rand(6); a result of
  * 0 is stored as 5 and a result of 5 as 0.
  */
 export function nextWeather(rng: Rng, w: number): number {
@@ -387,8 +390,8 @@ export function nextWeather(rng: Rng, w: number): number {
  * ((id & 0xf1ff) in 0x100..0x15f) and officers at level 99+ keep everything. The level setter
  * (0cf5:7580) does not clamp, so several levels at once can pass 99.
  */
-export function gainExp(o: Officer & { id: number }, total: number): { levels: number } {
-  const k = o.id & 0xf1ff;
+export function gainExp(o: Officer, id: number, total: number): { levels: number } {
+  const k = id & 0xf1ff;
   if ((k >= 0x100 && k <= 0x15f) || o.level >= 99) return { levels: 0 };
   let levels = 0;
   if (total >= 100) {

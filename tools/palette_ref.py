@@ -10,7 +10,9 @@ import json, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dosemu import Machine
 
-SEG = 0x1000   # GRPDRV image (MZ header 0x200 bytes stripped)
+SEG = 0x1000   # GRPDRV image (MZ header stripped). MAIN reaches the handlers with far calls through the
+               # table it copies at 0000:CA67, and they end in RETF, so they are called directly here:
+               # AH=15h set palette = GRPDRV 0:28F2, AH=16h fade = 0:2924.
 BUF = 0x3000
 
 
@@ -20,9 +22,8 @@ def main():
     hdr = struct.unpack('<H', exe[8:10])[0] * 16
     m = Machine()
     m.load(SEG, exe[hdr:])
-    m.set_vector(0x18, SEG, 0x2163)
     m.load(BUF, frm)
-    m.call_int(0x18, {'ax': 0x1500, 'cx': 16, 'ds': BUF, 'si': 0, 'es': BUF, 'bx': 0})
+    m.call_far(SEG, 0x28F2, {'ax': 0x1500, 'cx': 16, 'ds': BUF, 'si': 0, 'es': BUF, 'bx': 0})
     frames = []
     orig = m.vga.out
 
@@ -32,7 +33,7 @@ def main():
             frames.append([list(c) for c in m.vga.dac[:16]])
     m.vga.out = out
     m.load(BUF, to)
-    m.call_int(0x18, {'ax': 0x1600, 'cx': (steps << 8) | 16, 'dx': 1, 'es': BUF, 'bx': 0})
+    m.call_far(SEG, 0x2924, {'ax': 0x1600, 'cx': (steps << 8) | 16, 'dx': 1, 'es': BUF, 'bx': 0})
     print(json.dumps({'steps': frames}))
 
 

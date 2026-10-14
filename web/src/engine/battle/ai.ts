@@ -1,5 +1,5 @@
 // Computer-controlled units (enemy phase, and player units left on automatic).
-// A literal port of 2cb6:ce50 and its helpers — see docs/BATTLE.md, "AI", for the pseudocode
+// A literal port of 1cb6:ce50 and its helpers — see docs/BATTLE.md, "AI", for the pseudocode
 // with addresses. Evaluation draws random numbers (tactic/heal estimates, confusion probes), so
 // the draw order here matters for staying in step with the original.
 
@@ -18,6 +18,7 @@ import {
   walkPath,
   rebuildUnitMap,
 } from './hex';
+import { CastResult, CombatState, HitResult, attack, castTactic } from './combat';
 import {
   ItemLookup,
   Rng,
@@ -38,7 +39,7 @@ import {
   RAIN,
   Status,
   TACTIC_POWER,
-  TERRAIN_DEFENCE,
+  terrainDefence,
   TERRAIN_FOREST,
   UNIT_SLOTS,
   Unit,
@@ -96,20 +97,20 @@ function same(a: Pos | null, x: number, y: number): boolean {
   return a !== null && a[0] === x && a[1] === y;
 }
 
-/** Recovery terrain test (2cb6:bcf4). */
+/** Recovery terrain test (1cb6:bcf4). */
 export function onRecoveryTerrain(s: Field, x: number, y: number): boolean {
   const t = terrainAt(s, x, y);
   return t === 8 || t === 13 || t === 14;
 }
 
-/** "Weak" unit: troops <= 2*(max/5) or morale < 40 (2cb6:c280). */
+/** "Weak" unit: troops <= 2*(max/5) or morale < 40 (1cb6:c280). */
 export function isWeak(s: Field, u: Unit): boolean {
   const o = s.officers[u.officer];
   if (!o) return false;
   return tdiv(maxHp(o), 5) * 2 >= o.hp || u.morale < 40;
 }
 
-/** Per-unit AI setup (2cb6:c2be): enemy reach map, influence map, scratch reset. */
+/** Per-unit AI setup (1cb6:c2be): enemy reach map, influence map, scratch reset. */
 export function aiPrepare(s: AiState, u: Unit): void {
   const rt = CLASS_RANGE[off(s, u).cls];
   s.foeMap.fill(NONE);
@@ -130,11 +131,11 @@ export function aiPrepare(s: AiState, u: Unit): void {
   s.ai.tactic = NONE;
 }
 
-/** Influence flood (2cb6:c4f2): add `v` to an empty passable cell still at 0, recurse with v-20. */
+/** Influence flood (1cb6:c4f2): add `v` to an empty passable cell still at 0, recurse with v-20. */
 export function spreadInfluence(s: AiState, v: number, x: number, y: number): void {
   if (v <= 0) return;
   const i = y * s.width + x;
-  if (TERRAIN_DEFENCE[s.terrain[i]] !== 0xff && s.influence[i] === 0 && s.unitAt[i] === NONE)
+  if (terrainDefence(s.terrain[i]) !== 0xff && s.influence[i] === 0 && s.unitAt[i] === NONE)
     s.influence[i] = (s.influence[i] + v) & 0xff;
   for (let d = 0; d < 4; d++) {
     const nx = x + [0, 1, 0, -1][d];
@@ -143,7 +144,7 @@ export function spreadInfluence(s: AiState, v: number, x: number, y: number): vo
   }
 }
 
-/** Physical attack score of `u` against slot `t` (2cb6:c616), u16 arithmetic. */
+/** Physical attack score of `u` against slot `t` (1cb6:c616), u16 arithmetic. */
 export function attackScore(s: AiState, u: Unit, t: number): number {
   if (t === NONE) return 0;
   const tu = s.units[t];
@@ -157,13 +158,13 @@ export function attackScore(s: AiState, u: Unit, t: number): number {
   if ((ga === 0 && gt === 1) || (ga === 1 && gt === 2) || (ga === 2 && gt === 0)) def = u16(def - (def >> 2));
   if ((gt === 0 && ga === 1) || (gt === 1 && ga === 2) || (gt === 2 && ga === 0)) def = u16(def + (def >> 2));
   let dmg = 1;
-  if (def >> 1 < atk) dmg = tdiv((atk - (def >> 1)) * (100 - TERRAIN_DEFENCE[terrainAt(s, tu.x, tu.y)]), 100);
+  if (def >> 1 < atk) dmg = tdiv((atk - (def >> 1)) * (100 - terrainDefence(terrainAt(s, tu.x, tu.y))), 100);
   let bonus = tdiv(ou.hp, 6);
   if (u.target === t) bonus += 30;
   return u16(bonus + dmg);
 }
 
-/** Best physical target from (x,y) (2cb6:c58e). Sets ai.physPick; returns the byte score. */
+/** Best physical target from (x,y) (1cb6:c58e). Sets ai.physPick; returns the byte score. */
 export function bestAttack(s: AiState, u: Unit, x: number, y: number): number {
   const rt = CLASS_RANGE[off(s, u).cls];
   let best = 0;
@@ -180,7 +181,7 @@ export function bestAttack(s: AiState, u: Unit, x: number, y: number): number {
   return best;
 }
 
-/** Heal estimate (2cb6:d528); p = (power << 4) | kind (1 troops, 2 morale, 3 both). */
+/** Heal estimate (1cb6:d528); p = (power << 4) | kind (1 troops, 2 morale, 3 both). */
 export function healScore(s: AiState, target: Unit, casterSlot: number, p: number): number {
   const ot = off(s, target);
   const oc = off(s, s.units[casterSlot]);
@@ -206,7 +207,7 @@ export function healScore(s: AiState, target: Unit, casterSlot: number, p: numbe
   return u16(m + hp);
 }
 
-/** Estimated value of tactic t on slot `ts` (2cb6:d2c4). */
+/** Estimated value of tactic t on slot `ts` (1cb6:d2c4). */
 export function tacticScore(s: AiState, u: Unit, t: number, ts: number): number {
   const oc = off(s, u);
   const tu = s.units[ts];
@@ -245,7 +246,7 @@ export function tacticScore(s: AiState, u: Unit, t: number, ts: number): number 
   return 0;
 }
 
-/** Best tactic from (x,y) (2cb6:d0fa). Sets ai.tacticPick/tacticTarget; returns the byte score. */
+/** Best tactic from (x,y) (1cb6:d0fa). Sets ai.tacticPick/tacticTarget; returns the byte score. */
 export function bestTactic(s: AiState, u: Unit, x: number, y: number): number {
   let best = 0;
   s.ai.tacticTarget = NONE;
@@ -278,7 +279,7 @@ export function bestTactic(s: AiState, u: Unit, x: number, y: number): number {
   return best;
 }
 
-/** Cell evaluation (2cb6:d6f8), called by the flood fill for every reachable cell. */
+/** Cell evaluation (1cb6:d6f8), called by the flood fill for every reachable cell. */
 export function evaluateCell(s: AiState, u: Unit, x: number, y: number): void {
   const i = y * s.width + x;
   const own = x === u.x && y === u.y;
@@ -291,7 +292,7 @@ export function evaluateCell(s: AiState, u: Unit, x: number, y: number): void {
       tac = bestTactic(s, u, x, y);
       s.influence[i] = (s.influence[i] + Math.max(phys, tac)) & 0xff;
     }
-    s.influence[i] += Math.min(tdiv(TERRAIN_DEFENCE[s.terrain[i]], 5), 255 - s.influence[i]);
+    s.influence[i] += Math.min(tdiv(terrainDefence(s.terrain[i]), 5), 255 - s.influence[i]);
     if (own) s.influence[i] += Math.min(1, 255 - s.influence[i]);
   }
   if (s.influence[i] > s.ai.score) {
@@ -307,7 +308,7 @@ export function evaluateCell(s: AiState, u: Unit, x: number, y: number): void {
   }
 }
 
-/** 2cb6:c9bc called with flag 4: evaluate every cell reachable from the unit's position. */
+/** 1cb6:c9bc called with flag 4: evaluate every cell reachable from the unit's position. */
 export function evaluateReachable(s: AiState, u: Unit, maxCost: number): void {
   floodMove(s, u, [u.x, u.y], s.grid, {
     flags: BFS_EVALUATE,
@@ -327,13 +328,13 @@ function findFoe(s: AiState, u: Unit, maxCost: number): number {
   return floodMove(s, u, [u.x, u.y], s.grid, { flags: BFS_FIND_FOE, maxCost, foeMap: s.foeMap });
 }
 
-/** Walks toward `goal` as far as `mp` allows and marks the stopping cell (2cb6:c772 mode 1). */
+/** Walks toward `goal` as far as `mp` allows and marks the stopping cell (1cb6:c772 mode 1). */
 function approach(s: AiState, u: Unit, mp: number, goal: Pos): void {
   const r = walkPath(s, u, s.grid, [u.x, u.y], goal, mp);
   if (!r.reached) spreadInfluence(s, unitAt(s, r.stop[0], r.stop[1]) !== NONE ? 50 : 30, r.stop[0], r.stop[1]);
 }
 
-/** "Attack nearest" planning (2cb6:dc00). */
+/** "Attack nearest" planning (1cb6:dc00). */
 export function planAttackNearest(s: AiState, u: Unit, mp: number): void {
   if (findFoe(s, u, mp) !== NONE) {
     evaluateReachable(s, u, mp);
@@ -361,7 +362,7 @@ export interface Plan {
 }
 
 /**
- * Decides what unit `u` does this phase (the planning part of 2cb6:ce50). Updates the unit's
+ * Decides what unit `u` does this phase (the planning part of 1cb6:ce50). Updates the unit's
  * target/mode where the original does. Returns null when the unit does nothing.
  */
 export function planUnit(s: AiState, u: Unit): Plan | null {
@@ -374,7 +375,7 @@ export function planUnit(s: AiState, u: Unit): Plan | null {
   if (u.status !== Status.Field || u.flags & UnitFlag.Acted) return null;
   if (u.flags & UnitFlag.Confused) return null;
   aiPrepare(s, u);
-  // (The "follow the commander" branch at 2cb6:cef5 needs DS:0xe525 bit 0, which is only ever cleared: dead code.)
+  // (The "follow the commander" branch at 1cb6:cef5 needs DS:0xe525 bit 0, which is only ever cleared: dead code.)
   switch (u.mode) {
     case AiMode.MoveTo:
     case AiMode.MoveNoAttack: {
@@ -405,18 +406,7 @@ export function planUnit(s: AiState, u: Unit): Plan | null {
       planAttackNearest(s, u, mp);
       break;
     case AiMode.Hold:
-      floodMove(s, u, [u.x, u.y], s.grid, {
-        flags: BFS_EVALUATE,
-        maxCost: 0,
-        onEvaluateStart: () => {
-          s.ai.score = 0;
-          s.ai.target = NONE;
-          s.ai.dest = null;
-          s.ai.tactic = NONE;
-          s.castable = castableTactics(off(s, u), u.mp, s.learn);
-        },
-        evaluate: (x, y) => evaluateCell(s, u, x, y),
-      });
+      evaluateReachable(s, u, 0); // evaluates only its own square
       s.ai.dest = [u.x, u.y];
       break;
     case AiMode.Wait:
@@ -432,7 +422,7 @@ export function planUnit(s: AiState, u: Unit): Plan | null {
   return { route, dest, target: s.ai.target, tactic: s.ai.tactic };
 }
 
-/** Moves the unit to plan.dest (2cb6:c3f4) and applies the arrival rule of 2cb6:8a6e. */
+/** Moves the unit to plan.dest (1cb6:c3f4) and applies the arrival rule of 1cb6:8a6e. */
 export function applyMove(s: AiState, u: Unit, plan: Plan): void {
   if (plan.dest && u.status === Status.Field && !same(plan.dest, u.x, u.y) && plan.route.length > 0) {
     s.unitAt[u.y * s.width + u.x] = NONE;
@@ -446,7 +436,7 @@ export function applyMove(s: AiState, u: Unit, plan: Plan): void {
 }
 
 /**
- * Target of the AI's physical attack after moving (2cb6:cd4a): the previous choice if still in
+ * Target of the AI's physical attack after moving (1cb6:cd4a): the previous choice if still in
  * range, else the last enemy listed; 0xff = no attack.
  */
 export function attackTargetAfterMove(s: AiState, u: Unit): number {
@@ -456,7 +446,7 @@ export function attackTargetAfterMove(s: AiState, u: Unit): number {
 }
 
 /**
- * Action order for one side (2cb6:3e12): units on village/fortress/barracks first, then weak
+ * Action order for one side (1cb6:3e12): units on village/fortress/barracks first, then weak
  * units, then the rest, each group in slot order. Returns slots in acting order.
  */
 export function actionOrder(s: Field, playerSide: boolean): number[] {
@@ -481,3 +471,22 @@ export function actionOrder(s: Field, playerSide: boolean): number[] {
 }
 
 export { rebuildUnitMap };
+
+/**
+ * One computer-controlled unit's whole action (1cb6:ce50): plan, move, then attack (cd4a) or cast
+ * (b2d6). Script events after the action (1cb6:8ad2) and the victory check (4abc) are the caller's.
+ */
+export function aiTakeTurn(s: AiState & CombatState, u: Unit): { plan: Plan; hit: HitResult | null; cast: CastResult | null } | null {
+  const plan = planUnit(s, u);
+  if (!plan) return null;
+  applyMove(s, u, plan);
+  let hit: HitResult | null = null;
+  let cast: CastResult | null = null;
+  if (!(u.flags & UnitFlag.Scripted) && u.mode !== AiMode.MoveNoAttack) {
+    if (s.ai.tactic === NONE) {
+      const t = attackTargetAfterMove(s, u);
+      if (t !== NONE) hit = attack(s, u.slot, t);
+    } else cast = castTactic(s, u.slot, s.ai.tactic, s.ai.target);
+  }
+  return { plan, hit, cast };
+}
