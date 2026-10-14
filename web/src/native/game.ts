@@ -28,6 +28,9 @@ import { CURSOR, Video } from './video';
 import { GameUi, type Text } from './ui';
 import { ATTR, Field, VIEW, type Actor } from './field';
 import { SaveStore } from './saves';
+import { runOpening } from './opening';
+import { runFormation } from './formation';
+import { runEnding } from './ending';
 
 /** Thrown by the host to suspend the running event (MAP: status 1, resume at PC; 0cf5:97d5). */
 class Suspend extends Error {}
@@ -166,6 +169,12 @@ export class Game implements GameContext {
 
   /** Runs the event selected by a trigger; a MAP command suspends it ('suspended'). */
   async dispatch(trigger: Trigger): Promise<EventResult> {
+    // 0cf5:a88c refreshes ctx+8 / +0xa from the location on every main-loop pass (86f0); a field
+    // event's BATTLE_END only writes ctx+0xa, which must not outlive the pass. In battle mode the
+    // value BATTLE_END leaves is the destination after the battle, so it is kept there.
+    if (this.mode !== 3 && !(this.state.status & STATUS.LOCATION_CHANGED) && this.field.kind !== 'none') {
+      this.script.map = (this.mode << 12) | this.state.location.map;
+    }
     try {
       const r = await this.vm.dispatch(trigger);
       if (r === 'gameOver') this.state.status |= STATUS.GAME_OVER;
@@ -283,7 +292,8 @@ export class Game implements GameContext {
       gameOver: async () => {
         this.state.status |= STATUS.GAME_OVER;
       },
-      ending: async () => {
+      ending: async (value) => {
+        this.endingType = value; // 0cf5:9826: int 65h variable 4, which END.EXE reads as its ending type
         this.state.status |= STATUS.ENDING;
       },
       stageChanged: (chapter) => {
@@ -427,6 +437,13 @@ export class Game implements GameContext {
 
   /** MAP: the location change of 0cf5:c86c, then the event is suspended until the new map is up. */
   private setMap(map: number): never {
+    this.changeLocation(map);
+    this.script.status = 1;
+    throw new Suspend();
+  }
+
+  /** 0cf5:c86c: the location change to the script's destination key (ctx+0xa). */
+  private changeLocation(map: number) {
     const loc = this.state.location;
     this.state.prevLocation = { ...loc };
     const kind = (map >> 12) & 0xf;
@@ -444,8 +461,6 @@ export class Game implements GameContext {
       loc.y = 0x0d;
     }
     this.state.status |= STATUS.LOCATION_CHANGED;
-    this.script.status = 1;
-    throw new Suspend();
   }
 
   // ------------------------------------------------------------------ locations
@@ -480,6 +495,12 @@ export class Game implements GameContext {
       for (const c of s.chars) if (c.id !== 0xffff && c.x !== 0xff) this.field.place(c.id, c.x, c.y, (c.dir >> 1) & 3);
       if (s.music) this.music(s.music);
     } else s.replaceChars = 1;
+    if (mode === 1 && this.loadedGame) {
+      // 1cf5:d4d8: a game loaded on the world map brings back the MSAVE actor table (flags +0xf & 0x84),
+      // stored in 16-pixel units; the event characters are not used there
+      for (const a of this.state.actors)
+        if ((a.unitId & 0xfe00) === 0x200 && a.rest[5] & 0x84) this.field.place(a.unitId & 0x1ff, a.x >> 1, a.y >> 1, 2);
+    }
     if (byPlayer || loc.entered) {
       if (mode === 0 || mode === 2) {
         const type = this.field.buildingType(loc.map);
@@ -581,7 +602,12 @@ export class Game implements GameContext {
       if (r === 0) return 'new';
       if (r === 1) return 'load';
       if (r === 2) await this.optionsMenu(0x120, 0xa0 + LAYOUT_Y);
-      if (r === 3) await this.ui.captionBox('오프닝은 Classic 모드에서 볼 수 있습니다.', 0);
+      if (r === 3) {
+        // 0cf5:c012: exit 0 -> HERO.COM runs OPEN.EXE, then MAIN again from its title (native/opening.ts)
+        const sound = this.state.progress.flags & OPT.BGM ? this.sound : null;
+        await runOpening({ files: this.assets.files, font: this.assets.font, screen: this.screen, video: this.video, input: this.input, sound });
+        return this.titleMenu();
+      }
     }
   }
 
@@ -631,10 +657,12 @@ export class Game implements GameContext {
     this.territoryShown = true;
     this.state = loadGame(data.msave, data.esave, this.assets.bak, (s) => this.assets.section(s), this.assets.tables);
     this.vm.state = data.esaveBytes ? readEventSave(data.esaveBytes) : newScriptState();
-    // The characters come back from the event context (0cf5:8708); the MSAVE actor table is not used.
+    // The characters come back from the event context (0cf5:8708); on the world map from the MSAVE actor
+    // table instead (1cf5:d4d8, see enterLocation).
     this.script.replaceChars = 1;
     this.loadedGame = true;
-    this.inputLocked = this.script.savedInput !== 0;
+    // ctx+0x1bd is 1 while input is enabled (0cf5:8f47; ESAVE0 saved in the idle camp holds 1)
+    this.inputLocked = this.script.savedInput === 0;
     this.field.kind = 'none';
     this.screen.clear(0);
     this.video.black();
@@ -710,10 +738,15 @@ export class Game implements GameContext {
     await this.ui.waitClick();
   }
 
+  private endingType = 0;
+
   private async endingScreen() {
     this.sound?.fadeOut(8);
     await this.video.fadeOut(16);
     this.screen.clear(0);
+    // exit code 1: HERO.COM runs END.EXE (native/ending.ts)
+    const sound = this.state.progress.flags & OPT.BGM ? this.sound : null;
+    if (await runEnding({ files: this.assets.files, font: this.assets.font, screen: this.screen, video: this.video, input: this.input, sound }, this.endingType)) return;
     this.video.setPalette(this.assets.palettes[0]);
     this.ui.captionCentre = 0x140;
     await this.ui.captionBox('엔딩 (END.EXE)은 아직 지원되지 않습니다.', 0);
@@ -979,10 +1012,16 @@ export class Game implements GameContext {
     if (t < 0) return false;
     this.state.location.key = t;
     this.script.area = t;
-    const r = await this.dispatch({ type: 'location', spot: 0, town: t });
+    // 1cb6:09e8: territory = the town, then trigger 2 with spot 0xff (trigger 5 records match the town)
+    this.state.progress.territory = t;
+    this.refreshStatus();
+    const r = await this.dispatch({ type: 'location', spot: 0xff, town: t });
     if (r !== 'none' || this.state.status & STATUS.LOCATION_CHANGED) return true;
     const town = this.state.towns[t];
-    if (town && town.b22 === 3) {
+    // town type (static +0x16) 3 = walled town "<name>성내", 4 = small place (고성, 융중, ...): asked, then entered
+    if (town && (town.b22 === 3 || town.b22 === 4)) {
+      const q = `${town.name}${town.b22 === 3 ? dec.decode(this.assets.dsString(this.assets.dsWord(0x371e))) : ''}에 들어가겠습니까?`;
+      if (!(await this.ui.captionBox(q, 2))) return true;
       const loc = this.state.location;
       this.state.prevLocation = { ...loc };
       loc.mode = loc.mode & 0xf0;
@@ -1153,29 +1192,18 @@ export class Game implements GameContext {
    * formation screen (2cb4:274c..2af2) is not reproduced: this is a menu of the roster instead.
    */
   private async formationScreen() {
+    // native/formation.ts runs the screen (2cb4:2be2); 1aca writes the picks into the free slots
     const units = this.script.units;
-    const player = units.filter((u) => u.officer !== 0xffff && !(u.flags & 1));
-    const free = player.filter((u) => u.officer === 0x400);
-    if (!free.length) return;
-    const fixed = new Set(player.filter((u) => u.officer < 0x400).map((u) => u.officer));
-    const pool = rosterOfficers(this.state).filter((o) => !fixed.has(o.index));
-    const chosen: number[] = [];
-    while (chosen.length < free.length && chosen.length < pool.length) {
-      const left = pool.filter((o) => !chosen.includes(o.index));
-      const r = await this.ui.menu(
-        left.map((o) => o.name),
-        { x: 0x1a0, y: 0x20 + LAYOUT_Y },
-      );
-      if (r < 0) {
-        if (chosen.length) break;
-        continue;
-      }
-      chosen.push(left[r].index);
-    }
+    const auto = (this as { autoPlay?: boolean }).autoPlay === true;
+    const r = await runFormation({ assets: this.assets, draw: this.draw, ui: this.ui, video: this.video, input: this.input, state: this.state, units, sfx: (n) => this.sfx(n), auto });
+    const list = r.chosen.filter((o) => o >= 0);
     if (this.script.hexFlag & 1) {
       // the formation path of the battle setup (2cb6:4e60) deploys this list in slot order (BattleExtras.formation)
-      this.formation = [...player.filter((u) => u.officer < 0x400).map((u) => u.officer), ...chosen];
-    } else chosen.forEach((o, i) => (free[i].officer = o));
+      this.formation = list;
+      return;
+    }
+    const picks = list.slice(r.fixed);
+    for (const u of units.slice(0, 0x2d)) if (u.officer !== 0xffff && u.officer >= 0x400) u.officer = picks.shift() ?? 0xffff;
   }
 
   // ------------------------------------------------------------------ shop (OP31)
@@ -1307,6 +1335,7 @@ export class Game implements GameContext {
   private async battleMode() {
     const map = this.state.location.map;
     const mod = await this.loadBattle();
+    let won = false;
     this.closePicture();
     this.mapShown = false;
     this.field.kind = 'none';
@@ -1315,8 +1344,10 @@ export class Game implements GameContext {
     if (mod?.runBattle) {
       try {
         const r = await mod.runBattle(this, map);
+        won = r === 'won';
         this.battleHost = null;
-        this.formation = undefined;
+        // the sortie list outlives the battle: a chained battle set up with the formation flag and no
+        // FORMATION of its own deploys the same officers (진창 -> 장안, 업1 -> 업2 -> 업3)
         if (r === 'lost' && !(this.state.status & 0x6c)) this.state.status |= STATUS.GAME_OVER;
         if (r === 'ended' && !(this.state.status & 0x6c)) this.state.status |= STATUS.QUIT;
       } catch (e) {
@@ -1331,7 +1362,11 @@ export class Game implements GameContext {
       await this.ui.captionBox('전투 모드는 아직 준비되지 않았습니다.\n승리한 것으로 하고 진행합니다.', 1);
       await this.skipBattle();
     }
-    // the battle ended without a destination: back to the previous location
+    // a battle won without a MAP command: the main loop goes on to c86c with the destination the
+    // script left in ctx+0xa (BATTLE_END w; e.g. 업 chains two battles: SNR4 stage 2 block 3 sets up
+    // the second one and ends the first with BATTLE_END 0x3038)
+    if (this.mode === 3 && won && !(this.state.status & (STATUS.LOCATION_CHANGED | 0x6c))) this.changeLocation(this.script.map);
+    // otherwise (no battle module, an error): back to the previous location
     if (this.mode === 3 && !(this.state.status & (STATUS.LOCATION_CHANGED | 0x6c))) {
       const prev = this.state.prevLocation;
       this.state.location = { ...prev };

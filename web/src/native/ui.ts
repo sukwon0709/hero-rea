@@ -299,7 +299,8 @@ export class GameUi implements Ui {
       off = 1;
     }
     const w = (cols + 4) * 8;
-    const h = (lines.length + 3) * 16 + (mode ? 32 : 0);
+    // 0cf5:3c5e counts the newlines (lines - 1): height (n + 3) * 16, buttons at layout y n * 16 + 0xb8
+    const h = (lines.length + 2) * 16 + (mode ? 32 : 0);
     const x = this.captionCentre - (w >> 1);
     const y = 0x90 + LAYOUT_Y;
     const saved = this.draw.grab({ x, y, w, h });
@@ -310,10 +311,10 @@ export class GameUi implements Ui {
       this.text(l, tc + pad + (off && !pad ? 0 : 0), 0xa0 + LAYOUT_Y + i * 16);
     });
     let answer = true;
-    const by = lines.length * 16 + 0xb8 + LAYOUT_Y;
+    const by = (lines.length - 1) * 16 + 0xb8 + LAYOUT_Y;
     const c = this.captionCentre >> 3;
     if (mode === 2) {
-      const noCol = c - (cols >> 1) + cols - 8 + 2;
+      const noCol = c - (cols >> 1) + cols - 8; // 0cf5:3c5e local_4 (Yes 7 columns left)
       answer = await this.yesNoButtonsAt((noCol - 7) * 8, noCol * 8, by);
     } else if (mode === 1) {
       const ok: Button = { x: (c - 3) * 8, y: by, w: 48, h: 16, kind: 1 };

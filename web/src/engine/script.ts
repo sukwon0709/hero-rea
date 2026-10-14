@@ -573,7 +573,8 @@ export class ScriptVM {
           await h.unitAttack?.(c.a, c.b);
           break;
         case 'INPUT':
-          s.savedInput = c.enable ? 1 : 0;
+          // 0cf5:8f47: ctx+0x1bd = (operand == 0), i.e. 1 while the player may act (INPUT 0)
+          s.savedInput = c.enable === 0 ? 1 : 0;
           h.setInputEnabled?.(c.enable !== 0);
           break;
         case 'REINFORCE':

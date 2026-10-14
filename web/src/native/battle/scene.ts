@@ -51,6 +51,15 @@ const MUSIC_LOST = 4;
 export const runBattle: RunBattle = async (ctx, map) => {
   const scene = new BattleScene(ctx, map, ctx as GameContext & BattleExtras);
   const r = await scene.run();
+  // 1cb6:3926 skips the player records of a battle with the formation flag: the player slots a won
+  // battle leaves deploy again in the next one (진창 -> 장안, 업1 -> 업2 -> 업3)
+  if (r === 2) {
+    const ex = ctx as GameContext & BattleExtras;
+    ex.formation = scene.units
+      .slice(0, PLAYER_SLOTS)
+      .filter((u) => u.status !== Status.Empty && u.officer < 0x400)
+      .map((u) => u.officer);
+  }
   return r === 2 ? 'won' : r === 3 ? 'lost' : 'ended';
 };
 
