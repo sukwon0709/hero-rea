@@ -8,6 +8,7 @@ import { PLAYER_SLOTS, AiMode } from '../../engine/battle/types';
 import { factionOf } from '../../native/battle/model';
 import type { BattleScene } from '../../native/battle/scene';
 import { playHooked } from './capture';
+import { shopVisit, type Purchase } from './shop';
 import { makeHeadless } from './sandbox';
 import { searchBattle, SearchRng, type BattleOutcome } from './battle';
 import { GrindPolicy, analyseBattle, pickFormation, type GrindParams } from './policy';
@@ -33,22 +34,31 @@ export interface RealRunResult {
 export async function realRun(
   files: Map<string, Uint8Array>,
   params: GrindParams,
-  opts: { variants: number; seed?: number; elites?: Record<number, GrindParams>; log?: (l: string) => void },
+  opts: { variants: number; seed?: number; elites?: Record<number, GrindParams>; log?: (l: string) => void; rescue?: number },
 ): Promise<RealRunResult> {
   const t0 = performance.now();
   const rng = new SearchRng(opts.seed ?? 99);
   const battles: RealBattle[] = [];
   const reached = new Map<number, number>();
   let sandboxBattles = 0;
+  const bought: Purchase[] = [];
   const { p } = await playHooked(
     files,
     { seed: opts.seed ?? 12345, botAttempts: 3 },
     {
       onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong),
+      // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it
+      onShop: (g, items) => {
+        const got = shopVisit(g.state, items);
+        bought.push(...got);
+        if (got.length) opts.log?.(`shop: ${got.map((x) => `${g.state.officers[x.officer].name}<-${g.state.items[x.item]?.name}`).join(' ')} (gold ${g.state.progress.money})`);
+      },
       onBattle: async (snap, pt, real) => {
         const g = pt.game;
         const gx = g as unknown as Record<string, unknown>;
-        const search = await searchBattle(files, snap, params, null, opts.variants, rng, opts.elites?.[snap.index]);
+        // the real game already bought at its merchants: the sandbox must not buy again
+        const search = await searchBattle(files, { ...snap, shops: [] }, params, null, opts.variants, rng, opts.elites?.[snap.index], opts.rescue ?? 10);
+        const purchases = bought.splice(0);
         sandboxBattles += search.tried.length;
         const plan: BattleOutcome = search.best;
         const before = g.state.officers.map((o) => o.dyn.level * 100 + o.dyn.exp);
@@ -133,6 +143,7 @@ export async function realRun(
           ms: plan.ms,
           predicted: { won: plan.won, turns: plan.turns, expTotal: plan.expTotal },
           matched: plan.won && won && plan.turns === turns && plan.expTotal === expTotal,
+          purchases,
           outcome: fellBack ? `planned win lost; harness ${rec?.outcome ?? r}` : (rec?.outcome ?? r),
         };
         battles.push(b);

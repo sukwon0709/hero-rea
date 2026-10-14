@@ -19,10 +19,17 @@ export interface Hooks {
   onBattle?: (snap: BattleSnapshot, p: Playthrough, real: RunBattle) => Promise<'won' | 'lost' | 'ended'>;
   /** Replaces the FORMATION picks (returns the officers for the free records). */
   onFormation?: (info: FormationInfo, game: Game) => number[] | null;
+  /** A town with a merchant was reached (PlaythroughOptions.onShop): buy here. */
+  onShop?: (game: Game, items: number[]) => void;
+}
+
+/** Shop lists seen since the last battle start (filled by the onShop option of playHooked). */
+export interface ShopLog {
+  list: number[][];
 }
 
 /** Installs the snapshot / formation hooks on a playthrough. Returns the captured snapshots. */
-export function hookPlaythrough(p: Playthrough, hooks: Hooks = {}): BattleSnapshot[] {
+export function hookPlaythrough(p: Playthrough, hooks: Hooks = {}, shops: ShopLog = { list: [] }): BattleSnapshot[] {
   const g = p.game;
   const gx = g as unknown as Record<string, unknown>;
   const snaps: BattleSnapshot[] = [];
@@ -65,11 +72,13 @@ export function hookPlaythrough(p: Playthrough, hooks: Hooks = {}): BattleSnapsh
         rngSeed: g.rng.seed,
         formation: g.formation ? [...g.formation] : undefined,
         formationInfo: pending,
+        shops: shops.list.splice(0),
       };
       pending = null;
       snaps.push(snap);
       const r = hooks.onBattle ? await hooks.onBattle(snap, p, real) : await real(ctx, map);
-      snap.after = g.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));
+      snap.after = g.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp, cls: o.dyn.cls, items: [...o.dyn.items] }));
+      snap.moneyAfter = g.state.progress.money;
       return r;
     },
   });
@@ -90,8 +99,17 @@ export async function playHooked(
   const menu = (c: string) => c.slice(0, c.lastIndexOf('='));
   let last: { len: number; menu: string; depth: number; avoided: string } | null = null;
   for (let run = 1; ; run++) {
-    const p = new Playthrough(files, { ...opts, avoidChoices: avoid });
-    const snaps = hookPlaythrough(p, hooks);
+    const shops: ShopLog = { list: [] };
+    const p = new Playthrough(files, {
+      ...opts,
+      avoidChoices: avoid,
+      onShop: (g, items) => {
+        shops.list.push(items);
+        hooks.onShop?.(g, items);
+        opts.onShop?.(g, items);
+      },
+    });
+    const snaps = hookPlaythrough(p, hooks, shops);
     const r = await p.run();
     const ch = p.choices;
     if (r !== 'gameOver' || !ch.length || run >= maxRuns) return { p, snaps };

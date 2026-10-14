@@ -40,8 +40,12 @@ export interface BattleSnapshot {
   formation: number[] | undefined;
   /** Set when a FORMATION ran for this battle. */
   formationInfo: FormationInfo | null;
-  /** Officer level/exp after the baseline battle (for carrying story changes between battles). */
-  after?: { level: number; exp: number }[];
+  /** Officer level/exp/class/items after the baseline battle (for carrying story changes between battles). */
+  after?: { level: number; exp: number; cls?: number; items?: number[] }[];
+  /** Gold after the baseline battle. */
+  moneyAfter?: number;
+  /** Shop item lists the story passed through since the previous battle (merchant towns). */
+  shops?: number[][];
 }
 
 export function cloneSnapshot<T>(v: T): T {

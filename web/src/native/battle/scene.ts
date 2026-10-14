@@ -14,6 +14,7 @@ import { battleNameLines } from '../../engine/battle/map';
 import {
   AiMode,
   CLASS_BAND,
+  CLASS_MOVE_TYPE,
   CLASS_RANGE,
   DIRS,
   NONE,
@@ -25,6 +26,7 @@ import {
   UNIT_SLOTS,
   Unit,
   UnitFlag,
+  moveCost,
 } from '../../engine/battle/types';
 import { Battle } from './model';
 import { BattleView, CELL, VIEW_H, VIEW_W, VIEW_X, VIEW_Y } from './view';
@@ -1033,8 +1035,11 @@ export class BattleScene {
     }
   }
 
-  /** ab86: item effects in battle. Returns true when the item was used up. */
-  private async useItem(slot: number, id: number, index: number): Promise<boolean> {
+  /**
+   * ab86: item effects in battle. Returns true when the item was used up. `target` skips the
+   * target pick (the grinding simulator's player, as castFlow's aiTarget does for tactics).
+   */
+  async useItem(slot: number, id: number, index: number, target = NONE): Promise<boolean> {
     const b = this.b;
     const u = this.units[slot];
     const o = b.officerOf(u);
@@ -1043,6 +1048,36 @@ export class BattleScene {
       so.dyn.items[index] = 0xff;
     };
     const name = euc(this.ctx.state.items[id]?.name ?? '');
+    const pick = (ally: boolean, range: number) => (target !== NONE ? Promise.resolve(target) : this.pickTarget(slot, ally, range));
+    if (id >= 0x13 && id <= 0x1a) {
+      // promotion (docs/BATTLE.md, read from ab86): from class FROM[k] at level >= LV[k] -> class+1
+      const k = id - 0x13;
+      if (o.cls !== [0, 1, 3, 4, 6, 7, 9, 10][k] || o.level < [15, 30, 15, 30, 15, 30, 15, 30][k]) {
+        await this.say(S.notUsable);
+        return false;
+      }
+      await this.say(S.usedItem, name);
+      o.cls += 1;
+      o.hp = Math.min(o.hp, maxHp(o));
+      consume();
+      return true;
+    }
+    if (id <= 0x02 || (id >= 0x10 && id <= 0x12)) {
+      // class change to [15,18,12,3,6,0][...]: refused for 유비, the same class, the same class line,
+      // or a move type that cannot stand on the current terrain
+      const to = [15, 18, 12, 3, 6, 0][id <= 0x02 ? id : id - 0x10 + 3];
+      const refused =
+        u.officer === 0 || o.cls === to || Math.trunc(o.cls / 3) * 3 === to || moveCost(CLASS_MOVE_TYPE[to], terrainAt(b.s, u.x, u.y)) === 0xff;
+      if (refused) {
+        await this.say(S.notUsable);
+        return false;
+      }
+      await this.say(S.usedItem, name);
+      o.cls = to;
+      o.hp = Math.min(o.hp, maxHp(o));
+      consume();
+      return true;
+    }
     if (id >= 0x22 && id <= 0x2a) {
       // bombs: element 2 - (id-0x22)/3, power (id-0x22)%3, e91a kind 3
       const element = 2 - Math.trunc((id - 0x22) / 3);
@@ -1051,7 +1086,7 @@ export class BattleScene {
         await this.say(S.rainNoFire);
         return false;
       }
-      const t = await this.pickTarget(slot, false, power | 0x80);
+      const t = await pick(false, power | 0x80);
       if (t === NONE || sideOf(t) === sideOf(slot)) return false;
       const tu = this.units[t];
       if (!tacticTerrainOk(element, terrainAt(b.s, tu.x, tu.y))) return false;
@@ -1066,7 +1101,7 @@ export class BattleScene {
     if ((id >= 0x1b && id <= 0x20) || (id >= 0x34 && id <= 0x36)) {
       const power = id >= 0x34 ? id - 0x34 : id % 3;
       const kind = id >= 0x34 ? 3 : id >= 0x1e ? 1 : 2;
-      const t = await this.pickTarget(slot, true, power | 0x80);
+      const t = await pick(true, power | 0x80);
       if (t === NONE) return false;
       const tu = this.units[t];
       const to = b.officerOf(tu);
@@ -1080,7 +1115,7 @@ export class BattleScene {
     }
     if (id >= 0x2b && id <= 0x2d) {
       await this.say(S.confuseEnemy);
-      const t = await this.pickTarget(slot, false, 0x80);
+      const t = await pick(false, 0x80);
       if (t === NONE) return false;
       if (this.units[t].flags & UnitFlag.Confused) {
         await this.say(S.alreadyConfused);

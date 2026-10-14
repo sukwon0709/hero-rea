@@ -109,6 +109,12 @@ export interface PlaythroughOptions {
   avoidChoices?: Set<string>;
   /** CHOOSE answers start at this option instead of the first (coverage runs: the other story branches). */
   choiceOffset?: number;
+  /**
+   * Called once per town between two battles when the town has a shop (a non-empty item list at
+   * DS:0x56a2 + town*8, as Game.shopItems), with that list. The harness itself never shops; a caller
+   * can buy here (the grinding simulator spends gold on promotions, heals and bombs).
+   */
+  onShop?: (game: Game, items: number[]) => void;
 }
 
 export type PlayResult = 'ending' | 'gameOver' | 'quit' | 'stopped' | 'hang' | 'error';
@@ -137,7 +143,8 @@ export class Playthrough {
   private current: BattleRecord | null = null;
   /** The outcome of run(), once it returned. */
   result: PlayResult | null = null;
-  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset'>> & PlaythroughOptions;
+  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset' | 'onShop'>> & PlaythroughOptions;
+  private shopsSeen = new Set<string>();
 
   constructor(files: Map<string, Uint8Array>, opts: PlaythroughOptions = {}) {
     this.opts = { start: 'new', seed: 12345, botAttempts: 3, forceAll: false, saveSlot: 4, hangFrames: 400_000, ...opts };
@@ -434,6 +441,20 @@ export class Playthrough {
       this.checkLocation();
     }
     const stage = g.vm.stage;
+    if (this.opts.onShop) {
+      // the town the party is in has a 도구상 when its shop list (DS:0x56a2 + town*8, as
+      // Game.shopItems) is not empty; offered once per town between two battles. The port's field
+      // engine opens the shop only through OP31 events, the original also through the 도구상
+      // building (not traced, docs/GAMEFLOW.md), so this is the stand-in for walking in there.
+      const t = g.assets.tables;
+      const town = g.state.progress.territory + (t.sectionTownBase[t.chapterSection[g.state.progress.chapter] ?? 0] ?? 0);
+      const items = Array.from(g.assets.ds(0x56a2 + town * 8, 8)).filter((v) => v !== 0xff);
+      const key = `${town}/${this.battles.length}`;
+      if (items.length && !this.shopsSeen.has(key)) {
+        this.shopsSeen.add(key);
+        this.opts.onShop(g, items);
+      }
+    }
     const cands = this.groupRecords()
       .filter((r) => r.trigger === 2 || r.trigger === 3 || r.trigger === 5)
       .map((r) => ({ r, score: this.score(stage, r) }))

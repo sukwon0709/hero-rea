@@ -165,6 +165,8 @@ export interface BattleKnowledge {
   deadline: number | null;
   /** A turn event wins the battle at this turn (survive until then: 소패). */
   endsAt: number | null;
+  /** Treasure cells: arrival events (trigger 6) that give an item (ADD_ITEM) and do not end the battle. */
+  treasure: { officer: number; x: number; y: number }[];
 }
 
 function winning(stage: Stage, code: number, victory: number | null): boolean {
@@ -178,7 +180,7 @@ function winning(stage: Stage, code: number, victory: number | null): boolean {
 
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [] };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -193,6 +195,8 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
       k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
     }
     if (r.trigger === 4 && winning(stage, r.code, k.victory)) k.winAdj.push({ actor: r.p1, other: r.p2 });
+    if (r.trigger === 6 && cmds.some((c) => c.name === 'ADD_ITEM') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER'))
+      k.treasure.push({ officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 });
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
   }
@@ -229,7 +233,7 @@ export interface GrindStats {
   finishTurn: number | null;
   /** Why the finish began: deadline, done (nobody needy), idle, leader, losses. */
   finishReason?: string;
-  actions: { attack: number; kill: number; tactic: number; heal: number; wait: number };
+  actions: { attack: number; kill: number; tactic: number; heal: number; wait: number; item?: number; promoted?: number };
   /** Officer -> exp gained per kind. */
   byOfficer: Map<number, { hits: number; kills: number; tactics: number; heals: number }>;
   /** Enemy officers alive when the finish began (the ones kept for grinding). */
@@ -242,9 +246,11 @@ interface Action {
   slot: number;
   x: number;
   y: number;
-  kind: 'attack' | 'tactic' | 'wait';
+  kind: 'attack' | 'tactic' | 'wait' | 'item';
   target: number;
   tactic: number;
+  /** kind 'item': the item id and its slot in the officer's 8 item slots. */
+  item?: { id: number; index: number };
   value: number;
   exp: number;
   lethal: boolean;
@@ -252,6 +258,10 @@ interface Action {
 }
 
 // ---------------------------------------------------------------- the policy
+
+/** Promotion items 0x13..0x1a (ab86): from class PROMOTE_FROM[k] at level >= PROMOTE_LEVEL[k] -> class+1. */
+export const PROMOTE_FROM = [0, 1, 3, 4, 6, 7, 9, 10];
+export const PROMOTE_LEVEL = [15, 30, 15, 30, 15, 30, 15, 30];
 
 export class GrindPolicy {
   readonly stats: GrindStats = {
@@ -287,6 +297,7 @@ export class GrindPolicy {
     });
   }
 
+  private looted = new Set<number>();
   /** Retreat (총퇴각, result 1) at the first player phase instead of playing. */
   retreatNow = false;
 
@@ -615,6 +626,7 @@ export class GrindPolicy {
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
     const tactics = castableTactics(o, u.mp, b.learn).filter((t) => !(t < 5 && WEATHER_TYPE[b.info.weather] === RAIN));
+    const held = u.officer < 0x100 ? b.stateOfficer(u).dyn.items.map((id, index) => ({ id, index })).filter((e) => e.id !== 0xff) : [];
     // danger is the sum over every enemy that can reach the cell (an overestimate: they also have
     // other targets), so the cost rises smoothly from half the troops to one and a half times them
     // expected damage drives the cost for everyone; the leader (유비 / the defeat officer) losing
@@ -670,6 +682,8 @@ export class GrindPolicy {
       if (!fin && !guarded && leaderPos) base -= this.p.escort * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 3);
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
       if (fin && this.winAdjacent(u, x, y)) base += 400;
+      // a treasure cell not yet stepped on this battle (its event gives an item once)
+      if (!fin && this.know.treasure.some((t) => t.x === x && t.y === y && (t.officer === u.officer || t.officer === 0x400) && !this.looted.has(y * b.width + x))) base += 40;
       if (base > best.value) best = { slot, x, y, kind: 'wait', target: NONE, tactic: NONE, value: base, exp: 0, lethal: false, danger: dang.worst };
       // physical attacks
       const range = CLASS_RANGE[o.cls];
@@ -726,9 +740,66 @@ export class GrindPolicy {
         if (fin && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value) best = { slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal };
       }
+      // items (ab86): promotions, troop heals, bombs
+      for (const it of held) {
+        const a = this.itemValue(u, it.id, x, y, w, guarded);
+        if (!a) continue;
+        let v = base + a.value;
+        if (fin && a.target === vslot) v += 300;
+        if (v > best.value) best = { slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal };
+      }
     }
     b.place(slot, null, home[0], home[1]);
     return best;
+  }
+
+  /**
+   * Value of using item `id` from (x, y) (1cb6:ab86): a promotion as soon as it is allowed (class
+   * and level), a troop heal on a badly hurt ally (the leader first), a bomb like a hit. Items give
+   * no exp of their own (a bomb hit does, through e91a).
+   */
+  private itemValue(u: Unit, id: number, x: number, y: number, w: number, guarded: boolean): { value: number; target: number; exp: number; lethal: boolean } | null {
+    const b = this.b;
+    const o = b.officerOf(u);
+    void guarded;
+    if (id >= 0x13 && id <= 0x1a) {
+      const k = id - 0x13;
+      if (o.cls !== PROMOTE_FROM[k] || o.level < PROMOTE_LEVEL[k]) return null;
+      return { value: 600, target: NONE, exp: 0, lethal: false };
+    }
+    if ((id >= 0x1e && id <= 0x20) || (id >= 0x34 && id <= 0x36)) {
+      const power = id >= 0x34 ? id - 0x34 : id % 3;
+      let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
+      for (const s of unitsInRange(b.s, u, power | 0x80, x, y, true)) {
+        const T = this.scene.units[s];
+        const ot = b.officerOf(T);
+        const f = ot.hp / Math.max(1, maxHp(ot));
+        const lead = this.know.guarded.has(T.officer);
+        if (f >= (lead ? 0.75 : 0.45)) continue;
+        const v = (1 - f) * (lead ? 400 : 60) - 8;
+        if (!best || v > best.value) best = { value: v, target: s, exp: 0, lethal: false };
+      }
+      return best;
+    }
+    if (id >= 0x22 && id <= 0x2a) {
+      const element = 2 - Math.trunc((id - 0x22) / 3);
+      const power = (id - 0x22) % 3;
+      if (element === 0 && WEATHER_TYPE[b.info.weather] === RAIN) return null;
+      let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
+      for (const d of unitsInRange(b.s, u, power | 0x80, x, y, false)) {
+        const D = this.scene.units[d];
+        if (!(D.flags & UnitFlag.Visible) || !tacticTerrainOk(element, terrainAt(b.s, D.x, D.y))) continue;
+        const od = b.officerOf(D);
+        const [lo] = this.tacticDamageRange({ level: o.level, intel: o.intel }, { level: od.level, intel: od.intel, cls: od.cls }, element, power, terrainAt(b.s, D.x, D.y));
+        const lethal = lo >= od.hp;
+        if (lethal && !this.killOk(d)) continue;
+        const ex = combatExp(true, o.level, od.level, lethal, d);
+        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - 6;
+        if (!best || v > best.value) best = { value: v, target: d, exp: ex, lethal };
+      }
+      return best;
+    }
+    return null;
   }
 
   /** Physical damage enemy E would do to u standing at (x, y). */
@@ -860,6 +931,7 @@ export class GrindPolicy {
       b.place(a.slot, null, a.x, a.y);
       u.flags |= UnitFlag.Moved;
     }
+    if (this.know.treasure.some((t) => t.x === a.x && t.y === a.y)) this.looted.add(a.y * b.width + a.x);
     const st = this.stats.byOfficer.get(officer) ?? { hits: 0, kills: 0, tactics: 0, heals: 0 };
     this.stats.byOfficer.set(officer, st);
     let kind = a.kind;
@@ -870,6 +942,14 @@ export class GrindPolicy {
       await sc.doAttack(a.slot, a.target);
       if (!alive()) this.stats.actions.kill++;
       this.stats.actions.attack++;
+    } else if (a.kind === 'item' && a.item) {
+      const promo = a.item.id >= 0x13 && a.item.id <= 0x1a;
+      const ok = await sc.useItem(a.slot, a.item.id, a.item.index, a.target);
+      if (!ok) kind = 'wait';
+      else {
+        this.stats.actions.item = (this.stats.actions.item ?? 0) + 1;
+        if (promo) this.stats.actions.promoted = (this.stats.actions.promoted ?? 0) + 1;
+      }
     } else if (a.kind === 'tactic') {
       const ok = await sc.castFlow(a.slot, a.tactic, false, a.target);
       if (!ok) kind = 'wait';
@@ -882,7 +962,7 @@ export class GrindPolicy {
     if (kind === 'wait') this.stats.actions.wait++;
     u.flags |= UnitFlag.Acted;
     const gained = o.level * 100 + o.exp - before;
-    if (a.kind === 'attack') {
+    if (a.kind === 'attack' || a.kind === 'item') {
       if (a.lethal) st.kills += Math.max(0, gained);
       else st.hits += Math.max(0, gained);
     } else if (kind === 'tactic') {

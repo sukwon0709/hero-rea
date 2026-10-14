@@ -11,6 +11,15 @@ import type { CampaignBattle, CampaignResult } from './campaign';
 /** Tactic names, filled by the caller from MAIN.EXE (DS:0x4438) when the game files are at hand. */
 export const tacticNames: Map<number, string> = new Map();
 const tname = (t: number | string) => tacticNames.get(Number(t)) ?? `책략${t}`;
+/** Item names (BAKDATA), filled by the caller. */
+export const itemNames: Map<number, string> = new Map();
+const iname = (i: number) => itemNames.get(i) ?? `도구${i}`;
+function boughtText(p: { item: number }[] | undefined): string {
+  if (!p?.length) return '';
+  const m = new Map<number, number>();
+  for (const x of p) m.set(x.item, (m.get(x.item) ?? 0) + 1);
+  return [...m.entries()].map(([i, n]) => `${iname(i)}${n > 1 ? '×' + n : ''}`).join(', ');
+}
 
 const PARAM_KO: Record<ParamKey, string> = {
   need: '저레벨 우선 가중치',
@@ -246,7 +255,7 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
           wins: st.best.result.wins,
           forced: st.best.result.forced,
           roster: st.best.campaign.roster,
-          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried })),
+          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0 })),
         }
       : null,
     rules: learnedRules(st),
@@ -305,7 +314,7 @@ export function progressHtml(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
     .flatMap((g) => g.eliteChanges.map((e) => `<tr><td>${g.gen}</td><td>${e.battle + 1}. ${esc(e.name)}</td><td>${esc(diff(e.from, e.to))}</td></tr>`))
     .join('');
   const battles = (data.best?.battles ?? [])
-    .map((b) => `<tr><td>${b.index + 1}</td><td>${esc(b.name)}</td><td>${b.won ? '승리' : b.forced ? '<span class="bad">강제 진행</span>' : '패배'}</td><td class="num">${b.turns}/${b.turnLimit}</td><td class="num">${b.expTotal}</td><td class="num">${b.native ? '-' : b.keep}</td><td class="num">${b.rerolls}</td><td>${b.won ? (b.native ? '자동(게임 AI)' : '노가다 정책') : ''}</td><td class="dim">${b.lossReasons ? esc(Object.entries(b.lossReasons).sort((x, y) => y[1] - x[1]).map(([r, n]) => `${r} ×${n}`).join(', ')) : ''}</td></tr>`)
+    .map((b) => `<tr><td>${b.index + 1}</td><td>${esc(b.name)}</td><td>${b.won ? '승리' : b.forced ? '<span class="bad">강제 진행</span>' : '패배'}</td><td class="num">${b.turns}/${b.turnLimit}</td><td class="num">${b.expTotal}</td><td class="num">${b.native ? '-' : b.keep}</td><td class="num">${b.rerolls}</td><td>${b.won ? (b.native ? '자동(게임 AI)' : '노가다 정책') : ''}</td><td class="num">${b.won ? b.attempts ?? '' : ''}</td><td class="dim">${esc(b.bought)}${b.promoted ? ` · 승진 ${b.promoted}` : ''}${b.items ? ` · 도구 사용 ${b.items}` : ''}</td><td class="dim">${b.lossReasons ? esc(Object.entries(b.lossReasons).sort((x, y) => y[1] - x[1]).map(([r, n]) => `${r} ×${n}`).join(', ')) : ''}</td></tr>`)
     .join('');
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -345,6 +354,8 @@ li{margin:4px 0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@medi
 <li><b>전투별 최고 작전(엘리트)</b>: 최고 실행에서 각 전투가 쓴 파라미터를 저장해 두고, 다음 세대의 그 전투 탐색에서 먼저 시험하고 주변을 돌연변이시킨다.</li>
 <li><b>공통 난수(CRN)</b>: 한 세대의 모든 후보는 같은 탐색 시드로 평가한다. 점수 차이가 운이 아니라 파라미터 차이에서 나오도록.</li>
 <li><b>커리큘럼</b>: 이야기 순서대로, 엘리트 작전이 2세대 연속 유지된 앞쪽 전투는 "고정"되어 그 작전만 다시 돌린다(탐색 비용 절약). 고정된 전투에서 작전이 지면 다시 전체 탐색.</li>
+<li><b>상점·도구·승진</b>: 전투 사이에 상점이 있는 마을을 지나면 금을 써서 산다(가격 ×10, 빈 칸에, 원작 상점 규칙 그대로). 우선순위는 ① 승진 도구(장창·연노·마개·무술교본 Lv15, 보병차·투석기·근위개·의협교본 Lv30, 해당 병종일 때) ② 병력 회복 도구(유비 2개, 주력 1개씩) ③ 남는 금으로 폭탄류. 전투 중 정책은 승진 도구를 쓸 수 있게 되면 바로 쓰고, 크게 다친 아군(특히 유비)에게 회복 도구를, 공격 대신 폭탄을 쓸 수 있다(폭탄 타격도 경험치). 보물 칸(밟으면 도구를 주는 칸)도 찾아간다.</li>
+<li><b>재도전</b>: 모든 작전이 지면, 플레이어처럼 전투 시작부터 다시 한다(시작 직후 총퇴각으로 난수를 바꿔 정책·게임 AI 번갈아, 최대 K번). 그래도 지면 강제 진행.</li>
 <li><b>적응형 개체 수</b>: 분포가 넓을 때(초반)는 후보를 많이, 수렴하면 적게 뽑는다(--pop이 상한, 최소 4).</li>
 </ol>
 </div>
@@ -365,7 +376,7 @@ ${abHtml(ab, st)}
 </div>
 
 <h2>전투별 결과(최고 실행)</h2>
-<div class="card"><table><tr><th>#</th><th>전투</th><th>결과</th><th class="num">턴</th><th class="num">경험치</th><th class="num">남긴 적</th><th class="num">총퇴각</th><th>방식</th><th>실패 원인(시도별)</th></tr>${battles}</table>
+<div class="card"><table><tr><th>#</th><th>전투</th><th>결과</th><th class="num">턴</th><th class="num">경험치</th><th class="num">남긴 적</th><th class="num">총퇴각</th><th>방식</th><th class="num">승리까지 시도</th><th>상점 구입 · 승진 · 도구</th><th>실패 원인(시도별)</th></tr>${battles}</table>
 <p class="dim">강제 진행 = 이 실행의 모든 시도(기본·엘리트·변형·게임 AI·총퇴각 재시도)가 졌다는 뜻. 그 전투는 경험치 0으로 치고 레벨을 그대로 다음 전투로 넘긴다(실제 게임이라면 이길 때까지 다시 해야 함). 원인 집계: ${esc(lossSummary(data.best?.battles ?? []))}</p></div>
 
 <h2>자주 지는 전투: 수정 전후 승률</h2>
@@ -382,7 +393,7 @@ ${benchHtml(benches)}
 <li><b>상한</b>: 레벨은 99를 넘지 못한다(한 번에 받는 경험치가 최대 64, Lv99부터는 경험치를 받지 않음, 스크립트의 능력치 증가도 99에서 멈춤).</li>
 <li><b>행동 수</b>: 48전투의 제한 턴 합은 1847턴, 기본 출진 인원으로 곱하면 아군 장수 행동 기회가 약 16,800번. 15명을 Lv1→99로 올리려면 약 147,000 경험치가 필요하다. 상대가 5레벨 이상 높을 때의 타격 16을 매 행동마다 받아도 약 269,000이 상한이고, 아군이 적보다 높아지면 타격은 4, 책략은 8로 떨어진다(행동당 평균 8이면 134,000). 즉 이론상 가능 범위의 끝자락이고, 거의 모든 턴에 전원이 경험치 행동을 해야 한다.</li>
 <li><b>지금 막히는 곳</b>: 강제 진행 전투의 대부분은 <b>유비 퇴각</b>으로 진다(위 표의 실패 원인). 유비가 Lv1~5에 머물러 병력 500으로는 장(3장) 이후 적 한 번의 공격에 쓰러진다.</li>
-<li><b>시뮬레이션에 없는 것</b>: 상점에서 무기·방어구 구입(하네스는 상점을 바로 나간다), 전투 중 도구 사용, 보물 칸 획득(강제 진행 전투), 전직. 실제 플레이어는 장비로 공격·방어가 크게 오른다. 이 차이가 "AI(게임 자체)로도 못 이기는" 전투가 많은 주된 이유로 보인다.</li>
+<li><b>장비</b>: 이 게임의 상점은 무기·방어구·말을 팔지 않는다(이야기로만 얻음). 상점에서 사는 것은 승진 도구, 회복·사기 도구, 책략서(폭탄류)다. 승진은 Lv15/30이 필요해서 레벨이 낮은 초반에는 도움이 안 된다. 상점 방문은 "그 마을에 상점 목록이 있으면 들른다"로 근사했다(포트의 필드 엔진은 도구상 건물 진입을 아직 구현하지 않음).</li>
 <li><b>강제 진행의 취급</b>: 정책이 못 이긴 전투는 경험치 0, 레벨 그대로 다음 전투로 간다(실제로는 이길 때까지 재도전). 그래서 앞에서 막히면 뒤 전투도 줄줄이 막힌다.</li>
 </ul></div>
 
@@ -513,6 +524,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
   for (const b of r.battles) {
     L.push(`### ${b.index + 1}. ${CH[b.chapter] ?? b.chapter} ${b.name}의 전투`);
     L.push('');
+    if (b.purchases?.length) L.push(`- 전투 전 상점 구입: ${boughtText(b.purchases)}.`);
     if (!b.won) {
       L.push(`- 시뮬레이터 정책으로는 이기지 못해 일반 플레이(강제 진행)로 넘김. 경험치 ${b.expTotal}.`);
       L.push('');
@@ -526,7 +538,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
     }
     L.push(`- 턴: ${b.turns}/${b.turnLimit} (마무리 시작 ${b.finishTurn ?? '-'}턴). 살려 둔 적: ${b.kept.length ? b.kept.join(', ') : '없음'} (최소 ${b.params.keep}명 유지).`);
     const a = b.actions;
-    L.push(`- 행동: 공격 ${a.attack}(처치 ${a.kill}), 공격·상태 책략 ${a.tactic}, 회복 책략 ${a.heal}, 대기 ${a.wait}.`);
+    L.push(`- 행동: 공격 ${a.attack}(처치 ${a.kill}), 공격·상태 책략 ${a.tactic}, 회복 책략 ${a.heal}, 도구 ${a.item ?? 0}(승진 ${a.promoted ?? 0}), 대기 ${a.wait}.`);
     const tc = Object.entries(b.tactics).sort((x, y) => y[1] - x[1]);
     if (tc.length) L.push(`- 책략: ${tc.map(([t, n]) => `${tname(t)} ${n}`).join(', ')}.`);
     const g = [...b.gains].sort((x, y) => y.expGained - x.expGained);

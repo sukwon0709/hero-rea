@@ -4,7 +4,7 @@
 // story did to them in between (baseline delta: ADD_STAT, new officers, enemy deployments).
 
 import type { BattleSnapshot } from './sandbox';
-import { searchBattle, SearchRng, type BattleOutcome, type BattleSearch, type CarryState } from './battle';
+import { searchBattle, SearchRng, type BattleOutcome, type BattleSearch, type CarryState, type OfficerCarry } from './battle';
 import { clampParams, type GrindParams } from './policy';
 
 function clampHint(p: GrindParams): GrindParams {
@@ -34,11 +34,15 @@ export interface CampaignBattle {
   ms: number;
   /** For a battle nothing won: how many tries ended for each reason. */
   lossReasons?: Record<string, number>;
+  /** Bought at the merchants before this battle. */
+  purchases?: { officer: number; item: number; price: number }[];
+  /** Attempts until the win (1 = first try); the retries a player would make. */
+  attempts?: number;
 }
 
 export interface CampaignResult {
   /** Levels and sortie list after the last battle run (to continue or debug from there). */
-  carryOut?: { officers: { level: number; exp: number }[]; formation: number[] | undefined };
+  carryOut?: { officers: OfficerCarry[]; formation: number[] | undefined; money?: number };
   battles: CampaignBattle[];
   /** Final level per officer of the player's roster (named officers of 유비's faction). */
   roster: { officer: number; name: string; level: number; exp: number; reached99At: number | null }[];
@@ -52,18 +56,55 @@ export interface CampaignResult {
   battlesRun: number;
 }
 
-/** Levels for battle `snap` given the previous battle's sandbox result and the story in between. */
-export function carryFor(prev: BattleSnapshot, snap: BattleSnapshot, lastOfficers: { level: number; exp: number }[], formation: number[] | undefined): CarryState {
-  const officers = snap.state.officers.map((so, i) => {
+/**
+ * The state for battle `snap` given the previous battle's sandbox result and the story in between:
+ * levels as the sandbox left them plus what the story added (ADD_STAT, capped at 99); class as the
+ * sandbox left it unless the story changed it; items as the sandbox left them (used, bought) with
+ * the story's gains and losses since the previous battle applied; gold likewise.
+ */
+export function carryFor(prev: BattleSnapshot, snap: BattleSnapshot, lastOfficers: OfficerCarry[], formation: number[] | undefined, lastMoney?: number): CarryState {
+  const officers = snap.state.officers.map((so, i): OfficerCarry => {
     const bs = so.dyn.level * 100 + so.dyn.exp;
-    const be = prev.after ? prev.after[i].level * 100 + prev.after[i].exp : bs;
-    const g = lastOfficers[i] ? lastOfficers[i].level * 100 + lastOfficers[i].exp : bs;
+    const pa = prev.after?.[i];
+    const be = pa ? pa.level * 100 + pa.exp : bs;
+    const last = lastOfficers[i];
+    const g = last ? last.level * 100 + last.exp : bs;
     let t = g + (bs - be);
-    const gl = lastOfficers[i]?.level ?? so.dyn.level;
+    const gl = last?.level ?? so.dyn.level;
     if (bs !== be && Math.trunc(t / 100) > 99 && gl <= 99) t = 9900 + (t % 100); // ADD_STAT caps at 99
-    return { level: Math.trunc(t / 100), exp: t % 100 };
+    const out: OfficerCarry = { level: Math.trunc(t / 100), exp: t % 100 };
+    // class: the story's change wins, else the sandbox's (promotions)
+    if (last?.cls !== undefined) out.cls = pa?.cls !== undefined && pa.cls !== so.dyn.cls ? so.dyn.cls : last.cls;
+    if (last?.items && pa?.items) {
+      const items = [...last.items];
+      const before = pa.items.filter((v) => v !== 0xff);
+      const now = so.dyn.items.filter((v) => v !== 0xff);
+      // the story's losses, then its gains (multiset differences of the baseline)
+      const lost = [...before];
+      for (const v of now) {
+        const k = lost.indexOf(v);
+        if (k >= 0) lost.splice(k, 1);
+      }
+      const gained = [...now];
+      for (const v of before) {
+        const k = gained.indexOf(v);
+        if (k >= 0) gained.splice(k, 1);
+      }
+      for (const v of lost) {
+        const k = items.indexOf(v);
+        if (k >= 0) items[k] = 0xff;
+      }
+      for (const v of gained) {
+        const k = items.indexOf(0xff);
+        if (k >= 0) items[k] = v;
+      }
+      out.items = items;
+    }
+    return out;
   });
-  return { officers, formation };
+  const money =
+    lastMoney !== undefined && prev.moneyAfter !== undefined ? Math.max(0, Math.min(10000, lastMoney + (snap.state.progress.money - prev.moneyAfter))) : undefined;
+  return { officers, formation, money };
 }
 
 export function objectiveOf(n99: number, top15: number, levelsGained = 0): number {
@@ -102,11 +143,12 @@ export async function runCampaign(
   let battlesRun = 0;
   const reached = new Map<number, number>();
   const list = o.limit ? snaps.slice(0, o.limit) : snaps;
-  let lastOfficers: { level: number; exp: number }[] = list[0].state.officers.map((x) => ({ level: x.dyn.level, exp: x.dyn.exp }));
+  let lastOfficers: OfficerCarry[] = list[0].state.officers.map((x) => ({ level: x.dyn.level, exp: x.dyn.exp, cls: x.dyn.cls, items: [...x.dyn.items] }));
+  let lastMoney: number | undefined = list[0].state.progress.money;
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
     // carry: last sandbox result + what the story changed since the previous baseline battle
-    if (k > 0) carry = carryFor(list[k - 1], snap, lastOfficers, (carry as CarryState | null)?.formation);
+    if (k > 0) carry = carryFor(list[k - 1], snap, lastOfficers, (carry as CarryState | null)?.formation, lastMoney);
     o.onCarry?.(k, carry as CarryState | null);
     const hint = o.hints?.[k] ? clampHint({ ...params, ...o.hints[k] }) : undefined;
     let s: BattleSearch | null = o.frozen?.has(k) && o.elites?.[k] ? await searchBattle(files, snap, o.elites[k], carry, 1, rng, undefined, 0) : null;
@@ -116,10 +158,12 @@ export async function runCampaign(
     const forced = !b.won;
     if (b.won) {
       lastOfficers = b.officersAfter;
+      lastMoney = b.moneyAfter;
       carry = { officers: carry?.officers ?? null, formation: b.formationOut };
     } else {
       // the run would have to retry: keep the levels it started with (no exp), story goes on
-      lastOfficers = carry?.officers ?? snap.state.officers.map((x) => ({ level: x.dyn.level, exp: x.dyn.exp }));
+      lastOfficers = carry?.officers ?? snap.state.officers.map((x) => ({ level: x.dyn.level, exp: x.dyn.exp, cls: x.dyn.cls, items: [...x.dyn.items] }));
+      lastMoney = carry?.money ?? snap.state.progress.money;
       carry = { officers: carry?.officers ?? null, formation: carry?.formation };
     }
     for (const g of b.gains) if (b.won && g.levelAfter >= 99 && !reached.has(g.officer)) reached.set(g.officer, k);
@@ -142,6 +186,8 @@ export async function runCampaign(
       variantsTried: s.tried.length,
       variantsWon: s.tried.filter((t) => t.won).length,
       ms: b.ms,
+      purchases: b.purchases,
+      attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
       lossReasons: forced ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
     o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
@@ -157,7 +203,7 @@ export async function runCampaign(
   const n99 = roster.filter((r) => r.level >= 99).length;
   const top15 = roster.slice(0, 15).reduce((s, r) => s + Math.min(99, r.level), 0);
   return {
-    carryOut: { officers: lastOfficers, formation: (carry as CarryState | null)?.formation },
+    carryOut: { officers: lastOfficers, formation: (carry as CarryState | null)?.formation, money: lastMoney },
     battles: out,
     roster,
     n99,

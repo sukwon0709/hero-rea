@@ -22,8 +22,9 @@ import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, type GrindParams } from './policy';
 import { frozenBattles, newEvolveState, populationSize, sampleGeneration, updateGeneration, type CandidateResult, type EvolveState } from './evolve';
 import { realRun } from './realrun';
-import { progressHtml, progressJson, guideMarkdown, resultsJson, tacticNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
+import { progressHtml, progressJson, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
 import { dsTable, S } from '../../native/battle/strings';
+import { parseBakData } from '../../formats/tables';
 
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? 'help';
@@ -47,6 +48,7 @@ function loadFiles(): Map<string, Uint8Array> {
   const main = files.get('MAIN.EXE')!;
   const dec = new TextDecoder('euc-kr');
   for (let t = 0; t < 36; t++) tacticNames.set(t, dec.decode(dsTable(main, S.tactics, t, true)).trim());
+  for (const it of parseBakData(files.get('BAKDATA.R3')!).items) itemNames.set(it.index, it.name);
   return files;
 }
 
@@ -187,7 +189,7 @@ async function main() {
     const snaps = loadCaptures();
     const hints = loadHints(snaps);
     const st = loadState(hints.defaults);
-    const gens = opt('gens', 3), maxPop = opt('pop', 6), variants = opt('variants', 3), workers = opt('workers', 2), limit = opt('limit', 0), rescue = opt('rescue', 3);
+    const gens = opt('gens', 3), maxPop = opt('pop', 6), variants = opt('variants', 3), workers = opt('workers', 2), limit = opt('limit', 0), rescue = opt('retries', opt('rescue', 10));
     for (let g = 0; g < gens; g++) {
       const t0 = performance.now();
       const pop = populationSize(st, maxPop);
@@ -238,7 +240,7 @@ async function main() {
     const without = defaultParams();
     const withHint: GrindParams = { ...without, ...(hints.defaults ?? {}) };
     const variants = opt('variants', 3), seed = opt('seed', 1) * 1000, limit = opt('limit', 0);
-    const job = (params: GrindParams): Job => ({ params, variants, seed, limit, elites: {}, frozen: [], hints: {}, rescue: opt('rescue', 3) });
+    const job = (params: GrindParams): Job => ({ params, variants, seed, limit, elites: {}, frozen: [], hints: {}, rescue: opt('retries', opt('rescue', 10)) });
     const [a, b] = await Promise.all([campaignInChild(job(without)), campaignInChild(job(withHint))]);
     const ab: HintAb = { hint: hints.defaults ?? {}, without: abSide(without, a), with: abSide(withHint, b), date: new Date().toISOString() };
     atomicWrite(join(OUT, 'hint-ab.json'), JSON.stringify(ab, null, 1));
@@ -300,8 +302,8 @@ async function main() {
   if (cmd === 'real') {
     const files = loadFiles();
     const st = loadState();
-    const params = st.best?.params ?? defaultParams();
-    const r = await realRun(files, params, { variants: opt('variants', 3), elites: st.elites, log: (l) => console.log(l) });
+    const params = st.best?.params ?? { ...defaultParams(), ...(loadHints(null).defaults ?? {}) };
+    const r = await realRun(files, params, { variants: opt('variants', 3), elites: st.elites, rescue: opt('retries', opt('rescue', 10)), log: (l) => console.log(l) });
     atomicWrite(join(OUT, 'results.json'), JSON.stringify(resultsJson(r, st), null, 1));
     atomicWrite(join(OUT, 'guide.md'), guideMarkdown(r, st));
     console.log(`real run: ${r.result}, n99 ${r.n99}, top15 ${r.top15}, ${(r.ms / 1000).toFixed(0)} s, ${r.sandboxBattles} sandbox battles`);

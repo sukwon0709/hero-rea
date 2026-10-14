@@ -6,6 +6,7 @@ import type { ScriptState } from '../../engine/script';
 import { NONE as NONE_SLOT, PLAYER_SLOTS, Status } from '../../engine/battle/types';
 import { battleNameLines } from '../../engine/battle/map';
 import type { BattleScene } from '../../native/battle/scene';
+import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { GrindPolicy, analyseBattle, clampParams, pickFormation, type GrindParams, type GrindStats } from './policy';
 
@@ -40,15 +41,29 @@ export interface BattleOutcome {
   tactics: Record<string, number>;
   /** The sortie list a won battle leaves for a chained formation battle (runBattle in scene.ts). */
   formationOut: number[] | undefined;
-  /** Officer level/exp after the battle (all officers). */
-  officersAfter: { level: number; exp: number }[];
+  /** Officer level/exp/class/items after the battle (all officers). */
+  officersAfter: OfficerCarry[];
+  moneyAfter: number;
+  /** What was bought at the merchants before the battle. */
+  purchases: Purchase[];
   rngAfter: number;
   ms: number;
 }
 
+export interface OfficerCarry {
+  level: number;
+  exp: number;
+  /** Class (promotions change it); absent = the snapshot's. */
+  cls?: number;
+  /** The 8 item slots; absent = the snapshot's. */
+  items?: number[];
+}
+
 export interface CarryState {
-  /** Officer level/exp to start the battle with (index = officer), null = take the snapshot's. */
-  officers: { level: number; exp: number }[] | null;
+  /** Officer level/exp (and class/items) to start the battle with (index = officer), null = take the snapshot's. */
+  officers: OfficerCarry[] | null;
+  /** Gold to start with; absent = the snapshot's. */
+  money?: number;
   /** The sortie list left by the previous battle (formation-flag battles without their own FORMATION). */
   formation: number[] | undefined;
 }
@@ -56,7 +71,7 @@ export interface CarryState {
 const dec = new TextDecoder('euc-kr');
 
 /** Applies carried levels and the formation picks to a cloned state. */
-export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams) {
+export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams, bought?: Purchase[], shopping = true) {
   return (state: GameState, script: ScriptState, extras: { formation: number[] | undefined }) => {
     if (carry?.officers)
       carry.officers.forEach((c, i) => {
@@ -64,8 +79,13 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
         if (d) {
           d.level = c.level;
           d.exp = c.exp;
+          if (c.cls !== undefined) d.cls = c.cls;
+          if (c.items) d.items = [...c.items];
         }
       });
+    if (carry?.money !== undefined) state.progress.money = carry.money;
+    // the merchants passed since the previous battle
+    if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list));
     const fi = snap.formationInfo;
     if (fi) {
       const free = fi.records.length;
@@ -93,6 +113,7 @@ export async function runGrindBattle(
   let before: { level: number; exp: number }[] = [];
   let scene0: BattleScene | null = null;
   let rerolls = p.rerolls ?? 0;
+  const purchases: Purchase[] = [];
   const run = buildSandbox(
     files,
     snap,
@@ -108,7 +129,7 @@ export async function runGrindBattle(
       if (trace) policy.log = trace;
       before = scene.ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));
     },
-    prepareState(snap, carry, p),
+    prepareState(snap, carry, p, purchases),
   );
   const { scene, ctx } = run;
   // a battle that never ends (should not happen: the turn limit ends every battle) is cut off
@@ -167,7 +188,9 @@ export async function runGrindBattle(
     actions: stats?.actions ?? { attack: 0, kill: 0, tactic: 0, heal: 0, wait: 0 },
     tactics: Object.fromEntries([...(stats?.tactics ?? new Map()).entries()].map(([t, n]) => [String(t), n])),
     formationOut,
-    officersAfter: ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp })),
+    officersAfter: ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp, cls: o.dyn.cls, items: [...o.dyn.items] })),
+    moneyAfter: ctx.state.progress.money,
+    purchases,
     rngAfter: run.rng.seed,
     ms: performance.now() - t0,
   };
@@ -181,7 +204,7 @@ export async function safeGrindBattle(files: Map<string, Uint8Array>, snap: Batt
     console.error(`grind: battle ${snap.index} ${snap.name} threw: ${(e as Error).stack ?? e}`);
     return {
       won: false, result: -1, turns: 0, turnLimit: 0, finishTurn: null, params, gains: [], score: -1, expTotal: 0, kept: [], deployed: [],
-      actions: { attack: 0, kill: 0, tactic: 0, heal: 0, wait: 0 }, tactics: {}, formationOut: undefined, officersAfter: [], rngAfter: 0, ms: 0,
+      actions: { attack: 0, kill: 0, tactic: 0, heal: 0, wait: 0 }, tactics: {}, formationOut: undefined, officersAfter: [], moneyAfter: 0, purchases: [], rngAfter: 0, ms: 0,
     };
   }
 }
