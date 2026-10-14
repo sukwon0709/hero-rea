@@ -9,7 +9,6 @@ import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
-import type { GameState } from '../../engine/state';
 import { GrindPolicy, analyseBattle, clampParams, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
