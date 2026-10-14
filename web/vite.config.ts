@@ -9,6 +9,7 @@ export default defineConfig({
         index: resolve(__dirname, 'index.html'),
         play: resolve(__dirname, 'play.html'),
         sound: resolve(__dirname, 'sound.html'),
+        viewer: resolve(__dirname, 'viewer.html'),
       },
     },
   },

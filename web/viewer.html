@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asset Viewer</title>
+  <link rel="stylesheet" href="./src/style.css" />
+  <style>
+    body.viewer header select, body.viewer header label { font: inherit; }
+    .vbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+    .vbar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+    .vtools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 16px; color: var(--muted); }
+    .vtools select, .vtools input { font: inherit; }
+    #view { padding: 8px 16px 48px; overflow-x: auto; }
+    #view h2 { font-size: 16px; margin: 20px 0 6px; }
+    #view p.note { color: var(--muted); margin: 4px 0 8px; max-width: 70em; }
+    .grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+    figure { margin: 0; display: inline-flex; flex-direction: column; align-items: flex-start; }
+    figcaption { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+    canvas.px { image-rendering: pixelated; image-rendering: crisp-edges; display: block;
+      background: repeating-conic-gradient(#8884 0 25%, #0000 0 50%) 0 0 / 8px 8px; }
+    .swatches { display: flex; gap: 2px; align-items: center; margin: 2px 0; font-family: ui-monospace, monospace; font-size: 11px; }
+    .swatches span.c { width: 22px; height: 18px; display: inline-block; border: 1px solid var(--border); }
+    .swatches b { width: 7em; font-weight: normal; color: var(--muted); }
+    textarea.text { width: min(640px, 100%); font: inherit; }
+  </style>
+</head>
+<body class="viewer">
+  <header>
+    <a href="./">← 삼국지영걸전 Web</a>
+    <span>Asset viewer: graphics decoded in TypeScript from your game files</span>
+  </header>
+  <section id="picker" class="picker" hidden>
+    <h2>Load your copy of the game</h2>
+    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. It is kept only in this browser.</p>
+    <label class="btn">Choose Hero.zip<input type="file" data-kind="zip" accept=".zip" hidden /></label>
+    <label class="btn">Choose GAME folder<input type="file" data-kind="dir" webkitdirectory hidden /></label>
+    <p class="error"></p>
+  </section>
+  <nav id="groups" class="vbar" hidden></nav>
+  <div id="tools" class="vtools" hidden>
+    <label>Palette <select id="pal"></select></label>
+    <label>Scale <select id="scale"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+    <label><input type="checkbox" id="mirror" /> Mirror sprites</label>
+  </div>
+  <main id="view"></main>
+  <script type="module" src="./src/viewer.ts"></script>
+</body>
+</html>

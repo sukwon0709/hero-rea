@@ -14,12 +14,21 @@ export const MAIN_DGROUP_SEG = 0x313a;
 export const PALETTE_TABLE = 0x1050;
 export const PALETTE_COUNT = 9;
 
-/** Known uses of the palette table entries (observed in the emulator; see docs/GRAPHICS.md). */
+/**
+ * Known uses of the palette table entries. Entries 0..3 are the scene palettes: 0cf5:49F6 sets palette
+ * ([DS:7A6C+5] & 0xF), the location mode written by 0cf5:ACD8 (0 at 0cf5:12869, 1 at 0cf5:E791, 2 at
+ * 0cf5:128B7, 3 at 0cf5:C833). Palette 2 is verified pixel-exact on a palace screen; 0, 1 and 3 follow
+ * from the code path only.
+ */
 export const PAL = {
-  /** Title menu, most dialogue screens. */
-  menu: 0,
-  /** Town interiors (SMAP rooms). */
-  town: 2,
+  /** Mode 0: town (SMAP rooms). */
+  town: 0,
+  /** Mode 1: world map (MMAP). */
+  worldMap: 1,
+  /** Mode 2: palace / indoor (PMAP rooms). */
+  palace: 2,
+  /** Mode 3: battle. */
+  battle: 3,
   /** The PC-98 digital 8-colour palette; set after PACKGRP pictures such as 0cf5:AA80. */
   digital: 4,
   /** Camp scenes; palettes 5 and 8 are identical. */
@@ -126,3 +135,17 @@ export function toDigital8(pal: Rgb4[]): Rgb4[] {
 
 /** A fade to black (0cf5:4A22 fades all 16 entries to zero). */
 export const BLACK: Rgb4[] = Array.from({ length: 16 }, () => [0, 0, 0] as Rgb4);
+
+/**
+ * END.EXE's palette table: 43 x 16 [B, R, G] entries at load-image offset 0xC058 (found by content: entry 1
+ * colours END1GRP.R3 picture 19 exactly as the emulator shows it; entry 31 equals MAIN palette 0 and
+ * entries 29 and 33 equal MAIN palette 2). Which picture END.EXE shows with which entry is not traced.
+ */
+export const END_PALETTE_TABLE = 0xc058;
+export const END_PALETTE_COUNT = 43;
+
+export function readEndPalettes(endExe: Uint8Array): Rgb4[][] {
+  const base = (endExe[8] | (endExe[9] << 8)) * 16 + END_PALETTE_TABLE;
+  if (base + 48 * END_PALETTE_COUNT > endExe.length) return [];
+  return Array.from({ length: END_PALETTE_COUNT }, (_, n) => parseBrg(endExe, base + 48 * n));
+}

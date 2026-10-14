@@ -16,7 +16,7 @@ Tests: `web/test/tables.test.ts`, `web/test/save.test.ts`.
 |---|---|---|---|---|
 | `BAKDATA.R3` | 19328 | 4 fixed tables, not LS11 | `0cf5:ae0c` / `ae24` / `ae3e` / `ae58` | NPC types, items, officer static and default dynamic records |
 | `BBKSDAT1.R3` | 3584 | 4 sections × 0x380 | `0cf5:b1de` (via `b2b0`, `b34e`, `b272`) | towns of each chapter section |
-| `FACEDAT.R3` | | 240 × 6-byte index + blobs | `0cf5:50ec` | portraits (80×64, TF-DCE blobs, see GRAPHICS) |
+| `FACEDAT.R3` | | 240 × 6-byte index + blobs | `0cf5:50ec` | portraits (64 wide × 80 tall, TF-DCE blobs, see GRAPHICS) |
 | `PACKGRP.R3` | | 38 × 6-byte index + blobs | `0cf5:520e` | UI pictures. Entry 0 is the frame (`0cf5:c456`) |
 | `DISK1..4.R3I` | 107 | Shift-JIS text | `0cf5:409e` | disk labels for the floppy-swap check |
 | `MSAVE.R3` | 73 | = MSAVE bytes 0..0x48 | `0cf5:b2b0` | new-game state |
@@ -144,7 +144,7 @@ Both files use the same layout: `count × {u32 offset, u16 size}`, then the data
 the end of the index. The count is a constant in the reader. FACEDAT has 240 entries (`0cf5:50ec`, index 0x5a0
 bytes). PACKGRP has 38 (`0cf5:520e`, index 0xe4 bytes).
 In both files the blobs are contiguous and end at the end of the file (checked in a test). FACEDAT entry = officer
-static bytes 14..15. MAIN draws a portrait as 80×64 at `0cf5:4558(…, 0x50, 0x40, …)`.
+static bytes 14..15. MAIN draws a portrait as 64 wide × 80 tall at `0cf5:4558(…, 0x50, 0x40, …)`.
 The blob encoding (it starts `02 54 08 50 …`) belongs to GRAPHICS.
 
 ## DISKn.R3I

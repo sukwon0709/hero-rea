@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { BLACK, fadeSteps, readMainPalettes, toDac, toDigital8, type Rgb4 } from '../src/formats/palette';
+import { BLACK, fadeSteps, readEndPalettes, readMainPalettes, toDac, toDigital8, type Rgb4 } from '../src/formats/palette';
 import { GAME_DIR, gameFile, hasGame } from './gamedir';
 
 const brgHex = (pal: Rgb4[]) => pal.map(([r, g, b]) => [b, r, g].map((v) => v.toString(16).padStart(2, '0')).join('')).join('');
@@ -40,6 +40,14 @@ describe('palette', () => {
       expect(pals[4].slice(8)).toEqual(pals[4].slice(0, 8));
       expect(pals[5]).toEqual(pals[8]);
       expect(toDac(pals[4])[7]).toEqual([63, 63, 63]);
+    });
+
+    it('reads the END.EXE palette table', () => {
+      const end = readEndPalettes(gameFile('END.EXE'));
+      expect(end.length).toBe(43);
+      expect(end[31]).toEqual(pals[0]);
+      expect(end[29]).toEqual(pals[2]);
+      expect(end.flat(2).every((v) => v >= 0 && v < 16)).toBe(true);
     });
 
     it('fades exactly like GRPDRV AH=16h', (ctx) => {

@@ -145,6 +145,57 @@ export function unitFrames(entry: Uint8Array): Uint8Array[][] {
   return [0, 1, 2, 3].map((d) => [cells[d], cells[d + 4]]);
 }
 
+/**
+ * A square close-up frame: HEXICHR entries are 36 cells (6x6, 96x96 px, mounted officer), HEXBCHR
+ * entries 0..168 are 16 cells (4x4, 64x64 px, soldier poses) and 169..180 are 9 cells (3x3, 48x48 px,
+ * effects such as arrows). 1cb6:F11A selects 9 cells per frame for entry 0xA9 + n and 1cb6:F153 selects
+ * 16; the row-major cell order is inferred from the images, not traced.
+ */
+export function squareFrame(entry: Uint8Array, mirror = false): IndexedImage {
+  const cells = decodeCells(entry, mirror);
+  const side = Math.round(Math.sqrt(cells.length));
+  const order = Array.from({ length: side * side }, (_, i) => {
+    if (!mirror) return i;
+    const x = i % side;
+    return i - x + (side - 1 - x); // mirrored cells also swap columns
+  });
+  return composeCells(cells, order, side, side);
+}
+
+// ---------------------------------------------------------------------------------------------
+// World map (MMAP.R3 + MMAPBGPL.R3)
+
+/** DS offset of the world map size table: per chapter [width, height] in 16-px tiles (0cf5:D722). */
+export const WORLD_MAP_DIMS = 0x2f06;
+/** DS offset of the MMAP.R3 entry number per chapter (u16, 0cf5:E457). */
+export const WORLD_MAP_ENTRY = 0x2f9c;
+export const WORLD_MAP_CHAPTERS = 5;
+/** MAIN.EXE DGROUP offset in the load image (DS:X is at header + 0x313A0 + X). */
+const MAIN_DS_FILE = 0x313a0;
+
+export interface WorldMapInfo {
+  chapter: number;
+  entry: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The world map of each chapter (chapter = 0cf5:77DA(DS:7A80)). MMAP.R3 entry `entry` holds width*height
+ * tile bytes (MMAPBGPL.R3 entry 0 cells, row-major) followed by (width/2)*(height/2)/8 bytes, one bit
+ * per 2x2 tile block (0cf5:E41C loads both; what the bits mean is not traced).
+ */
+export function readWorldMaps(mainExe: Uint8Array): WorldMapInfo[] {
+  const header = (mainExe[8] | (mainExe[9] << 8)) * 16;
+  const ds = header + MAIN_DS_FILE;
+  return Array.from({ length: WORLD_MAP_CHAPTERS }, (_, chapter) => ({
+    chapter,
+    entry: mainExe[ds + WORLD_MAP_ENTRY + 2 * chapter] | (mainExe[ds + WORLD_MAP_ENTRY + 2 * chapter + 1] << 8),
+    width: mainExe[ds + WORLD_MAP_DIMS + 2 * chapter],
+    height: mainExe[ds + WORLD_MAP_DIMS + 2 * chapter + 1],
+  }));
+}
+
 // ---------------------------------------------------------------------------------------------
 // SSC sprites (SSCCHR1.R3 / SSCCHR2.R3)
 
