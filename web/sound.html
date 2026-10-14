@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hero Sound Test</title>
+  <link rel="stylesheet" href="./src/style.css" />
+  <style>
+    .snd { max-width: 900px; margin: 0 auto; padding: 16px; }
+    .snd table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    .snd td, .snd th { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+    .snd td.n { width: 3em; color: var(--muted, #888); font-variant-numeric: tabular-nums; }
+    .snd tr.on td { color: var(--accent); }
+    .snd .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0 20px; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="./">← 삼국지영걸전 Web</a>
+    <span>Sound test: SBOPL2 driver port + OPL2 emulation</span>
+  </header>
+  <section id="picker" class="picker" hidden>
+    <h2>Load your copy of the game</h2>
+    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. It is kept only in this browser.</p>
+    <label class="btn">Choose Hero.zip<input type="file" data-kind="zip" accept=".zip" hidden /></label>
+    <label class="btn">Choose GAME folder<input type="file" data-kind="dir" webkitdirectory hidden /></label>
+    <p class="error"></p>
+  </section>
+  <main id="sound" class="snd" hidden>
+    <div class="bar">
+      <button type="button" id="stop">Stop</button>
+      <button type="button" id="fade">Fade out</button>
+      <label><input type="checkbox" id="gamelike" /> change songs like the game (fade, then start)</label>
+      <label>Volume <input type="range" id="vol" min="0" max="2" step="0.05" value="1" /></label>
+      <span id="status"></span>
+    </div>
+    <h2>MUSIC.R3</h2>
+    <table id="music"></table>
+    <h2>OPMUSIC.R3 (opening) / EDMUSIC.R3 (ending)</h2>
+    <table id="other"></table>
+    <h2>Sound effects (MAIN.EXE)</h2>
+    <table id="sfx"></table>
+  </main>
+  <script type="module" src="./src/soundtest.ts"></script>
+</body>
+</html>
