@@ -107,6 +107,8 @@ export interface PlaythroughOptions {
   shot?: (name: string, screen: Screen) => void;
   /** CHOOSE answers not to give ("menu key#occurrence=answer"), learned by playToEnd from story game overs. */
   avoidChoices?: Set<string>;
+  /** CHOOSE answers start at this option instead of the first (coverage runs: the other story branches). */
+  choiceOffset?: number;
 }
 
 export type PlayResult = 'ending' | 'gameOver' | 'quit' | 'stopped' | 'hang' | 'error';
@@ -135,7 +137,7 @@ export class Playthrough {
   private current: BattleRecord | null = null;
   /** The outcome of run(), once it returned. */
   result: PlayResult | null = null;
-  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices'>> & PlaythroughOptions;
+  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset'>> & PlaythroughOptions;
 
   constructor(files: Map<string, Uint8Array>, opts: PlaythroughOptions = {}) {
     this.opts = { start: 'new', seed: 12345, botAttempts: 3, forceAll: false, saveSlot: 4, hangFrames: 400_000, ...opts };
@@ -336,7 +338,7 @@ export class Playthrough {
       const n = this.chooseCount.get(this.chooseKey) ?? 0;
       this.chooseCount.set(this.chooseKey, n + 1);
       const bad = (i: number) => this.chooseUnsafe.has(i) || !!this.opts.avoidChoices?.has(`${this.chooseKey}#${n}=${i}`);
-      let k = n % buttons.length;
+      let k = (n + (this.opts.choiceOffset ?? 0)) % buttons.length;
       for (let j = 0; j < buttons.length && bad(k); j++) k = (k + 1) % buttons.length;
       this.choices.push(`${this.chooseKey}#${n}=${k}`);
       this.log(`CHOOSE ${k} of ${labels.join(' / ')}${this.chooseUnsafe.size ? ` (avoiding ${[...this.chooseUnsafe].join(',')})` : ''}`);
