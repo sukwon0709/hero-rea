@@ -284,7 +284,9 @@ export interface ScriptHost {
 
 export type RunResult =
   | 'none' // no record matched the trigger
-  | 'end' // event finished (END, GOTO_BLOCK, NEXT_CHAPTER, LEAVE_GROUP, CHOOSE target end ...)
+  | 'end' // event finished (END in a resident group, CHOOSE target end ...); the group stays
+  | 'next' // event finished and the script moved on (LEAVE_GROUP, GOTO_BLOCK, NEXT_CHAPTER, END of a
+  //          non-resident group): the original's results 5/6, the caller keeps dispatching
   | 'gameOver'
   | 'ending';
 
@@ -442,6 +444,8 @@ export class ScriptVM {
   async run(): Promise<RunResult> {
     const s = this.state;
     const h = this.host;
+    // Running (or resuming) clears the suspension; a host that suspends again sets it while it runs.
+    s.status = 0;
     let skip = 0;
     let talkMsg = -1;
     for (;;) {
@@ -539,7 +543,7 @@ export class ScriptVM {
           s.block = c.block;
           s.group = 0;
           s.pc = 0xffff;
-          return 'end';
+          return 'next';
         case 'DUEL':
           await h.duel?.(c.a, c.b);
           break;
@@ -553,10 +557,10 @@ export class ScriptVM {
           s.block = 0;
           s.group = 0;
           h.stageChanged?.(s.chapter, s.stage);
-          return 'end';
+          return 'next';
         case 'LEAVE_GROUP':
           this.advanceGroup();
-          return 'end';
+          return 'next';
         case 'SET_FLAG':
           if (c.flag >= 0x100) h.log?.(`flag out of range ${c.flag}`);
           else setFlag(s, c.flag, c.clear === 0);
@@ -687,7 +691,10 @@ export class ScriptVM {
           break;
         case 'END':
           // 0cf5:9774: a non-resident group is done once one of its events ends
-          if (!this.groupInfo().resident) this.advanceGroup();
+          if (!this.groupInfo().resident) {
+            this.advanceGroup();
+            return 'next';
+          }
           return 'end';
         default: {
           const never: never = c;

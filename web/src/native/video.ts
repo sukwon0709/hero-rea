@@ -22,6 +22,8 @@ export class Video {
   cursor = CURSOR.ARROW as number;
   /** Frames presented so far (60 Hz). */
   ticks = 0;
+  /** Do not wait for the display between frames (headless tests). */
+  fast = false;
   private lastSig = '';
 
   constructor(
@@ -82,7 +84,8 @@ export class Video {
         this.present();
         resolve();
       };
-      if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(done);
+      if (this.fast) setTimeout(done, 0);
+      else if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(done);
       else setTimeout(done, 16);
     });
   }

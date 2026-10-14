@@ -3,7 +3,8 @@
 // event interpreter (engine/script.ts) drives, and the hand-off to battle mode (battle/scene.ts).
 // Implements the GameContext of context.ts.
 
-import type { GameContext, RunBattle } from './context';
+import type { EventResult, GameContext, RunBattle } from './context';
+import { Rng } from '../engine/battle/rules';
 import type { Screen } from '../engine/screen';
 import type { Input } from '../engine/input';
 import type { SoundPlayer } from '../audio/player';
@@ -14,7 +15,6 @@ import {
   newScriptState,
   readEventSave,
   writeEventSave,
-  type RunResult,
   type ScriptHost,
   type ScriptState,
   type TextContext,
@@ -59,6 +59,10 @@ export class Game implements GameContext {
   state: GameState;
   vm: ScriptVM;
   battleHost: Partial<ScriptHost> | null = null;
+  /** DS:0xcc8 random generator, shared with battle mode (seeded from the clock like srand(time)). */
+  rng = new Rng((Date.now() ^ 0x5eed) >>> 0);
+  /** Officers chosen by FORMATION for a battle with the formation flag, read by battle mode. */
+  formation: number[] | undefined;
   /** The host the interpreter calls (forwards to battleHost where it defines a method). */
   private readonly host: ScriptHost;
   private pictureSaved: { data: Uint8Array } | null = null;
@@ -66,6 +70,8 @@ export class Game implements GameContext {
   private mapShown = false;
   /** The world map was just loaded: SCREEN_MAP centres it on 유비. */
   private focusPending = false;
+  /** Battle mode replaced the main frame; the next location redraws it. */
+  private frameStale = false;
   /** Set by a load until the loaded map is on screen. */
   private loadedGame = false;
   private inputLocked = false;
@@ -159,11 +165,9 @@ export class Game implements GameContext {
   // ------------------------------------------------------------------ events
 
   /** Runs the event selected by a trigger; a MAP command suspends it ('suspended'). */
-  async dispatch(trigger: Trigger): Promise<RunResult | 'suspended'> {
+  async dispatch(trigger: Trigger): Promise<EventResult> {
     try {
       const r = await this.vm.dispatch(trigger);
-      // The event ran to its end: a resumed (status 1) event must not be resumed again.
-      this.script.status = 0;
       if (r === 'gameOver') this.state.status |= STATUS.GAME_OVER;
       if (r === 'ending') this.state.status |= STATUS.ENDING;
       return r;
@@ -173,8 +177,8 @@ export class Game implements GameContext {
     }
   }
 
-  async runEvent(trigger: Trigger): Promise<void> {
-    await this.dispatch(trigger);
+  async runEvent(trigger: Trigger): Promise<EventResult> {
+    return this.dispatch(trigger);
   }
 
   /** Runs auto events until none matches or the location / status changes. */
@@ -249,6 +253,7 @@ export class Game implements GameContext {
         this.refreshStatus();
       },
       addItem: (item) => this.addItem(item),
+      formation: () => this.formationScreen(),
       setForce: (o, f) => {
         const d = this.state.officers[o & 0x1ff]?.dyn;
         if (d) d.flags = (d.flags & ~0x1f) | (f & 0x1f);
@@ -283,12 +288,16 @@ export class Game implements GameContext {
       },
       stageChanged: (chapter) => {
         if (chapter !== this.state.progress.chapter) {
-          // 0cf5:b272: a new chapter reloads its BBKSDAT1 section
+          // 0cf5:b272: a new chapter reloads its BBKSDAT1 section (town names, places and state)
           this.state.progress.chapter = chapter;
-          const sec = this.assets.tables.chapterSection[chapter];
-          const fresh = newGame(parseMSaveHeader(this.assets.file('MSAVE.R3')), this.assets.bak, (s) => this.assets.section(s), this.assets.tables);
-          void sec;
-          this.state.towns = fresh.towns.map((t, i) => ({ ...t, dyn: this.state.towns[i]?.dyn ?? t.dyn }));
+          const t = this.assets.tables;
+          const k = t.chapterSection[chapter] ?? 0;
+          const sec = this.assets.section(k);
+          const base = t.sectionTownBase[k];
+          this.state.towns = sec.towns.map((town, i) => {
+            const e = Math.min(base + i, t.townSmapEntry.length - 1);
+            return { ...town, pos: t.townPos[e], smapEntry: t.townSmapEntry[e], dyn: { ...sec.defaultDyn[i] } };
+          });
         }
       },
       log: (m) => this.log(m),
@@ -390,6 +399,7 @@ export class Game implements GameContext {
   /** WALK_TO / FOCUS on the world map: scroll so that (x, y) is centred. */
   private async scrollTo(x: number, y: number) {
     if (this.field.kind !== 'world') return;
+    this.focusPending = false;
     const sx0 = this.field.scrollX, sy0 = this.field.scrollY;
     this.field.focusOn(x, y);
     const tx = this.field.scrollX, ty = this.field.scrollY;
@@ -452,6 +462,13 @@ export class Game implements GameContext {
     s.map = (mode << 12) | loc.map;
     s.area = loc.key;
     if (mode === 3) return;
+    if (this.frameStale) {
+      // back from battle mode, which draws its own frame (the screen is dark here)
+      this.frameStale = false;
+      if (!this.video.dark) await this.video.fadeOut(8);
+      this.screen.clear(0);
+      this.drawFrame();
+    }
     this.focusPending = mode === 1;
     if (mode === 1) this.field.loadWorld(this.state.progress.chapter);
     else if (mode === 0) this.field.loadRoom(0, this.state.towns[loc.map]?.smapEntry ?? 0);
@@ -468,7 +485,8 @@ export class Game implements GameContext {
         const type = this.field.buildingType(loc.map);
         if (mode === 2 && type === 7) this.music(15);
         else if (mode === 0) this.music(this.state.progress.chapter === 3 && this.state.progress.territory === 0x0b ? 1 : 5);
-        const pos = this.entryCell(loc.x, loc.y);
+        // into a building by its door: at its exit; into a town: where the location says
+        const pos = mode === 2 ? this.entryCell(-1, -1) : this.entryCell(loc.x, loc.y);
         if (!this.field.actors.has(0)) this.field.place(0, pos.x, pos.y, 1);
         this.placeTownsfolk();
       } else if (mode === 1) {
@@ -486,6 +504,8 @@ export class Game implements GameContext {
 
   private entryCell(x: number, y: number): { x: number; y: number } {
     if (this.field.attr(x, y) === ATTR.WALK) return { x, y };
+    // a door: step out in front of it
+    for (const [dx, dy] of [[0, 1], [1, 1], [-1, 1], [1, 0], [-1, 0], [0, 2]]) if (this.field.attr(x + dx, y + dy) === ATTR.WALK) return { x: x + dx, y: y + dy };
     for (let yy = 19; yy >= 0; yy--)
       for (let xx = 0; xx < 31; xx++) if (this.field.attr(xx, yy) === ATTR.EXIT || this.field.attr(xx, yy) === ATTR.GATE) {
         for (const [dx, dy] of [[1, -1], [1, 0], [0, -1], [-1, -1], [1, 1], [-1, 0]]) if (this.field.attr(xx + dx, yy + dy) === ATTR.WALK) return { x: xx + dx, y: yy + dy };
@@ -506,10 +526,10 @@ export class Game implements GameContext {
     if (!g) return;
     for (const person of g.people) {
       for (let tries = 0; tries < 200; tries++) {
-        const x = Math.floor(Math.random() * 16) * 2, y = Math.floor(Math.random() * 10) * 2;
+        const x = this.rng.rand(16) * 2, y = this.rng.rand(10) * 2;
         if (this.field.attr(x, y) !== ATTR.WALK) continue;
         if ([...this.field.actors.values()].some((a) => a.x === x && a.y === y)) continue;
-        this.field.place(person | 0x400, x, y, Math.floor(Math.random() * 4));
+        this.field.place(person | 0x400, x, y, this.rng.rand(4));
         break;
       }
     }
@@ -798,12 +818,15 @@ export class Game implements GameContext {
     }
     if (this.inputLocked && this.field.kind !== 'world') return false;
     if (this.field.kind === 'world') return this.worldClick(c.x, c.y);
-    if (actor && actor.id !== 0) return this.talkTo(actor);
-    if (cell) {
-      const v = this.field.attr(cell.x, cell.y);
-      if (v < 0x7c || v === ATTR.GATE || v === ATTR.EXIT) return this.useDoor(cell.x, cell.y, v);
+    // the click's own position (the pointer may have moved since the hover test)
+    const target = this.field.actorAt(c.x, c.y);
+    const where = this.field.cellAt(c.x, c.y);
+    if (target && target.id !== 0) return this.talkTo(target);
+    if (where) {
+      const v = this.field.attr(where.x, where.y);
+      if (v < 0x7c || v === ATTR.GATE || v === ATTR.EXIT) return this.useDoor(where.x, where.y, v);
       if (v === ATTR.WALK && this.field.actors.has(0)) {
-        this.field.walkPath(0, cell.x, cell.y, this.field.actors.get(0)!.dir);
+        this.field.walkPath(0, where.x, where.y, this.field.actors.get(0)!.dir);
         await this.waitMoves();
       }
     }
@@ -912,20 +935,24 @@ export class Game implements GameContext {
     if (r !== 'none' || this.state.status & STATUS.LOCATION_CHANGED) return true;
     if (this.inputLocked) return true;
     const loc = this.state.location;
-    this.state.prevLocation = { ...loc };
     if (v < 0x7c) {
-      // enter building v (PMAP entry)
+      // enter building v (PMAP entry); the way back is this door of the town
+      this.state.prevLocation = { ...loc, x, y };
       loc.mode = (loc.mode & 0xf0) | 2;
       loc.map = v;
       loc.entered = 1;
     } else if (this.mode === 2 && v === ATTR.EXIT) {
-      // back to the town
+      // back to the town: where SET_PREV_MAP or the door we came in by says
+      const prev = this.state.prevLocation;
+      const back = (prev.mode & 0xf) === 0 && prev.map === loc.key;
+      this.state.prevLocation = { ...loc };
       loc.mode = loc.mode & 0xf0;
       loc.map = loc.key;
       loc.entered = 1;
-      loc.x = x;
-      loc.y = y;
+      loc.x = back ? prev.x : x;
+      loc.y = back ? prev.y : y;
     } else {
+      this.state.prevLocation = { ...loc };
       // town gate: out to the world map
       loc.mode = (loc.mode & 0xf0) | 1;
       loc.entered = 1;
@@ -1118,6 +1145,39 @@ export class Game implements GameContext {
     }
   }
 
+  // ------------------------------------------------------------------ formation (op 23)
+
+  /**
+   * FORMATION (op 23, 2cb4:2be2): the player picks the officers for the free player records of the
+   * BATTLE_SETUP (officer 0x400); they replace the placeholders in slot order. The original's
+   * formation screen (2cb4:274c..2af2) is not reproduced: this is a menu of the roster instead.
+   */
+  private async formationScreen() {
+    const units = this.script.units;
+    const player = units.filter((u) => u.officer !== 0xffff && !(u.flags & 1));
+    const free = player.filter((u) => u.officer === 0x400);
+    if (!free.length) return;
+    const fixed = new Set(player.filter((u) => u.officer < 0x400).map((u) => u.officer));
+    const pool = rosterOfficers(this.state).filter((o) => !fixed.has(o.index));
+    const chosen: number[] = [];
+    while (chosen.length < free.length && chosen.length < pool.length) {
+      const left = pool.filter((o) => !chosen.includes(o.index));
+      const r = await this.ui.menu(
+        left.map((o) => o.name),
+        { x: 0x1a0, y: 0x20 + LAYOUT_Y },
+      );
+      if (r < 0) {
+        if (chosen.length) break;
+        continue;
+      }
+      chosen.push(left[r].index);
+    }
+    if (this.script.hexFlag & 1) {
+      // the formation path of the battle setup (2cb6:4e60) deploys this list in slot order (BattleExtras.formation)
+      this.formation = [...player.filter((u) => u.officer < 0x400).map((u) => u.officer), ...chosen];
+    } else chosen.forEach((o, i) => (free[i].officer = o));
+  }
+
   // ------------------------------------------------------------------ shop (OP31)
 
   private shopName(): string {
@@ -1251,10 +1311,12 @@ export class Game implements GameContext {
     this.mapShown = false;
     this.field.kind = 'none';
     this.field.clearActors();
+    this.frameStale = true;
     if (mod?.runBattle) {
       try {
         const r = await mod.runBattle(this, map);
         this.battleHost = null;
+        this.formation = undefined;
         if (r === 'lost' && !(this.state.status & 0x6c)) this.state.status |= STATUS.GAME_OVER;
         if (r === 'ended' && !(this.state.status & 0x6c)) this.state.status |= STATUS.QUIT;
       } catch (e) {

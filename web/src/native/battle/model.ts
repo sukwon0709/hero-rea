@@ -136,7 +136,10 @@ export class Battle {
       rng,
       items,
       weather: 1,
-      closeup: true, // see Battle.archerVolleys
+      // archer volleys depend on the close-up option at the time of the attack (combat.ts fight())
+      get closeup() {
+        return (state.progress.battleOptions & 0xf0) === 0;
+      },
       officerIds: state.officers.map((o) => o.id),
       learn: this.learn,
       grid: new Uint8Array(n).fill(NONE),
@@ -175,17 +178,6 @@ export class Battle {
   /** 1cb6:defe: close-up scenes are shown when the option's high nibble is 0 ("본다"). */
   get closeupOn(): boolean {
     return (this.options & 0xf0) === 0;
-  }
-
-  /**
-   * Archer volleys drawn by 1cb6:e91a before a physical attack: 2*n passes of 4 x rand(16), with n = 1
-   * when close-ups are on and 2 when they are off (test at 1cb6:eab5). combat.ts draws 8 (closeup =
-   * true); the caller draws the other 8 itself when close-ups are off.
-   */
-  preDrawArrows(attacker: number, param: number): void {
-    const cls = this.officerOf(this.units[attacker]).cls;
-    if (param === 7 || cls < 3 || cls > 5 || this.closeupOn) return;
-    for (let k = 0; k < 8; k++) this.rng.rand(16);
   }
 
   weatherType(): number {

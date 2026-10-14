@@ -13,7 +13,6 @@ import { floodMove, rangeCells, rebuildUnitMap, terrainAt, unitAt, unitsInRange,
 import { battleNameLines } from '../../engine/battle/map';
 import {
   AiMode,
-  CLASS_ATTACK_TYPE,
   CLASS_BAND,
   CLASS_RANGE,
   DIRS,
@@ -142,26 +141,18 @@ export class BattleScene {
 
   // ---------------------------------------------------------------- script events
 
-  private groupKey(): string {
-    const s = this.ctx.vm.state;
-    return `${s.chapter}.${s.stage}.${s.block}.${s.group}`;
-  }
-
   /**
    * One dispatch (0cf5:81fe..85e0 + 8794). 'more' stands for the original's results 5/6 (the event
-   * suspended or left its group, so the caller keeps dispatching); 'stop' for an event that ended.
+   * suspended or the script moved on, so the caller keeps dispatching); 'stop' for an event that ended.
    */
   async fire(t: Trigger): Promise<FireResult> {
-    const vm = this.ctx.vm;
-    const before = this.groupKey();
-    vm.state.record[0] = 0;
     this.v.render();
-    await this.ctx.runEvent(t);
+    const r = await this.ctx.runEvent(t);
     this.checkLeftBattle();
     rebuildUnitMap(this.b.s);
     this.v.render();
-    if (vm.state.record[0] === 0xff && this.groupKey() === before) return 'none';
-    return this.groupKey() !== before ? 'more' : 'stop';
+    if (r === 'none') return 'none';
+    return r === 'next' || r === 'suspended' ? 'more' : 'stop';
   }
 
   /**
@@ -851,7 +842,6 @@ export class BattleScene {
     this.face(A, D.x - A.x);
     this.face(D, A.x - D.x);
     this.v.ensureVisible(D.x, D.y);
-    this.b.preDrawArrows(a, CLASS_ATTACK_TYPE[this.b.officerOf(A).cls]);
     const lvA = this.b.officerOf(A).level;
     const lvD = this.b.officerOf(D).level;
     const before = this.snapshotHp([a, d]);

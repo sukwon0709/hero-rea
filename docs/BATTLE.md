@@ -375,8 +375,7 @@ The combat struct is at `DS:0xe52e`. `kind` 1 = physical (param = the attacker's
    per volley. The draw loop at `1cb6:eab5` runs `2*n` passes with n = 1 when close-ups are on
    (`DS:0x7a84 & 0xf0 == 0`, tested at `defe`) and n = 2 when they are off. That is 8 draws with
    close-ups and 16 without. This must be reproduced for RNG sync. (`combat.ts fight()` draws 8 for
-   `closeup = true` and 4 for false; the battle scene keeps `closeup = true` and draws the extra 8
-   itself when close-ups are off: `Battle.preDrawArrows`.)
+   `closeup = true` and 16 for false; the battle scene's `closeup` follows the option.)
 2. `df14` damage (verified):
    - kind 1: class triangle via class/3 groups. Foot beats archers, archers beat horse, horse beats
      foot. Defence -25% against the beaten group, +25% against the stronger.

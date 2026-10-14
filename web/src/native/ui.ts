@@ -431,7 +431,9 @@ export class GameUi implements Ui {
     if (!this.framePic) return;
     if (s.face !== undefined) this.portrait(s.face, 0x228, 0x18 + LAYOUT_Y);
     this.fillPatch(1, 0x238, 0x88 + LAYOUT_Y, 0x30, 0x10);
-    this.text(String(s.money).padStart(5, ' '), 0x48, 0x88 + LAYOUT_Y);
+    // "%5u" at column 0x48; the emulator shows the digits one column left, as if the text console's
+    // swallowed-space flag (DS:0x64de) were set here and ate the first pad space
+    this.text(String(s.money).padStart(5, ' ').replace(/^ /, ''), 0x48, 0x88 + LAYOUT_Y);
     this.fillPatch(1, 0x248, 0xa0 + LAYOUT_Y, 0x20, 0x10);
     this.text(String(s.level).padStart(4, ' '), 0x49, 0xa0 + LAYOUT_Y);
     if (!s.territory) return;

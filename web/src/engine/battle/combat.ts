@@ -81,9 +81,10 @@ export function fight(s: CombatState, a: number, d: number, kind: 1 | 2 | 3, par
   const hp = od.hp;
   const morale = D.morale;
   const terrain = terrainAt(s, D.x, D.y);
-  // e91a: the archer volley animation draws 4 x rand(16) per arrow before any damage roll.
+  // e91a: the archer volley animation draws 4 x rand(16) per pass before any damage roll; the loop at
+  // 1cb6:eab5 runs 2*n passes, n = 1 with close-ups on and 2 with them off (8 or 16 draws).
   if (kind === 1 && param !== 7 && oa.cls >= 3 && oa.cls <= 5) {
-    for (let v = s.closeup ? 2 : 1; v > 0; v--) for (let k = 0; k < 4; k++) s.rng.rand(16);
+    for (let v = s.closeup ? 2 : 4; v > 0; v--) for (let k = 0; k < 4; k++) s.rng.rand(16);
   }
   let damage: number;
   if (kind === 1) {

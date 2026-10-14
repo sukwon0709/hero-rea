@@ -8,7 +8,8 @@ import type { GameFont } from '../formats/font';
 import type { Rgb4 } from '../formats/palette';
 import type { GameState } from '../engine/state';
 import type { ScriptVM, ScriptState, Trigger } from '../engine/script';
-import type { ScriptHost } from '../engine/script';
+import type { RunResult, ScriptHost } from '../engine/script';
+import type { Rng } from '../engine/battle/rules';
 import type { Message } from '../formats/scenario';
 
 /** Decoded original files, loaded lazily and cached. Keys are upper-case file names. */
@@ -50,8 +51,14 @@ export interface GameContext {
   state: GameState;
   vm: ScriptVM;
   script: ScriptState;
-  /** Fires a script trigger and runs the resulting event (battle uses this for per-turn / per-action events). */
-  runEvent(trigger: Trigger): Promise<void>;
+  /**
+   * Fires a script trigger and runs the resulting event (battle uses this for per-turn / per-action events).
+   * Resolves the dispatch result: 'none' (no record matched), 'end', 'next' (the script moved on: keep
+   * dispatching, the original's 5/6), 'suspended' (MAP changed the location), 'gameOver' or 'ending'.
+   */
+  runEvent(trigger: Trigger): Promise<EventResult>;
+  /** The game's random generator (DS:0xcc8), shared by field events and battle. */
+  rng?: Rng;
   /**
    * Optional: while battle mode runs it may set this; every ScriptHost call whose method is defined here
    * goes to it instead of the field engine's host (talk/narrate/caption still fall back to the field
@@ -59,6 +66,9 @@ export interface GameContext {
    */
   battleHost?: Partial<ScriptHost> | null;
 }
+
+/** Result of GameContext.runEvent. */
+export type EventResult = RunResult | 'suspended';
 
 /** Entry point of battle mode, implemented in web/src/native/battle/scene.ts. */
 export type RunBattle = (ctx: GameContext, map: number) => Promise<'won' | 'lost' | 'ended'>;

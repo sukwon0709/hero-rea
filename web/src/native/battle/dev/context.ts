@@ -147,9 +147,7 @@ export function buildContext(a: DevAssets, slot: number, parts: DevContextParts)
     state,
     vm,
     script: vm.state,
-    async runEvent(t) {
-      await vm.dispatch(t);
-    },
+    runEvent: (t) => vm.dispatch(t),
   };
   return { ctx, host };
 }
