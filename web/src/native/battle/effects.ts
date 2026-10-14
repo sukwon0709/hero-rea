@@ -23,9 +23,8 @@ function drawBig(scene: BattleScene, u: Unit, x: number, y: number, frame: numbe
   const v = scene.v;
   const saved = v.screen.grab(x, y, 32, 32);
   const flags = u.flags;
-  const baseRight = u.slot >= PLAYER_SLOTS;
-  if (faceRight !== baseRight) u.flags |= 0x10;
-  else u.flags &= ~0x10;
+  if (faceRight) u.flags &= ~0x10;
+  else u.flags |= 0x10;
   v.screen.fillRect(x, y, 32, 32, 0);
   v.drawUnit(u, x, y, frame);
   u.flags = flags;

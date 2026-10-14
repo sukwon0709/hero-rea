@@ -76,7 +76,11 @@ async function runRecord(vm: ScriptVM, block: number, record: number): Promise<n
     await vm.run();
   } catch (e) {
     if (e instanceof BattleStart) {
-      s.status = 1; // resume after the MAP command on the next dispatch
+      // Finish the record (normally just END) now: ScriptVM.run does not clear `status` when it
+      // resumes, so a suspended context would make every later dispatch resume here.
+      s.status = 1;
+      await vm.run();
+      s.status = 0;
       return e.map;
     }
     throw e;

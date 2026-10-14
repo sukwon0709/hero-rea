@@ -224,7 +224,7 @@ export class Battle {
    * 1cb6:8422: puts a reserve unit on the field at (x,y), or the nearest free cell its move type can
    * stand on (7b08's search, simplified to a breadth-first ring search; the original recurses N,E,S,W).
    */
-  place(slot: number, visible: boolean, x: number, y: number): boolean {
+  place(slot: number, facingLeft: boolean | null, x: number, y: number): boolean {
     const u = this.units[slot];
     if (x >= this.width || y >= this.height) return false;
     if (u.status === Status.Reserve) {
@@ -240,8 +240,11 @@ export class Battle {
       if (!pos) return false;
       [x, y] = pos;
       u.status = Status.Field;
-      if (visible) u.flags |= UnitFlag.Visible;
-      else u.flags &= ~UnitFlag.Visible;
+      // 8d74: flag 0x10 = facing left; the record's bit 2 clear means facing left (1cb6:39b0)
+      if (facingLeft !== null) {
+        if (facingLeft) u.flags |= UnitFlag.Facing;
+        else u.flags &= ~UnitFlag.Facing;
+      }
     } else if (u.status === Status.Field) {
       this.s.unitAt[u.y * this.width + u.x] = NONE;
     }

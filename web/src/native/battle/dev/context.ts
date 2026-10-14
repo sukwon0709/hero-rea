@@ -127,8 +127,18 @@ export interface DevContextParts {
 export function buildContext(a: DevAssets, slot: number, parts: DevContextParts): { ctx: GameContext; host: ReturnType<typeof devHost> } {
   const { state, script } = buildState(a, slot);
   const host = devHost(parts.ui, state);
-  const vm = new ScriptVM((c) => a.chapter(c), host, script);
+  // like the field engine's host: a method defined in ctx.battleHost takes over
+  const routed = new Proxy(host, {
+    get(t, k) {
+      const bh = ctx.battleHost as Record<string | symbol, unknown> | null | undefined;
+      const m = bh?.[k];
+      if (typeof m === 'function') return m;
+      return (t as unknown as Record<string | symbol, unknown>)[k];
+    },
+  });
+  const vm = new ScriptVM((c) => a.chapter(c), routed, script);
   const ctx: GameContext = {
+    battleHost: null,
     screen: parts.screen,
     input: parts.input,
     sound: parts.sound ?? null,

@@ -39,6 +39,10 @@ export interface BattleExtras {
   rng?: Rng;
   /** Player officers chosen on the formation screen (slot order), for stages with formation. */
   formation?: number[];
+  /** Zero-player mode (DS:0x3a3c bit 0): player units are computer-controlled (tests, demo). */
+  autoPlay?: boolean;
+  /** Called after the units are deployed (harness / tests: give autoplay units orders). */
+  afterSetup?: (scene: BattleScene) => void;
 }
 
 /** Sound effect numbers passed to SoundPlayer.playSfx (MAIN.EXE 0cf5:6280 arguments). */
@@ -58,12 +62,17 @@ export class BattleScene {
   readonly v: BattleView;
   readonly host: BattleHost;
   private snapshot: { dyn: string; script: string; money: number } | null = null;
+  /** Location mode and main-loop status bits when the battle began (see checkLeftBattle). */
+  private readonly entryMode: number;
+  private readonly entryStatus: number;
 
   constructor(
     readonly ctx: GameContext,
     readonly mapNo: number,
     readonly extras: BattleExtras = {},
   ) {
+    this.entryMode = ctx.state.location.mode;
+    this.entryStatus = ctx.state.status & 0x6e;
     const rng = extras.rng ?? new Rng((Date.now() ^ 0x5eed) >>> 0);
     this.b = new Battle(ctx.state, ctx.vm.state, ctx.assets.entries('HEXZMAP.R3'), ctx.assets.main, rng, mapNo);
     this.v = new BattleView(ctx, this.b);
@@ -148,10 +157,23 @@ export class BattleScene {
     vm.state.record[0] = 0;
     this.v.render();
     await this.ctx.runEvent(t);
+    this.checkLeftBattle();
     rebuildUnitMap(this.b.s);
     this.v.render();
     if (vm.state.record[0] === 0xff && this.groupKey() === before) return 'none';
     return this.groupKey() !== before ? 'more' : 'stop';
+  }
+
+  /**
+   * An event that changed the map (MAP 0x1000 after BATTLE_END: the field engine suspends the event,
+   * switches the location and sets status 0x02) or ended the game (GAME_OVER: status 0x20) ends the
+   * battle even when no BATTLE_END set the result.
+   */
+  private checkLeftBattle() {
+    const st = this.ctx.state;
+    const fresh = (st.status & 0x6e) & ~this.entryStatus;
+    const moved = this.entryMode === 3 && st.location.mode !== 3;
+    if (this.b.info.result === 0 && (moved || fresh)) this.b.info.result = st.status & 0x20 ? 3 : 2;
   }
 
   /** while (ev in 5,6 and no result): e = trigger, else auto; run (4b52, 4abc, 8504 loops). */
@@ -221,7 +243,6 @@ export class BattleScene {
   async leave(slot: number) {
     const u = this.units[slot];
     if (u.status !== Status.Field) return;
-    const killed = this.b.officerOf(u).hp === 0;
     unitLeaves(this.b.s, slot);
     this.sfx(SFX.leave);
     await this.redraw();
@@ -240,7 +261,7 @@ export class BattleScene {
       this.b.info.result = 3;
       this.ctx.sound?.changeSong?.(MUSIC_LOST);
       await this.say(S.lostNarration);
-    } else await this.say(killed ? S.killed : S.retreated, this.name(slot));
+    } else await this.say(S.retreated, this.name(slot)); // 1cb6:8716: always 퇴각 here (0x41cc is unreachable)
   }
 
   async leaveAll(slots: number[]) {
@@ -288,6 +309,9 @@ export class BattleScene {
   private async battle(): Promise<number> {
     const b = this.b;
     b.setup(this.extras.formation);
+    // autoPlay (harness/tests): the computer plays the player's units
+    if (this.extras.autoPlay) for (let i = 0; i < PLAYER_SLOTS; i++) if (this.units[i].mode === AiMode.Player) this.units[i].mode = AiMode.AttackNearest;
+    this.extras.afterSetup?.(this);
     const leader = this.units[0];
     if (leader.status === Status.Field) this.v.centre(leader.x, leader.y);
     this.v.panelUnit = NONE;
@@ -633,7 +657,7 @@ export class BattleScene {
         // 1cb6:bcb2: back to where the unit stood
         this.sfx(SFX.cancel);
         u.flags &= ~UnitFlag.Moved;
-        if (u.x !== from[0] || u.y !== from[1]) this.b.place(slot, true, from[0], from[1]);
+        if (u.x !== from[0] || u.y !== from[1]) this.b.place(slot, null, from[0], from[1]);
         this.v.panelUnit = slot;
         return false;
       }
@@ -752,12 +776,10 @@ export class BattleScene {
     await this.redraw();
   }
 
-  /** d862: face the target. Player sprites look left, enemy sprites right; flag 0x10 mirrors. */
+  /** 1cb6:d8c4 / ce01: face the target; flag 0x10 set = facing left (the cells as stored), clear = mirrored. */
   face(u: Unit, dx: number) {
     if (dx === 0) return;
-    const wantRight = dx > 0;
-    const baseRight = u.slot >= PLAYER_SLOTS;
-    if (wantRight !== baseRight) u.flags |= UnitFlag.Facing;
+    if (dx < 0) u.flags |= UnitFlag.Facing;
     else u.flags &= ~UnitFlag.Facing;
   }
 
@@ -1127,10 +1149,10 @@ export class BattleScene {
     applyMove(b.s, u, plan);
     const to: [number, number] = [u.x, u.y];
     if (watch && (to[0] !== from[0] || to[1] !== from[1]) && route.length) {
-      this.b.place(slot, true, from[0], from[1]);
+      this.b.place(slot, null, from[0], from[1]);
       this.v.ensureVisible(from[0], from[1]);
       await this.animateRoute(slot, route);
-      if (u.x !== to[0] || u.y !== to[1]) this.b.place(slot, true, to[0], to[1]);
+      if (u.x !== to[0] || u.y !== to[1]) this.b.place(slot, null, to[0], to[1]);
     }
     if (u.flags & UnitFlag.Scripted || u.mode === AiMode.MoveNoAttack || u.flags & UnitFlag.Confused) return;
     if (b.s.ai.tactic === NONE) {
@@ -1161,10 +1183,8 @@ function mustGo(scene: BattleScene, slot: number): boolean {
 }
 
 function chapterName(scene: BattleScene): Uint8Array {
-  // 0cf5:77da: the chapter's name ("서", "1", ...) from the stage title table of the progress chapter
-  const t = scene.ctx.state.title ?? '';
-  const m = t.match(/^(\S+)장/);
-  return euc(m ? m[1] : String(scene.ctx.state.progress.chapter));
+  // 1cb6:4372: near pointer table DS:0x3c78 indexed by the progress chapter (0cf5:77da)
+  return dsTable(scene.main, 0x3c78, scene.ctx.state.progress.chapter);
 }
 
 /** b8c0 without a caster (items): single heal of `kind` (1 troops, 2 morale, 3 both) at `power`. */

@@ -1,8 +1,9 @@
 // Script commands while a battle runs: the battle branches of the script VM (docs/BATTLE.md,
 // "Script commands (battle side)", 2cb4:007e..1824). The VM's host belongs to the field engine;
-// for the length of a battle the scene swaps in these methods and restores the originals after.
+// for the length of a battle the scene puts these methods in ctx.battleHost, which that host
+// forwards to (web/src/native/context.ts).
 
-import type { ScriptHost, TextContext } from '../../engine/script';
+import type { ScriptHost } from '../../engine/script';
 import type { TalkLine } from '../../formats/scenario';
 import { applyMove, planUnit } from '../../engine/battle/ai';
 import { unitLeaves } from '../../engine/battle/combat';
@@ -23,40 +24,36 @@ export class BattleHost {
 
   constructor(readonly scene: BattleScene) {}
 
-  /** Installs the battle methods on the VM's host; returns the function that restores it. */
+  /**
+   * Installs the battle methods as ctx.battleHost (the field engine's host forwards every method
+   * defined there); returns the function that removes them again.
+   */
   install(): () => void {
-    const host = this.scene.ctx.vm.host as unknown as Record<string, unknown>;
-    const mine = this.overrides() as Record<string, unknown>;
-    const saved = new Map<string, { had: boolean; value: unknown }>();
-    for (const k of Object.keys(mine)) {
-      saved.set(k, { had: Object.prototype.hasOwnProperty.call(host, k), value: host[k] });
-      host[k] = mine[k];
-    }
+    const ctx = this.scene.ctx;
+    const prev = ctx.battleHost ?? null;
+    ctx.battleHost = this.overrides();
     return () => {
-      for (const [k, v] of saved) {
-        if (v.had) host[k] = v.value;
-        else delete host[k];
-      }
+      ctx.battleHost = prev;
     };
   }
 
   private overrides(): HostOverrides {
     const sc = this.scene;
     const b = sc.b;
-    const origTalk = sc.ctx.vm.host.talk.bind(sc.ctx.vm.host);
-    const origAsk = sc.ctx.vm.host.ask.bind(sc.ctx.vm.host);
+    const ui = sc.ctx.ui;
+    const who = (id: number) => sc.ctx.state.officers[id];
     return {
-      // TALK: 2cb4:0208 scrolls to the speaker's unit first
-      talk: async (line: TalkLine, ctx: TextContext) => {
+      // TALK: 2cb4:0208 scrolls to the speaker's unit first, then the usual portrait box
+      talk: async (line: TalkLine) => {
         this.focusOfficer(line.speaker);
         await sc.redraw();
-        await origTalk(line, ctx);
+        await ui.message(line, { face: who(line.speaker)?.face, name: who(line.speaker)?.name });
         await sc.redraw();
       },
-      ask: async (line: TalkLine, ctx: TextContext) => {
+      ask: async (line: TalkLine) => {
         this.focusOfficer(line.speaker);
         await sc.redraw();
-        const r = await origAsk(line, ctx);
+        const r = await ui.confirm(line, { face: who(line.speaker)?.face, name: who(line.speaker)?.name });
         await sc.redraw();
         return r;
       },
@@ -67,13 +64,11 @@ export class BattleHost {
         await sc.redraw();
       },
       focus: (officer: number) => this.focusOfficer(officer),
-      // BATTLE_END / GAME_OVER: 2cb4:01ba sets the result (2 won, 3 lost; GAME_OVER also plays song 4)
+      // BATTLE_END: 2cb4:01ba sets the result: 3 (and song 4) when GAME_OVER follows, else 2.
+      // GAME_OVER itself is left to the field engine (it ends the game after the battle).
       battleEnd: async (_map: number, lost: boolean) => {
         b.info.result = lost ? 3 : 2;
-      },
-      gameOver: async () => {
-        b.info.result = 3;
-        sc.ctx.sound?.changeSong?.(4);
+        if (lost) sc.ctx.sound?.changeSong?.(4);
       },
       // PLACE / REINFORCE: 2cb4:007e
       placeCharacter: (officer: number) => {
@@ -185,10 +180,10 @@ export class BattleHost {
     if (plan && plan.route.length) {
       applyMove(b.s, u, plan);
       const to: [number, number] = [u.x, u.y];
-      b.place(slot, true, from[0], from[1]);
+      b.place(slot, null, from[0], from[1]);
       sc.v.ensureVisible(from[0], from[1]);
       await sc.animateRoute(slot, plan.route);
-      if (u.x !== to[0] || u.y !== to[1]) b.place(slot, true, to[0], to[1]);
+      if (u.x !== to[0] || u.y !== to[1]) b.place(slot, null, to[0], to[1]);
     }
     u.flags &= ~(UnitFlag.Scripted | UnitFlag.Moved | UnitFlag.Acted);
   }

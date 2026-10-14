@@ -118,7 +118,7 @@ are in `1cb6:4e60..4fca`.
 | +6,+7 | u8,u8 | tx, ty | AI target position (`9fa6`) |
 | +8 | u8 | order | acting order in the phase (`3e12`, `4eae`/`4ebe`) |
 | +9 | u8 | status | 0 empty, 1 reserve (not yet on the map), 2 on the field, 4 retreated (`4f18`/`4f08`) |
-| +0xa | u8 | flags | 0x02 confused, 0x04 script-controlled, 0x10 facing, 0x20 visible (cleared for hidden ambushers), 0x40 moved, 0x80 acted. Set/clear/test: `9ff6` / `4eda` / `4eec` |
+| +0xa | u8 | flags | 0x02 confused, 0x04 script-controlled, 0x10 facing left (set by `8d74`; the cells face left, so a clear flag draws mirrored), 0x20 visible (cleared for hidden ambushers), 0x40 moved, 0x80 acted. Set/clear/test: `9ff6` / `4eda` / `4eec` |
 | +0xb | u8 | mode | AI order (`4f3e` / `8a58`): 0 move to target, 1 attack nearest, 2 hold, 3 wait, 4 move without attacking, 7 player-controlled. Codes 5 and 6 are *inferred* (confused/paralysed names in the UI); the AI code only tests 0..4 |
 | +0xc | u8 | morale | 0..100 (`a1a6` / `898c`) |
 | +0xd | u8 | mp | tactic points (`4e9e` / `a07a`) |
@@ -190,10 +190,10 @@ read by `1cb6:3926`. The accessor is `0cf5:c13e`.
 |---|---|
 | +0 | u16 officer (0xffff = empty, 0x400 = skipped) |
 | +2,+3 | x, y |
-| +4 | u16 flags: bit 0 enemy side; bit 1 reserve (not placed until `REINFORCE`/`PLACE`); bit 2 hidden ambusher (placed without the visible flag) |
+| +4 | u16 flags: bit 0 enemy side; bit 1 reserve (not placed until `REINFORCE`/`PLACE`); bit 2 facing: clear = facing left. `3926:39b0` passes `(flags & 4) == 0` to `8422`, which hands it to `8d74`, the setter of unit flag 0x10 (facing left). It is not visibility: the visible flag 0x20 comes from `8222`/`81c4` |
 | +6 | AI order code 0..6, mapped through `DS:0x4fe6` = [3,1,2,0,0,4,4] to the unit mode (`ORDER_TO_MODE`) |
 | +7 | u16 param: codes 3 and 5 = target officer; codes 4 and 6 = target position (x = low byte, y = high byte) |
-| +9,+0xa | two bytes passed to `81c4` for enemies (*inferred*: level/equipment of generic troops; owned by the data worker) |
+| +9,+0xa | enemies only: class and level. `81c4(unit, +0xa, +9)` sets the officer's class from +9 and its level from +0xa, then full MP and troops, morale 100 and the visible flag. In the prologue, 화웅 gets class 6, level 5 |
 
 ## Battle setup
 
@@ -372,8 +372,11 @@ The combat struct is at `DS:0xe52e`. `kind` 1 = physical (param = the attacker's
 7 = counterattack), 2 = tactic (param = element<<4 | power), 3 = bomb item.
 
 1. **Arrow animation RNG**: for kind 1, param ≠ 7 and attacker class 3..5 (archers), 4 × rand(16)
-   per volley, with 2 volleys when close-up scenes are on, else 1. This must be reproduced for RNG
-   sync.
+   per volley. The draw loop at `1cb6:eab5` runs `2*n` passes with n = 1 when close-ups are on
+   (`DS:0x7a84 & 0xf0 == 0`, tested at `defe`) and n = 2 when they are off. That is 8 draws with
+   close-ups and 16 without. This must be reproduced for RNG sync. (`combat.ts fight()` draws 8 for
+   `closeup = true` and 4 for false; the battle scene keeps `closeup = true` and draws the extra 8
+   itself when close-ups are off: `Battle.preDrawArrows`.)
 2. `df14` damage (verified):
    - kind 1: class triangle via class/3 groups. Foot beats archers, archers beat horse, horse beats
      foot. Defence -25% against the beaten group, +25% against the stronger.
@@ -411,6 +414,14 @@ Code: `fight()` and `attack()` (`cd4a`/`d862` set flag 0x80).
 Status becomes 4 and the cell is cleared. Mode-0 units chasing that slot get target 0xff and mode 1.
 Then the defeat/retreat events run (`0cf5:86b8`, `842a`, `8494`, `85e0`). Code: `unitLeaves()`; the
 events are the caller's job.
+
+If no event ran (`di == 0` at `86ac`):
+- For officer 0 (유비), the battle is lost: result 3 (`a1d2(e196, 3)`), song 4, and message
+  `DS:0x4171`.
+- Otherwise the message is `DS:0x41b9` ("%s은(는) 퇴각했다!", `8716`).
+
+The `DS:0x41cc` ("전사했다") branch at `8725` is only reached when the officer is 0. The result
+test at `8705` returns first, so in practice it is unreachable.
 
 ### Morale and confusion
 
@@ -645,7 +656,7 @@ are the battle branches:
 |---|---|---|---|
 | 01 | MOVE o x y dir | `0cf5:9a88` → `2cb4:0130` | Refused if x ≥ width or y ≥ height. Otherwise: set flag 4 (scripted), mode 0, `(tx,ty) = (x,y)`, run `ce50` at once (BFS flag 2, unlimited moves, no ZOC), then clear flags 0xc4 |
 | (wait) | — | `0cf5:9c00` → `2cb4:018e` | Returns 1 while `8a6e` says the unit has not arrived |
-| 0a / 1a | PLACE / REINFORCE o | `0cf5:9984` → `2cb4:007e` | If the officer's unit is in reserve (status 1), find its deployment record, scroll there and put it on the field at the **record's** x,y (`8422`, visible unless record flag bit 2) |
+| 0a / 1a | PLACE / REINFORCE o | `0cf5:9984` → `2cb4:007e` | If the officer's unit is in reserve (status 1), find its deployment record, scroll there and put it on the field at the **record's** x,y (`8422`, facing from record flag bit 2) |
 | 00 | TALK | `0cf5:9b9e` → `2cb4:0208` | Message box; if the speaker's unit is on the field, scroll to it first |
 | 10 | DUEL o o | `2cb4:09d2` → `125e` | Starts the duel scene (`DS:0xe5b4`) between the two units |
 | 11 / 29 | BATTLE_END w / GAME_OVER | `2cb4:01ba` | In battle mode (game mode 3): result = `param == 0 ? 2 : 3`; param 3 also plays song 4. GAME_OVER passes 3 |
@@ -729,15 +740,149 @@ HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.t
 python3 -I tools/battle_ref.py /path/to/game 50 1 | head
 ```
 
+## Battle screen and player phase
+
+This is what the native battle scene (`web/src/native/battle/`) reproduces. Coordinates are screen
+pixels, and the layout is 40 px lower than the original's own y because the frame is drawn at
+y 40. Unless marked, the addresses are where the value was read. Strings are read from MAIN.EXE
+at run time.
+
+### Layout
+
+- **Frame**: PACKGRP entry 1 (TF-DCE) at (0, 40). It already has the title box, the 기능 button and
+  the 아군/적군 tabs.
+- **HEXGRP entry 0** is 4-plane *interleaved*:
+  - weather icons at `type*0x200` (32×32, at (592, 72); 0 맑음, 1 흐림, 2 비)
+  - 기능 button, normal `0x600` and pressed `0x800` (64×16 at (16, 48))
+  - tab header tile `0x1200`
+- **Panel icons** (force, intelligence, leadership): MARK.R3 offset 0, 24×24, 3 planes, at
+  x 456/512/568, y 140.
+- **Map view**: 13×11 cells of 32 px from (16, 72).
+  - A unit is HEXZCHR entry `2cb6:8264`. Frame f uses cells 4f..4f+3, and colour 0 is
+    transparent.
+  - The cells as stored face **left**. Units without flag 0x10 are drawn mirrored. The flag is set
+    by `8d74`. `d8c4` (attack) and `ce01` (AI) face the target, setting 0x10 when the target's
+    x is smaller.
+- **Panel body**: black from (447, 112) to (630, 310). The frame picture has it blue there. This
+  was measured on emulator screenshots; the routine that clears it was not traced.
+- **Unit detail** `2cb6:9b4c`:
+  - At y 116: name at column 0x39, class at 0x40, and `Lv%2u` (`DS:0x4249`) at 0x49.
+  - At y 144: force, intelligence and leadership, `%3u` (`0x424f`), at columns 0x3c/0x43/0x4a.
+  - Rows from `DS:0x4236` at y 172 + 24i: 병력, 사기치, 공격력, 방어력, 책략치, and 경험치 for the
+    player side only.
+  - Bars are at x 520, width 96. Attack and defence use the scale 2000.
+- **Bars** `2cb6:52a6`:
+  - A black rectangle at (x, y-1), w×10.
+  - Fill `value*w/max`, made of 8×10 MARK patterns: `0x2208` when the tenths are below 3,
+    `0x21e0` below 7, else `0x2230`.
+  - The text has outline colour 0, at column `(x>>3)+(w>>4)-2*(kind+1)`, row y-4, in the format
+    `%4u/%4u` (`0x3e9f`) or `%4u` (`0x3ea7`).
+- **Unit list** `2cb6:5e0e`:
+  - Rows at y = 20r + 114: name at column 0x39, troop bar at column 0x41, or `-전선이탈-` for a
+    unit that left.
+  - Tab 0 lists slots 0..14: own faction first, then the others, then those who left. The other
+    tabs list slots 15..44.
+- **Header** `8fbc`: the faction name (`DS:0xf1e` near pointers) plus `군`. Faction 14 (무소속)
+  takes the faction of slot 0 or slot 15.
+- **Minimap** origin:
+  - x = `((0x28-W)*2/8 + 0x39)*8`
+  - y = `((0x18-H)*2/8 + 0x23)*8 + 40`
+  - Each chip is 2×2 px and each unit 4×4 (colour 2 player, 1 enemy). The chip colours in the
+    port are approximated: the most frequent colour of the chip.
+- **Title box**: `battleNameLines(HEXZMAP)[map]` + `DS:0x3dff` ("의 전투").
+- **Turn banner**: `DS:0x3dc1` with turn + 1 and the weather name from `DS:0x3a4c[type]`.
+
+### Player phase (`1cb6:44de`)
+
+1. On turn 1, the victory window `4316` shows:
+   - `0x3c82` chapter + battle name
+   - `0x3c8f` 승리조건 and the objective
+   - `0x3cb0` turn limit (later `0x3c98` current/limit)
+2. The banner `DS:0x3d20` (Player군 순서), then `tryCure` for every slot.
+3. Input loop:
+   - Hovering a unit shows its detail panel.
+   - Scrolling works at the view edges and with the arrow keys.
+   - Clicking a tab switches the list; clicking the minimap centres the view.
+   - Clicking empty ground goes to `7094`, a cheat-code input with no visible effect.
+   - A right click or the 기능 button opens the battle menu (`DS:0x3aa0`): 턴 종료, 총퇴각
+     (result 1 = retry the battle; refused with formation), 승리조건, close-up on/off
+     (`battleOptions` bits 4..7), speed (bits 0..3), enemy moves shown (bit 12), BGM/SE flags, and
+     quit.
+   - Clicking a unit makes it blink 3 times (`9028`), then runs the unit command `a474`.
+4. After each action the scene runs the unit's events (`8ad2`) and the victory check (`4abc`).
+   When no commandable unit is left, the `DS:0x3d1c` confirm ends the phase.
+
+**Unit command** `a474`:
+- First the move `d972`:
+  - The range is the flood fill with the unit's move points.
+  - Refusals: not ours (`0x4d51`), not controllable (`0x4d66`), confused (`0x4d80`), already
+    acted (`0x4da2`). A cell outside the range gives `0x4d3c`.
+  - Clicking the own cell means "stay". A right click cancels and puts the unit back (`bcb2`).
+- Then the menu of codes 1..4 from the far-pointer table `DS:0x430c`: 공격, 책략, 도구, 대기. A
+  hidden unit gets the two-entry `DS:0x4866` menu (attack, or show itself after the `0x48aa`
+  confirm).
+- 공격 is target pick `657e`:
+  - Marked cells come from the class range shape.
+  - A click outside gives `0x3f33`; on an ally, `0x3f07`. With nobody in range, `0x3edb`.
+  - Then `e91a` with the close-up, or the result text of `e4a6`.
+- 책략 is `b2d6`:
+  - The list is `castableTactics`; not enough MP gives `0x4b84`.
+  - The target range is `TACTIC_POWER[t] | 0x80`: enemies for damage, confusion and morale
+    tactics, allies for heals.
+  - Message `0x4bda` for the player, `0x4b9e` for the AI.
+- 도구 is `a8e2`:
+  - The item list, then 사용한다 / 준다 / 버린다 / 본다 (`DS:0x4346`).
+  - 준다 picks an adjacent ally with a free slot (`0x48f0` if it has none), message `0x48d8`.
+  - 버린다: `0x4916`. No items: `0x48bd`.
+  - Use (`ab86`):
+    - Bombs 0x22..0x2a target an enemy at range power|0x80; fire is refused in rain (`0x4a80`).
+    - Heals target allies; area heals go through `baf6`.
+    - Confusion items 0x2b..0x2d.
+
+**Events after an action** (`8ad2`), each repeated while the dispatch reports "keep going":
+- position (trigger `unitAt`), area (`unitInArea`), and adjacency;
+- then `auto`.
+
+For adjacency (trigger 4), every occupied neighbour N..W is tried:
+- first `p1 = acting officer, p2 = neighbour's officer`;
+- for a player unit, then `p1 = 0x400` (any player unit).
+
+The prologue's duel is block 5 record 5 of chapter 0 stage 0: `p1 = 1` (관우), `p2 = 5` (화웅).
+It fires only when 관우 acts next to 화웅, not when 화웅 acts.
+
+**Computer phases** `3f32`:
+- Pass 0 runs the player-side units that the computer controls (mode ≠ 7).
+- Pass 1 opens with the `적군 순서` banner and regeneration for slots 15..44, and runs the enemy
+  units.
+- The order comes from `3e12` (`actionOrder`). Each unit is `ce50`, then `8ad2`, then `4abc`.
+- The move animation `c3f4` and the close-up drawing (`edb8..febc`) draw no random numbers, so
+  turning the animation or the close-ups off changes nothing except the archer volleys above.
+
+**Ending**:
+- `BATTLE_END` sets the result. The script VM passes `lost` = "the next command is GAME_OVER",
+  and the port maps that to 3, else 2.
+- Losing plays song 4.
+- A turn count reaching the limit (`ctx+0x3c6`) gives `DS:0x3da3`, retreats all of 유비's units,
+  and sets result 3.
+- A victory bonus (`DATA 4`) is shared out at `4a30`.
+
+### Duel (script ops 10, 33, 34, 35)
+
+Op 34 (`2cb4:1736`) runs five rounds:
+- `a = (rand(3)+2)*2` and `b = (rand(3)+2)*2`;
+- then, unless a == b == 8, one `rand(2)` per frame for 2 frames (it picks the clash sound).
+
+The port draws the duel as two enlarged units facing each other. The draws are exact; the
+animation is not.
+
 ## Open questions
 
-- **The player phase** `1cb6:44de` and its command menu (`a474`, item use `a8e2`): the order of
-  RNG draws during player commands follows the same routines (`e91a`, `b2d6`, `ab86`), but the menu
-  flow was not traced.
-- **The HEXBMAP screen arrangement** of the 230- and 528-byte layouts.
+- **The HEXBMAP screen arrangement** of the 230- and 528-byte layouts, still open. The port's
+  close-up is a simplified panel (enlarged unit sprites, troop bar, the original result strings).
 - **Status codes 5/6 and modes 5/6** are not produced by any battle routine that was read.
-- **`MAP_EFFECT`** (`2cb4:0420`) and **the duel scene** (`2cb4:0ddc..1736`) are only skimmed. The
-  duel's RNG use is listed above.
-- **Deployment bytes +9/+0xa** (`81c4`) and **`4e60`** (the player deployment skip) are owned by
-  the data and script worker.
+- **`MAP_EFFECT`** (`2cb4:0420`) is not traced.
+- **`7b08`**, the free-cell search used when a deployment cell is taken, recurses N, E, S, W. The
+  port uses a ring search, which can pick a different cell when several are free.
 - **The RNG seed source** `0cf5:48aa` (called at game start) is not documented here.
+- The player phase, its menus and the deployment bytes +9/+0xa are answered above (*Battle screen
+  and player phase*, *Deployment records*).

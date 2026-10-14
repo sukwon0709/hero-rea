@@ -4,7 +4,7 @@
 //  * frame: PACKGRP.R3 picture 1 at y 40 (1cb6:3ab6 -> 0cf5:520e);
 //  * map view: 13 x 11 cells of 32 px at (16, 72) (view object DS:0xe1bc, 2cb6:53fe(0x160, 0x1a0,
 //    0x20, 0x10)); chips from HEXZCHP entry 0 (chip < 80) and entry secondChipSet(map) (chip >= 80);
-//  * units: HEXZCHR entry chosen by 2cb6:8264, 2 frames of 2x2 cells, flag 0x10 mirrors (8d74);
+//  * units: HEXZCHR entry chosen by 2cb6:8264, 2 frames of 2x2 cells, mirrored unless flag 0x10 (facing left, 8d74);
 //  * out-of-range shading and the hover box darken every pixel with (x+y) even to colour 0
 //    (measured on the emulator; the drawing routine itself is not traced);
 //  * side panel: 2cb6:5e0e (unit list) and 9b4c (unit details); bars 2cb6:52a6 with the 8x10
@@ -231,7 +231,8 @@ export class BattleView {
   }
 
   drawUnit(u: Unit, px: number, py: number, frame: number) {
-    const mirror = (u.flags & UnitFlag.Facing) !== 0;
+    // flag 0x10 = facing left, which is how the cells are drawn; facing right mirrors (8d74)
+    const mirror = (u.flags & UnitFlag.Facing) === 0;
     const cells = this.spriteCells(this.spriteEntry(u), mirror);
     const f = frame & 1;
     const order = mirror ? [1, 0, 3, 2] : [0, 1, 2, 3];
@@ -378,6 +379,9 @@ export class BattleView {
         this.screen.pixels.set(f.pixels.subarray(sy * f.width + 448, sy * f.width + 624), y * WIDTH + 448);
       }
     }
+    // the panel body is black in the running game (the frame picture has it blue); measured on
+    // emulator screenshots, the routine that clears it is not traced
+    this.screen.fillRect(447, 112, 184, 199, 0);
   }
 
   /** 2cb6:9b4c: details of one unit. */
@@ -422,7 +426,9 @@ export class BattleView {
     rows.slice(0, 10).forEach((slot, r) => {
       const u = units[slot];
       const y = r * 0x14 + 0x4a + 40;
-      this.text(this.officerName(u), 0x39, y);
+      // allied officers of another faction are listed in colour 6 (emulator screenshot; routine not traced)
+      const ally = tab === 0 && this.factionFor(slot) !== 0;
+      this.text(this.officerName(u), 0x39, y, ally ? { ...PANEL_TEXT, fg: 6 } : PANEL_TEXT);
       if (u.status === Status.Field) {
         const o = this.b.officerOf(u);
         this.bar(1, o.hp, maxHp(o), 520, y + 4);

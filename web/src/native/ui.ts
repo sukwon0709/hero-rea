@@ -18,7 +18,7 @@ import type { GameAssets } from './assets';
 import { CURSOR, type Video } from './video';
 import { Draw, LAYOUT_Y, bytesOf, textCols, buttonRect, inRect, type Button, type Rect, type Saved } from './draw';
 
-export type Text = Message | string;
+export type Text = Message | string | Uint8Array;
 
 /** Window kinds of the table DS:0x2d58 (x, layout y, w, h). */
 export const WINDOWS: Rect[] = [
@@ -55,6 +55,10 @@ export interface MenuOptions {
   keep?: boolean;
   /** Right click cancels (default true). */
   cancel?: boolean;
+  /** Centre x when `x` is not given (default: the caption centre). */
+  cx?: number;
+  /** Minimum label width in columns (1cf5:2c92 starts its maximum at 8). */
+  cols?: number;
 }
 
 /** Splits text into window lines the way 0cf5:0A2E wraps it (left col .. right col, CR/LF). */
@@ -76,8 +80,8 @@ export function layoutLines(bytes: Uint8Array, cols: number): Uint8Array[] {
       continue;
     }
     if (c === 0x0d) {
-      // CR returns to the margin; on an empty line it is a no-op (CR LF = one break)
-      if (cur.length) newline();
+      // CR only returns to the margin; the LF that follows breaks the line (SCRIPT.md: '\r' ignored)
+      skipSpace = true;
       continue;
     }
     if (c < 0x20) continue;
@@ -179,8 +183,7 @@ export class GameUi implements Ui {
   // ------------------------------------------------------------------ text helpers
 
   text(t: Text | Uint8Array, col: number, y: number, fg = 7, mode = 4) {
-    const b = t instanceof Uint8Array ? t : bytesOf(t);
-    return this.draw.text(b, col, y, { fg, mode });
+    return this.draw.text(bytesOf(t), col, y, { fg, mode });
   }
 
   // ------------------------------------------------------------------ message boxes
@@ -338,9 +341,9 @@ export class GameUi implements Ui {
   // ------------------------------------------------------------------ menus
 
   /** Menu window geometry of 0cf5:2c92 (button rows). */
-  menuGeometry(labels: Uint8Array[], x: number, y: number): { win: Rect; buttons: Button[] } {
+  menuGeometry(labels: Uint8Array[], x: number, y: number, cols = 8): { win: Rect; buttons: Button[] } {
     const n = labels.length;
-    const maxlen = Math.max(1, ...labels.map((l) => textCols(l)));
+    const maxlen = Math.max(cols, ...labels.map((l) => textCols(l)));
     const rowH = 24;
     const w = (maxlen + 2) * 8;
     const h = (rowH * n + 31) & ~15;
@@ -362,10 +365,10 @@ export class GameUi implements Ui {
   /** Draws a menu and waits for a choice; -1 = cancelled. */
   async menu(items: Text[], opts: MenuOptions = {}): Promise<number> {
     const labels = items.map((t) => bytesOf(t));
-    const maxlen = Math.max(1, ...labels.map((l) => textCols(l)));
-    const x = opts.x ?? 320 - ((maxlen + 2) * 4);
+    const maxlen = Math.max(opts.cols ?? 8, ...labels.map((l) => textCols(l)));
+    const x = opts.x ?? (opts.cx ?? this.captionCentre) - ((maxlen + 2) * 4); // centred like the captions (emulator: 산다/판다 at x 232)
     const y = opts.y ?? 0x80 + LAYOUT_Y;
-    const { win, buttons } = this.menuGeometry(labels, x, y);
+    const { win, buttons } = this.menuGeometry(labels, x, y, opts.cols);
     buttons.forEach((b, i) => ((b as Button).disabled = opts.disabled?.[i] ?? false));
     const saved: Saved | null = opts.keep ? null : this.draw.grab(win);
     this.draw.window(win.x, win.y, win.w, win.h, 2, 2);
@@ -378,7 +381,7 @@ export class GameUi implements Ui {
   // ------------------------------------------------------------------ main frame
 
   /** 0cf5:c456: frame picture, field patches, title, portrait and status. */
-  drawFrame(status: { money: number; level: number; territory: Uint8Array; face: number }) {
+  drawFrame(status: { money: number; level: number; territory?: Uint8Array; face: number }) {
     const pic = this.assets.picture(0);
     if (pic) {
       this.draw.image(pic, 0, LAYOUT_Y);
@@ -424,13 +427,14 @@ export class GameUi implements Ui {
   }
 
   /** 0cf5:c362 / c39a / c3d4 */
-  drawStatus(s: { money: number; level: number; territory: Uint8Array; face?: number }) {
+  drawStatus(s: { money: number; level: number; territory?: Uint8Array; face?: number }) {
     if (!this.framePic) return;
     if (s.face !== undefined) this.portrait(s.face, 0x228, 0x18 + LAYOUT_Y);
     this.fillPatch(1, 0x238, 0x88 + LAYOUT_Y, 0x30, 0x10);
     this.text(String(s.money).padStart(5, ' '), 0x48, 0x88 + LAYOUT_Y);
     this.fillPatch(1, 0x248, 0xa0 + LAYOUT_Y, 0x20, 0x10);
     this.text(String(s.level).padStart(4, ' '), 0x49, 0xa0 + LAYOUT_Y);
+    if (!s.territory) return;
     this.fillPatch(1, 0x238, 0xc8 + LAYOUT_Y, 0x30, 0x10);
     const t = s.territory;
     const pad = Math.max(0, 6 - textCols(t));

@@ -52,8 +52,9 @@ function eucKrEncoder() {
 }
 
 /** EUC-KR bytes of a string or message (game messages are passed through as they are). */
-export function bytesOf(t: string | { bytes: Uint8Array }): Uint8Array {
-  return typeof t === 'string' ? enc.encode(t) : t.bytes;
+export function bytesOf(t: string | Uint8Array | { bytes: Uint8Array }): Uint8Array {
+  if (typeof t === 'string') return enc.encode(t);
+  return t instanceof Uint8Array ? t : t.bytes;
 }
 
 /** Display width in 8-pixel columns (0cf5:46b0 strlen; EUC-KR pairs count 2). */

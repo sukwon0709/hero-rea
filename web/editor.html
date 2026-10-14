@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hero Save Editor</title>
+  <link rel="stylesheet" href="./src/style.css" />
+  <link rel="stylesheet" href="./src/editor/editor.css" />
+</head>
+<body class="editor">
+  <header>
+    <a href="./">← 삼국지영걸전 Web</a>
+    <span>장수 편집기 · Save editor (MSAVEn.R3S)</span>
+  </header>
+  <section id="picker" class="picker" hidden>
+    <h2>게임 파일 불러오기</h2>
+    <p>장수·병종·도구 이름은 게임 파일에서 읽습니다. <b>Hero.zip</b>이나 <b>GAME</b> 폴더를 선택하세요 (이 브라우저에만 보관됩니다).</p>
+    <label class="btn">Hero.zip 선택<input type="file" data-kind="zip" accept=".zip" hidden /></label>
+    <label class="btn">GAME 폴더 선택<input type="file" data-kind="dir" webkitdirectory hidden /></label>
+    <p class="error"></p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="sources">
+      <h2>세이브 선택 <small>Load a save</small></h2>
+      <p class="hint">브라우저 저장소의 슬롯은 Classic(DOSBox)과 Native 모드가 함께 씁니다. Slots are shared by Classic and Native mode.</p>
+      <div id="slots" class="slots"></div>
+      <label class="btn upload">파일 열기 · Open MSAVE/ESAVE/zip<input id="upload" type="file" accept=".R3S,.r3s,.zip" multiple hidden /></label>
+      <p id="loadError" class="error"></p>
+    </section>
+
+    <section id="editor" class="editor-main" hidden>
+      <div class="savebar">
+        <div class="saveinfo">
+          <b id="saveTitle"></b>
+          <span id="saveMeta" class="muted"></span>
+          <span id="dirty" class="dirty" hidden>● 변경됨</span>
+        </div>
+        <label class="money">돈 <small>gold</small> <input id="money" type="number" min="0" max="10000" step="1" inputmode="numeric" /></label>
+        <div class="actions">
+          <select id="targetSlot" aria-label="저장할 슬롯" hidden></select>
+          <button id="saveStore" type="button" class="primary">저장 · Save</button>
+          <button id="download" type="button">MSAVE 다운로드</button>
+          <button id="downloadZip" type="button">zip 다운로드</button>
+          <button id="revert" type="button">되돌리기</button>
+        </div>
+        <p id="saveMsg" class="msg" role="status"></p>
+      </div>
+
+      <div class="cols">
+        <aside class="list">
+          <div class="listtools">
+            <input id="search" type="search" placeholder="이름 검색 · search" />
+            <label><input id="showAll" type="checkbox" /> 모든 장수</label>
+          </div>
+          <ul id="officers"></ul>
+        </aside>
+        <article id="detail" class="detail"></article>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="./src/editor/main.ts"></script>
+</body>
+</html>

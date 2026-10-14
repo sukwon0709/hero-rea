@@ -8,6 +8,7 @@ import type { GameFont } from '../formats/font';
 import type { Rgb4 } from '../formats/palette';
 import type { GameState } from '../engine/state';
 import type { ScriptVM, ScriptState, Trigger } from '../engine/script';
+import type { ScriptHost } from '../engine/script';
 import type { Message } from '../formats/scenario';
 
 /** Decoded original files, loaded lazily and cached. Keys are upper-case file names. */
@@ -51,6 +52,12 @@ export interface GameContext {
   script: ScriptState;
   /** Fires a script trigger and runs the resulting event (battle uses this for per-turn / per-action events). */
   runEvent(trigger: Trigger): Promise<void>;
+  /**
+   * Optional: while battle mode runs it may set this; every ScriptHost call whose method is defined here
+   * goes to it instead of the field engine's host (talk/narrate/caption still fall back to the field
+   * engine when left out). Reset it to null when the battle ends.
+   */
+  battleHost?: Partial<ScriptHost> | null;
 }
 
 /** Entry point of battle mode, implemented in web/src/native/battle/scene.ts. */
