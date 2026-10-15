@@ -874,21 +874,24 @@ export class GrindPolicy {
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const left = this.deadline() - b.info.turn; // turns left including this one
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
-    // going badly (the leader hurt, a third of the units gone): stop grinding and win now
+    // going badly (the leader hurt, a third of the units gone): stop grinding and win, but only in
+    // the second half of the battle (Sukwon: no emergency means; an early charge at the win
+    // condition skipped the battle's exp: 연주, the defensive plan killed 곽도 at turn 7)
     // our own officers only: allied armies under the computer (거록: 공손월's men) fall without it meaning much
+    const late = (b.info.turn + 1) * 2 >= b.info.turnLimit;
     const mine = this.scene.units
       .slice(0, PLAYER_SLOTS)
       .filter((u) => u.officer < 0x100 && u.status !== Status.Empty && u.status !== Status.Reserve && ((this.scene.ctx.state.officers[u.officer]?.dyn.flags ?? 1) & 0x1f) === 0);
     const gone = mine.filter((u) => u.status !== Status.Field).length;
-    const leaderHurt = mine.some((u) => this.know.guarded.has(u.officer) && u.status === Status.Field && b.officerOf(u).hp * 100 < maxHp(b.officerOf(u)) * (this.p.lead ? 35 : 60));
+    const leaderHurt = late && mine.some((u) => this.know.guarded.has(u.officer) && u.status === Status.Field && b.officerOf(u).hp * 100 < maxHp(b.officerOf(u)) * (this.p.lead ? 35 : 60));
+    const losses = late && gone * 3 >= mine.length;
     // a survival battle (a turn event wins it before any loss by time): never charge, keep grinding
     // safely until the event; the danger costs already pull a hurt leader back
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
     if (survive) return;
-    // stalling is only safe while nobody falls: a third of the units lost ends the grinding
     // each pending step (defeat X, march into an area) needs about 12 turns of the finish
     const stepTurns = this.stepsLeft() * 12;
-    if (left <= this.p.finish + stepTurns || !needy || this.idleTurns >= 8 || leaderHurt || gone * 3 >= mine.length) {
+    if (left <= this.p.finish + stepTurns || !needy || this.idleTurns >= 8 || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
       this.stats.finishReason = left <= this.p.finish + stepTurns ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';

@@ -5,7 +5,7 @@
 
 import type { BattleSnapshot } from './sandbox';
 import { searchBattle, SearchRng, type BattleOutcome, type BattleSearch, type CarryState, type OfficerCarry } from './battle';
-import { clampParams, type GrindParams } from './policy';
+import { PARAM_SPECS, clampParams, type GrindParams } from './policy';
 
 function clampHint(p: GrindParams): GrindParams {
   const c = clampParams(p);
@@ -193,6 +193,10 @@ export async function runCampaign(
   o: CampaignOptions,
 ): Promise<CampaignResult> {
   const t0 = performance.now();
+  // plans of removed emergency variants (the game's AI from turn 1, the finish-from-turn-1 rush)
+  // are never replayed or seeded (Sukwon: no emergency means)
+  const finMax = PARAM_SPECS.find((sp) => sp.key === 'finish')!.max;
+  o = { ...o, elites: Object.fromEntries(Object.entries(o.elites ?? {}).filter(([, p]) => !p.native && p.finish <= finMax)) };
   const rng = new SearchRng(o.seed);
   const out: CampaignBattle[] = [];
   let carry: CarryState | null = null;

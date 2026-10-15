@@ -21,7 +21,7 @@ import { captureStory } from './capture';
 import { enemyLevel, runCampaign, topLevel, type CampaignResult } from './campaign';
 import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, PARAM_SPECS, type GrindParams } from './policy';
-import { frozenBattles, newEvolveState, populationSize, sampleGeneration, updateGeneration, type CandidateResult, type EvolveState } from './evolve';
+import { dropRushPlans, frozenBattles, frozenOf, newEvolveState, populationSize, sampleGeneration, updateGeneration, updateRestart, type CandidateResult, type EvolveState } from './evolve';
 import { realRun } from './realrun';
 import { progressHtml, progressJson, progressMarkdown, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
 import { dsTable, S } from '../../native/battle/strings';
@@ -297,6 +297,9 @@ async function main() {
     const snaps = loadCaptures();
     const hints = loadHints(snaps);
     const st = loadState(hints.defaults);
+    // plans of removed emergency variants are not kept (Sukwon: no emergency means)
+    const dropped = dropRushPlans(st);
+    if (dropped.length) console.log(`dropped plans of removed emergency variants: ${dropped.join('; ')}`);
     const gens = opt('gens', 3), maxPop = opt('pop', 6), variants = opt('variants', 3), workers = opt('workers', 2), limit = opt('limit', 0), rescue = opt('retries', opt('rescue', 10));
     for (let g = 0; g < gens; g++) {
       const t0 = performance.now();
@@ -314,26 +317,35 @@ async function main() {
         stuck++;
       }
       const mult = Math.min(8, 2 + stuck);
-      // stuck for 3, 6, 9 ... generations (going back 1-2 battles was not enough): this generation
-      // starts over from battle 1 with no frozen plans and no elites, with the learned parameters
-      // and today's behaviour (stalling, feeding 유비), to build a stronger team on the way; the
-      // CEM keeps whichever run reaches further (then more levels)
-      const fresh = fr !== null && fr !== undefined && stuck >= 3 && stuck % 3 === 0 && !st.history[st.history.length - 1]?.fresh;
-      // the restart aims for much higher levels (Sukwon): twice the variants on the way (the search
-      // keeps the won plan with the most exp) and a level target at the wall (top-9 average at least
-      // the wall's enemy level and the stuck run's +3, +2 for every earlier restart at the same wall)
-      let levelGate: Job['levelGate'];
-      if (fresh) {
-        const before = st.history.filter((h) => h.fresh && h.wall === fr!.index).length;
+      // stuck for 3, 6, 9 ... generations (going back 1-2 battles was not enough): a full restart
+      // from battle 1 begins, as a lineage of its own (st.restart) that runs for several
+      // generations with its own plans and frontier, no frozen plans of the main line, twice the
+      // variants (the search keeps the won plan with the most exp) and a level target at the wall
+      // (Sukwon: start over and raise the levels much higher): top-9 average at least the wall's
+      // enemy level and the stuck run's +3, +2 for every earlier restart at the same wall. The
+      // main line waits meanwhile; the CEM learns from both.
+      const startRestart = !st.restart && fr !== null && fr !== undefined && stuck >= 3 && stuck % 3 === 0 && !st.history[st.history.length - 1]?.fresh;
+      if (startRestart) {
+        const before = st.history.filter((h) => h.restart?.gen === 1 && h.restart.wall === fr!.index).length + st.history.filter((h) => h.fresh && !h.restart && h.wall === fr!.index).length;
         // the generic enemies' levels are set when the battle starts, so the stuck run's arrival
         // levels +3 are the floor of the target
         const arrived = st.best?.campaign.carryOut?.officers ? topLevel(snaps[fr!.index], st.best.campaign.carryOut.officers, 9) : 0;
-        levelGate = { battle: fr!.index, level: Math.round(Math.max(enemyLevel(snaps[fr!.index]), arrived + 3)) + 2 * before, passes: 4 };
-        console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart from battle 1 (no frozen plans), level target Lv${levelGate.level} at the wall, ${variants * 2} variants per battle`);
+        const level = Math.round(Math.max(enemyLevel(snaps[fr!.index]), arrived + 3)) + 2 * before;
+        st.restart = { wall: fr!.index, wallName: fr!.name, level, startGen: st.gen, gens: 0, elites: {}, eliteAge: {}, best: null, stall: 0 };
+        console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart lineage from battle 1 (no frozen plans), level target Lv${level} at the wall, ${variants * 2} variants per battle`);
       }
-      const runVariants = fresh ? variants * 2 : variants;
-      const extra = fr ? { battle: fr.index, variants: variants * Math.min(4, mult), rescue: rescue * mult } : undefined;
-      if (extra) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name}, stuck ${stuck} generations: ${extra.variants} variants, ${extra.rescue} retries there`);
+      const rs = st.restart;
+      const fresh = !!rs;
+      const levelGate: Job['levelGate'] = rs ? { battle: rs.wall, level: rs.level, passes: 4 } : undefined;
+      const lineElites = rs ? rs.elites : st.elites;
+      const lineFrozen = rs ? [...frozenOf(rs.elites, rs.eliteAge)] : frozen;
+      const runVariants = rs ? variants * 2 : variants;
+      // the line's own frontier gets the escalated variants and retries
+      const rfr = rs ? rs.best?.frontier ?? null : fr ?? null;
+      const rmult = rs ? Math.min(8, 2 + rs.stall) : mult;
+      const extra = rfr ? { battle: rfr.index, variants: variants * Math.min(4, rmult), rescue: rescue * rmult } : undefined;
+      if (rs) console.log(`gen ${st.gen}: restart lineage gen ${rs.gens + 1} (wall [${rs.wall}] ${rs.wallName}, target Lv${rs.level})${rfr ? `: its frontier [${rfr.index}] ${rfr.name}, ${extra!.variants} variants, ${extra!.rescue} retries there` : ''}`);
+      else if (extra) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name}, stuck ${stuck} generations: ${extra.variants} variants, ${extra.rescue} retries there`);
       // common random numbers: every candidate of a generation is played with the same search seed
       const seed = st.seed * 1000 + st.gen * 37;
       const results: { cand: CandidateResult; campaign: CampaignResult }[] = [];
@@ -381,7 +393,7 @@ async function main() {
         while (next < cands.length) {
           const i = next++;
           if (doneIdx.has(i)) continue;
-          const job: Job = { params: cands[i], variants: runVariants, seed, limit, elites: fresh ? {} : st.elites, frozen: fresh ? [] : frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate };
+          const job: Job = { params: cands[i], variants: runVariants, seed, limit, elites: lineElites, frozen: lineFrozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate };
           // a worker that dies (I/O error, crash) is tried again, then the candidate is dropped
           let c: CampaignResult | null = null;
           for (let attempt = 1; attempt <= 2 && !c && workers > 1; attempt++)
@@ -399,7 +411,7 @@ async function main() {
             live.done++;
             continue;
           }
-          if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: fresh ? {} : st.elites, frozen: new Set(fresh ? [] : frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate });
+          if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: lineElites, frozen: new Set(lineFrozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate });
           take(i, cands[i], c);
           savePending({ i, params: cands[i], campaign: c });
           writeProgress(st, live);
@@ -414,12 +426,20 @@ async function main() {
       }
       const rec = updateGeneration(st, results, performance.now() - t0);
       rmSync(pendingPath, { force: true });
-      if (fresh) {
+      if (rs) {
         rec.fresh = true;
-        rec.wall = fr!.index;
-        const top = [...results].sort((a, b) => b.cand.objective - a.cand.objective)[0]?.campaign;
+        rec.wall = rs.wall;
+        const top9Of = (c: CampaignResult) => (c.carryOut?.officers ? topLevel(snaps[Math.min(snaps.length - 1, c.frontier?.index ?? snaps.length - 1)], c.carryOut.officers, 9) : 0);
+        const better = updateRestart(rs, results, top9Of);
+        const b = rs.best!;
+        const ended = b.cleared > rs.wall ? 'passed the wall' : rs.stall >= 3 ? 'stalled 3 generations on its own frontier' : rs.gens >= 12 ? 'out of generations (12)' : undefined;
+        rec.restart = { gen: rs.gens, wall: rs.wall, wallName: rs.wallName, level: rs.level, cleared: b.cleared, frontier: b.frontier, top9: Math.round(b.top9 * 10) / 10, ended };
         const kept = before && st.best && st.best.result.objective === before.objective;
-        console.log(`gen ${rec.gen}: full restart result: cleared ${top?.cleared ?? 0}${top?.frontier ? ` (stopped at [${top.frontier.index}] ${top.frontier.name})` : ''}, top15 ${top?.top15 ?? 0}; ${kept ? `previous best kept (cleared ${before!.cleared})` : 'the restart is the new best'}`);
+        console.log(`gen ${rec.gen}: restart lineage gen ${rs.gens}: ${better ? 'improved' : `no better run (stall ${rs.stall})`}; its best: cleared ${b.cleared}${b.frontier ? ` (stopped at [${b.frontier.index}] ${b.frontier.name})` : ' (reached the end)'}, top-9 Lv${b.top9.toFixed(1)} (target Lv${rs.level} at [${rs.wall}] ${rs.wallName}); main line ${kept ? `kept (cleared ${before!.cleared})` : 'replaced by the restart'}`);
+        if (ended) {
+          console.log(`gen ${rec.gen}: restart lineage ends: ${ended}`);
+          delete st.restart;
+        }
       }
       console.log(`gen ${rec.gen}: best ${rec.best} (n99 ${rec.bestN99}) mean ${rec.mean.toFixed(0)} in ${(rec.ms / 1000).toFixed(0)} s`);
       writeProgress(st);

@@ -41,6 +41,8 @@ export interface GenerationRecord {
   fresh?: boolean;
   /** The wall (best run's frontier) a restart was made for. */
   wall?: number;
+  /** A restart-lineage generation: where its best run so far stands (digest). */
+  restart?: { gen: number; wall: number; wallName: string; level: number; cleared: number; frontier: { index: number; name: string } | null; top9: number; ended?: string };
   /** Candidates sampled this generation (adaptive population). */
   pop?: number;
   /** Where this generation's best run stopped (null = it reached the end), and how many battles it cleared. */
@@ -61,17 +63,94 @@ export interface EvolveState {
   eliteAge?: Record<number, number>;
   /** The parameters the learning started from (defaults + hints.json defaults). */
   start?: GrindParams;
+  /** A full restart in progress: its own lineage, kept for several generations (cli.ts). */
+  restart?: RestartLineage;
+}
+
+/**
+ * A full restart from battle 1 as a lineage of its own (Sukwon: start over and raise the levels
+ * much higher): its per-battle plans and frontier are kept apart from the main line's for several
+ * generations, until it gets past the wall, stalls on its own frontier or runs out of generations.
+ */
+export interface RestartLineage {
+  /** The main line's frontier it was started for. */
+  wall: number;
+  wallName: string;
+  /** Top-9 average level to arrive at the wall with (campaign levelGate). */
+  level: number;
+  startGen: number;
+  gens: number;
+  elites: Record<number, GrindParams>;
+  eliteAge: Record<number, number>;
+  best: { objective: number; cleared: number; frontier: { index: number; name: string } | null; top9: number } | null;
+  /** Generations without a better run of its own. */
+  stall: number;
+}
+
+/** A plan made by a removed emergency variant (the game's AI from turn 1, finish-from-turn-1 rush): never replayed. */
+export function rushPlan(p: GrindParams | undefined): boolean {
+  if (!p) return false;
+  const fin = PARAM_SPECS.find((s) => s.key === 'finish')!;
+  return !!p.native || p.finish > fin.max;
+}
+
+/** Drops plans made by removed emergency variants (kept elites, the restart lineage's); a best run that used one is no longer the reference. Returns what was dropped. */
+export function dropRushPlans(st: EvolveState): string[] {
+  const out: string[] = [];
+  for (const [k, p] of Object.entries(st.elites)) if (rushPlan(p)) {
+    delete st.elites[Number(k)];
+    if (st.eliteAge) delete st.eliteAge[Number(k)];
+    out.push(`elite [${k}]`);
+  }
+  if (st.restart) for (const [k, p] of Object.entries(st.restart.elites)) if (rushPlan(p)) {
+    delete st.restart.elites[Number(k)];
+    delete st.restart.eliteAge[Number(k)];
+    out.push(`restart elite [${k}]`);
+  }
+  if (st.best && st.best.campaign.battles.some((b) => b.won && rushPlan(b.params))) {
+    out.push(`best run (cleared ${st.best.campaign.cleared}, used ${st.best.campaign.battles.filter((b) => b.won && rushPlan(b.params)).map((b) => `[${b.index}] ${b.name}`).join(', ')})`);
+    st.best = null;
+  }
+  return out;
+}
+
+/** frozenBattles for a set of plans and their ages. */
+export function frozenOf(elites: Record<number, GrindParams>, age: Record<number, number>): Set<number> {
+  const out = new Set<number>();
+  for (let k = 0; ; k++) {
+    if (!elites[k] || (age[k] ?? 0) < 2) break;
+    out.add(k);
+  }
+  return out;
+}
+
+/** Updates the restart lineage with a generation's runs; returns whether its best improved. */
+export function updateRestart(r: RestartLineage, results: { cand: CandidateResult; campaign: CampaignResult }[], top9Of: (c: CampaignResult) => number): boolean {
+  r.gens++;
+  const top = [...results].sort((a, b) => b.cand.objective - a.cand.objective)[0];
+  if (!top) return false;
+  if (!r.best || top.cand.objective > r.best.objective) {
+    r.best = { objective: top.cand.objective, cleared: top.campaign.cleared, frontier: top.campaign.frontier ?? null, top9: top9Of(top.campaign) };
+    const old = r.elites;
+    const age: Record<number, number> = {};
+    r.elites = {};
+    for (const b of top.campaign.battles) {
+      if (!b.won) continue;
+      r.elites[b.index] = b.params;
+      age[b.index] = old[b.index] && JSON.stringify(old[b.index]) === JSON.stringify(b.params) ? (r.eliteAge[b.index] ?? 0) + 1 : 0;
+    }
+    r.eliteAge = age;
+    r.stall = 0;
+    return true;
+  }
+  for (const k of Object.keys(r.elites)) r.eliteAge[Number(k)] = (r.eliteAge[Number(k)] ?? 0) + 1;
+  r.stall++;
+  return false;
 }
 
 /** Curriculum: battles in story order whose plan has stayed the best for 2+ generations, up to the first unsettled one. */
 export function frozenBattles(st: EvolveState): Set<number> {
-  const out = new Set<number>();
-  const age = st.eliteAge ?? {};
-  for (let k = 0; ; k++) {
-    if (!st.elites[k] || (age[k] ?? 0) < 2) break;
-    out.add(k);
-  }
-  return out;
+  return frozenOf(st.elites, st.eliteAge ?? {});
 }
 
 /** Adaptive population: wide while the search is spread out, narrower as it converges. */

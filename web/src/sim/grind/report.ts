@@ -324,6 +324,8 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
       frontier: h.frontier ?? null,
       cleared: h.cleared ?? null,
       fresh: !!h.fresh,
+      // a restart-lineage generation: where its best run so far stands
+      restart: h.restart ?? null,
       meanParams: h.meanParams,
       stdParams: h.stdParams,
       eliteChanges: (h.eliteChanges ?? []).map((e) => ({ battle: e.battle, name: e.name, from: e.from, to: e.to })),
@@ -692,7 +694,9 @@ export function progressMarkdown(d: ReturnType<typeof progressJson>): string {
   L.push('|---|---|---|---|---|---|---|---|');
   for (const g of d.generations) {
     const c = g.candidates.length ? g.candidates.reduce((a, b) => (b.objective > a.objective ? b : a)) : null;
-    L.push(`| ${g.gen + 1}${g.fresh ? ' (처음부터 재시작)' : ''} | ${g.frontier ? g.frontier.name : g.cleared !== null ? '끝까지' : '-'} | ${g.best} | ${g.mean} | ${c?.cleared ?? c?.wins ?? ''} | ${c?.top15 ?? ''} | ${g.bestN99} | ${g.frozen.length} |`);
+    const rl = g.restart as { gen: number; wallName: string; level: number; cleared: number; frontier: { name: string } | null; top9: number; ended?: string } | null;
+    const rtag = rl ? ` (재시작 계보 ${rl.gen}세대: ${rl.cleared}전 클리어${rl.frontier ? `, ${rl.frontier.name}에서 멈춤` : ''}, 상위9 평균 Lv${rl.top9} / 목표 Lv${rl.level}(${rl.wallName})${rl.ended ? `, 종료: ${rl.ended}` : ''})` : g.fresh ? ' (처음부터 재시작)' : '';
+    L.push(`| ${g.gen + 1}${rtag} | ${g.frontier ? g.frontier.name : g.cleared !== null ? '끝까지' : '-'} | ${g.best} | ${g.mean} | ${c?.cleared ?? c?.wins ?? ''} | ${c?.top15 ?? ''} | ${g.bestN99} | ${g.frozen.length} |`);
   }
   if (d.running) L.push(`\n${d.running.gen + 1}세대 진행 중: 후보 ${d.running.done} / ${d.running.total}개 완료`);
   L.push('');
