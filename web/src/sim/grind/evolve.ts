@@ -227,7 +227,12 @@ export function updateGeneration(
       newAge[b.index] = same ? (age[b.index] ?? 0) + 1 : 0;
       if (!same) changes.push({ battle: b.index, name: b.name, from: old[b.index] ?? null, to: b.params });
     }
-    for (const k of Object.keys(old)) if (!st.elites[Number(k)]) changes.push({ battle: Number(k), name: top.campaign.battles[Number(k)]?.name ?? k, from: old[Number(k)], to: null });
+    // battles the new best did not win keep their old plan as a seed (not frozen: age 0); a best
+    // run that stopped earlier must not wipe the plans of the battles after it
+    for (const k of Object.keys(old)) if (!st.elites[Number(k)] && !top.campaign.battles.some((b) => b.index === Number(k) && b.won)) {
+      st.elites[Number(k)] = old[Number(k)];
+      newAge[Number(k)] = 0;
+    }
     st.eliteAge = newAge;
   } else {
     // the kept plans held: they age (towards the curriculum freeze)
