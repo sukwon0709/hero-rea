@@ -320,6 +320,16 @@ async function main() {
       if (st.restart) st.restart.best = null;
       st.rules = RULES;
     }
+    // Sukwon approved the last-turn escape: the exit plan's mean goes to its default (on) once, with
+    // a wide spread again (it had settled near off while it was off by default); the best run stays
+    if (!st.exitOn) {
+      const i = PARAM_SPECS.findIndex((sp) => sp.key === 'exit');
+      const sp = PARAM_SPECS[i];
+      st.mean[i] = (sp.def - sp.min) / (sp.max - sp.min);
+      st.std[i] = Math.max(st.std[i] ?? 0, 0.2);
+      st.exitOn = 1;
+      console.log('exit plan: on by default for arrival battles (CEM mean reset to on)');
+    }
     const gens = opt('gens', 3), maxPop = opt('pop', 6), variants = opt('variants', 3), workers = opt('workers', 2), limit = opt('limit', 0), rescue = opt('retries', opt('rescue', 10));
     for (let g = 0; g < gens; g++) {
       const t0 = performance.now();

@@ -65,6 +65,8 @@ export interface EvolveState {
   start?: GrindParams;
   /** Rules the best run was played under (cli.ts RULES): a best made under older rules is dropped. */
   rules?: number;
+  /** 1 once the exit plan's default (on) was written into the CEM mean (cli.ts). */
+  exitOn?: number;
   /** A full restart in progress: its own lineage, kept for several generations (cli.ts). */
   restart?: RestartLineage;
 }

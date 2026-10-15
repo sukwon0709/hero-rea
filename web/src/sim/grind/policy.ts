@@ -102,11 +102,17 @@ export interface GrindParams {
   /** Above 0.5: the merchants' gold goes to area heal scrolls (0x2e..0x33) first. */
   area: number;
   /**
-   * Above 0.5: in a battle 유비 can win by reaching a cell while the enemy (waves counted) is twice
-   * our number or more, form up on defensible ground near that cell, grind there, and walk 유비 in
-   * when the turns left just cover his way (하비). Off by default: on 거록 and 계교 it lost.
+   * Above 0.5 (the default, also for plans made before it existed): in a battle won by 유비 reaching
+   * a cell or by wiping out the enemy (no officer to defeat: 하비; not 거록 / 계교, where it lost),
+   * with the enemy (waves counted) twice our number or more, form up on defensible ground near the
+   * cell, grind there, and walk 유비 in when the turns left just cover his way (Sukwon approved the
+   * last-turn escape).
    */
   exit: number;
+  /** Exit plan: spare turns on top of 유비's turns to the cell when the escape starts. */
+  exitMargin: number;
+  /** Exit plan: how much the anchor prefers cells close to the exit cell (per step). */
+  exitNear: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -185,7 +191,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'walk', min: 0, max: 1, def: 0.4 },
   { key: 'healers', min: 0, max: 4, def: 0, int: true },
   { key: 'area', min: 0, max: 1, def: 0.4 },
-  { key: 'exit', min: 0, max: 1, def: 0.4 },
+  { key: 'exit', min: 0, max: 1, def: 0.6 },
+  { key: 'exitMargin', min: 0, max: 3, def: 1, int: true },
+  { key: 'exitNear', min: 0, max: 1, def: 0.15 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -921,13 +929,15 @@ export class GrindPolicy {
   private decideExit() {
     if (this.exitPlan !== undefined) return;
     this.exitPlan = null;
-    if (!(this.p.exit > 0.5)) return;
+    const pv = (k: 'exit' | 'exitMargin' | 'exitNear') => (Number.isFinite(this.p[k]) ? this.p[k] : PARAM_SPECS.find((sp) => sp.key === k)!.def);
+    if (!(pv('exit') > 0.5)) return;
     const b = this.b;
     const ls = b.slotOfOfficer(0);
     const L = ls !== NONE ? this.scene.units[ls] : null;
     if (!L || L.status !== Status.Field) return;
     const w = this.know.winCells.find((c) => c.officer === 0 || c.officer === 0x400);
-    if (!w || this.know.steps.length) return;
+    // only where the arrival (or a wipe-out) is the way to win: no officer to defeat, no script steps
+    if (!w || this.know.steps.length || this.know.victory !== null) return;
     const ours = this.oursOnField();
     let theirs = this.enemiesOnField();
     for (const e of this.know.turns) {
@@ -973,7 +983,7 @@ export class GrindPolicy {
           }
         let near = 99;
         for (const [fx, fy] of foes) near = Math.min(near, this.pathDist([fx, fy], mt, x, y));
-        const v = ((def / Math.max(1, cells)) / 5) * this.p.terrain - 0.25 * open + 0.6 * Math.min(near, 16) - 0.15 * dW;
+        const v = ((def / Math.max(1, cells)) / 5) * this.p.terrain - 0.25 * open + 0.6 * Math.min(near, 16) - pv('exitNear') * dW;
         if (v > bv) [bv, best] = [v, [x, y]];
       }
     if (!best) return;
@@ -1034,10 +1044,12 @@ export class GrindPolicy {
     const b = this.b;
     this.decideExit();
     if (this.exitPlan) {
-      // grind around the anchor; leave when the turns left just cover 유비's way (one spare)
+      // grind around the anchor; leave when the turns left just cover 유비's way (exitMargin spare)
       const left = this.deadline() - b.info.turn;
       const need = this.exitTurns();
-      if (left <= need + 1) {
+      const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
+      // a way longer than the turns left (enemies in it) is not taken yet: hold on, it may clear
+      if ((left <= need + margin && need <= left) || left <= 3) {
         this.finishing = true;
         this.stats.finishTurn = b.info.turn + 1;
         this.stats.finishReason = 'escape';
