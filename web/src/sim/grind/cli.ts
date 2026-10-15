@@ -321,11 +321,48 @@ async function main() {
       const results: { cand: CandidateResult; campaign: CampaignResult }[] = [];
       const live: LiveStatus = { gen: st.gen, done: 0, total: cands.length, startedAt: Date.now(), candidates: [], battles: cands.map(() => 0), battleCount: limit || snaps.length };
       let lastLive = 0;
+      // candidates finished before a stop are kept on local disk (gen-N.json) and not played again;
+      // entries marked `injected` (a recovered run) join this generation's results as they are
+      const pendingPath = join(WORK, `gen-${st.gen}.json`);
+      type Pending = { i: number; params: GrindParams; campaign: CampaignResult; injected?: boolean };
+      let pending: Pending[] = [];
+      try {
+        pending = JSON.parse(readFileSync(pendingPath, 'utf8')) as Pending[];
+      } catch {
+        pending = [];
+      }
+      const doneIdx = new Set<number>();
+      const take = (i: number, params: GrindParams, c: CampaignResult) => {
+        results.push({
+          cand: { params, objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun, cleared: c.cleared, frontier: c.frontier },
+          campaign: c,
+        });
+        live.done++;
+        live.candidates.push({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: c.ms / 1000, cleared: c.cleared, frontier: c.frontier });
+      };
+      for (const pd of pending) {
+        if (pd.injected || (pd.i < cands.length && JSON.stringify(pd.params) === JSON.stringify(cands[pd.i]))) {
+          take(pd.i, pd.params, pd.campaign);
+          if (!pd.injected) doneIdx.add(pd.i);
+          console.log(`gen ${st.gen} cand ${pd.injected ? 'recovered' : pd.i}: kept from before the stop, cleared ${pd.campaign.cleared}`);
+        }
+      }
+      if (pending.length) live.total += pending.filter((pd) => pd.injected).length;
+      const savePending = (pd: Pending) => {
+        pending.push(pd);
+        try {
+          mkdirSync(WORK, { recursive: true });
+          writeFileSync(pendingPath, JSON.stringify(pending));
+        } catch (e) {
+          console.error(`saving ${pendingPath} failed: ${(e as Error).message}`);
+        }
+      };
       writeProgress(st, live);
       let next = 0;
       const one = async () => {
         while (next < cands.length) {
           const i = next++;
+          if (doneIdx.has(i)) continue;
           const job: Job = { params: cands[i], variants, seed, limit, elites: fresh ? {} : st.elites, frozen: fresh ? [] : frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) };
           // a worker that dies (I/O error, crash) is tried again, then the candidate is dropped
           let c: CampaignResult | null = null;
@@ -345,12 +382,8 @@ async function main() {
             continue;
           }
           if (!c) c = await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: fresh ? {} : st.elites, frozen: new Set(fresh ? [] : frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) });
-          results.push({
-            cand: { params: cands[i], objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun, cleared: c.cleared, frontier: c.frontier },
-            campaign: c,
-          });
-          live.done++;
-          live.candidates.push({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: c.ms / 1000, cleared: c.cleared, frontier: c.frontier });
+          take(i, cands[i], c);
+          savePending({ i, params: cands[i], campaign: c });
           writeProgress(st, live);
           console.log(`gen ${st.gen} cand ${i}: cleared ${c.cleared}${c.frontier ? ` (stopped at [${c.frontier.index}] ${c.frontier.name})` : ' (reached the end)'} n99 ${c.n99} top15 ${c.top15} ${(c.ms / 1000).toFixed(0)} s (${c.battlesRun} battles)`);
         }
@@ -362,6 +395,7 @@ async function main() {
         continue;
       }
       const rec = updateGeneration(st, results, performance.now() - t0);
+      rmSync(pendingPath, { force: true });
       if (fresh) {
         rec.fresh = true;
         const top = [...results].sort((a, b) => b.cand.objective - a.cand.objective)[0]?.campaign;
