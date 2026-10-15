@@ -641,7 +641,9 @@ export class GrindPolicy {
 
   private deadline(): number {
     const lim = this.b.info.turnLimit;
-    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999, this.holding() ? 999 : this.know.soft ?? 999);
+    // the soft deadline (finish before a big wave: 하비 finished from turn 2) is gone: the waves are
+    // braced for and survived while grinding (Sukwon), know.soft stays for the report
+    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999);
   }
 
   // ---- hold plan: form up near the start, let the enemy come, push out once the waves are broken

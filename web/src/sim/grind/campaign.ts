@@ -225,8 +225,10 @@ export async function runCampaign(
       if (avg < gate.level) {
         const j = k - 1 - gatePasses;
         gatePasses++;
-        o.log?.(`  [${k}] ${snap.name}: top-9 average Lv${avg.toFixed(1)} below the target Lv${gate.level}; going back to [${j}] ${list[j].name} to grind more exp (pass ${gatePasses}/${gate.passes})`);
-        regrind.add(j);
+        o.log?.(`  [${k}] ${snap.name}: top-9 average Lv${avg.toFixed(1)} below the target Lv${gate.level}; going back to [${j}] ${list[j].name} to grind more exp (pass ${gatePasses}/${gate.passes}, battles ${j}..${k - 1} searched again for the most exp)`);
+        // every battle from there to the wall is searched again (3x variants, the most-exp win kept):
+        // replaying the later ones with their old plans gave the levels back (flat at Lv12 before 하비)
+        for (let i = j; i < k; i++) regrind.add(i);
         ({ lastOfficers, lastMoney, carry } = before[j]);
         out.length = j;
         for (const [off, at] of [...reached]) if (at >= j) reached.delete(off);
