@@ -270,6 +270,24 @@ export function areaHealItem(s: CombatState, user: number, id: number): CastResu
   return res;
 }
 
+/**
+ * 폭탄 (item 0x21, 1cb6:b029): troops -= min((rand(21)+90)*15, troops); if the target survives,
+ * morale drops by min(rand(10)+30, morale) through 898c. No defence, terrain, weather, counter or
+ * exp. `left` holds the target when it must leave (a0d0).
+ */
+export function bombItem(s: CombatState, target: number): { damage: number; moraleLoss: number; left: number[] } {
+  const tu = s.units[target];
+  const ot = officerOf(s, target);
+  const damage = Math.min((s.rng.rand(21) + 90) * 15, ot.hp);
+  ot.hp -= damage;
+  let moraleLoss = tu.morale;
+  if (ot.hp !== 0) {
+    moraleLoss = Math.min(s.rng.rand(10) + 30, tu.morale);
+    setMorale(s.rng, tu, ot.lead, tu.morale - moraleLoss);
+  }
+  return { damage, moraleLoss, left: mustLeave(ot, tu) ? [target] : [] };
+}
+
 /** Whether a heal of `kind` would do anything (1cb6:a200). */
 export function healUseful(kind: number, o: Officer, morale: number, confused: boolean): boolean {
   const full = maxHp(o) === o.hp;

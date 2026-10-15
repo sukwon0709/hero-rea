@@ -7,7 +7,7 @@
 import type { GameContext, RunBattle } from '../context';
 import type { Trigger } from '../../engine/script';
 import { Rng, castableTactics, healAmounts, maxHp, maxMp, movePoints, tacticsLearnedAt, tryCure, regenerate, setMorale, tacticTerrainOk } from '../../engine/battle/rules';
-import { areaHealItem, attack, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
+import { areaHealItem, attack, bombItem, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
 import { actionOrder, applyMove, attackTargetAfterMove, planUnit, type Plan } from '../../engine/battle/ai';
 import { floodMove, rangeCells, rebuildUnitMap, terrainAt, unitAt, unitsInRange, walkPath, neighbour, sideOf } from '../../engine/battle/hex';
 import { battleNameLines } from '../../engine/battle/map';
@@ -1111,6 +1111,26 @@ export class BattleScene {
       await this.say(S.usedItem, name);
       healItem(this, t, power, kind);
       consume();
+      return true;
+    }
+    if (id === 0x21) {
+      // 폭탄 (b029): one enemy in range 0x81, fixed damage, no exp (bombItem)
+      await this.say(S.bombAttack);
+      const t = await pick(false, 0x81);
+      if (t === NONE || sideOf(t) === sideOf(slot)) return false;
+      await this.say(S.bombThrow);
+      const tu = this.units[t];
+      const r = bombItem(b.s, t);
+      this.v.ensureVisible(tu.x, tu.y);
+      this.sfx(SFX.hit);
+      for (let i = 0; i < 2; i++) {
+        this.v.hidden.add(t);
+        await this.frames(4);
+        this.v.hidden.delete(t);
+        await this.frames(4);
+      }
+      consume();
+      for (const v of r.left) await this.leave(v);
       return true;
     }
     if (id >= 0x2e && id <= 0x33) {
