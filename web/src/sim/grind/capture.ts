@@ -10,6 +10,7 @@ import { Playthrough, type PlaythroughOptions } from '../../native/dev/playthrou
 import type { RunBattle } from '../../native/context';
 import type { Game } from '../../native/game';
 import { battleNameLines } from '../../engine/battle/map';
+import { storyName } from './names';
 import type { BattleSnapshot, FormationInfo } from './sandbox';
 
 const dec = new TextDecoder('euc-kr');
@@ -66,7 +67,7 @@ export function hookPlaythrough(p: Playthrough, hooks: Hooks = {}, shops: ShopLo
         stage: g.script.stage,
         block: g.script.block,
         map,
-        name: dec.decode(names[map] ?? new Uint8Array(0)).trim(),
+        name: storyName(g.script.chapter, g.script.stage, g.script.block, dec.decode(names[map] ?? new Uint8Array(0)).trim()),
         state: structuredClone(g.state),
         script: structuredClone(g.vm.state),
         rngSeed: g.rng.seed,

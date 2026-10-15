@@ -23,6 +23,7 @@ import { Rng } from '../../engine/battle/rules';
 import { AiMode, NONE, PLAYER_SLOTS, Status, UNIT_SLOTS } from '../../engine/battle/types';
 import { maxHp } from '../../engine/battle/rules';
 import { battleNameLines } from '../../engine/battle/map';
+import { storyName } from '../../sim/grind/names';
 import { recordCommands } from '../battle/dev/setup';
 import { runBattle as realRunBattle, type BattleScene } from '../battle/scene';
 import type { RunBattle } from '../context';
@@ -210,7 +211,7 @@ export class Playthrough {
         stage: g.script.stage,
         block: g.script.block,
         map,
-        name: dec.decode(names[map] ?? new Uint8Array(0)).trim(),
+        name: storyName(g.script.chapter, g.script.stage, g.script.block, dec.decode(names[map] ?? new Uint8Array(0)).trim()),
         outcome: 'running',
         attempts: 0,
         turns: 0,

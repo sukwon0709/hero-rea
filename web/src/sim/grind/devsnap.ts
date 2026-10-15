@@ -8,6 +8,7 @@ import type { Ui } from '../../native/context';
 import { headlessScreen, ScriptedInput } from '../../native/battle/dev/headless';
 import type { BattleSnapshot } from './sandbox';
 import { battleName } from './battle';
+import { storyName } from './names';
 
 const noUi = {
   message: async () => {},
@@ -34,7 +35,7 @@ export async function scenarioSnapshot(files: Map<string, Uint8Array>, chapter: 
     stage: entry.stage,
     block: ctx.vm.state.block,
     map,
-    name: battleName(files, map),
+    name: storyName(chapter, entry.stage, ctx.vm.state.block, battleName(files, map)),
     state: structuredClone(ctx.state),
     script: structuredClone(ctx.vm.state),
     rngSeed: seed >>> 0,

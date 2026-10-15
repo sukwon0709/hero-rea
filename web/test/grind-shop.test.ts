@@ -65,3 +65,15 @@ describe('grind params: the namu.wiki techniques', () => {
     expect(Number.isNaN(old.scrolls) && Number.isNaN(old.bonusExit) && Number.isNaN(old.spareBand)).toBe(true);
   });
 });
+
+describe('grind battle names', () => {
+  it('story names for the battles whose map name differs (회남, 하비, 서주공방전)', async () => {
+    const { storyName, applyStoryNames } = await import('../src/sim/grind/names');
+    expect(storyName(1, 2, 12, '하비')).toBe('회남');
+    expect(storyName(1, 3, 4, '신도1')).toBe('하비');
+    expect(storyName(1, 4, 15, '서주')).toBe('서주공방전');
+    expect(storyName(1, 1, 5, '서주')).toBe('서주');
+    const s = applyStoryNames([{ chapter: 1, stage: 2, block: 12, name: '하비' }]);
+    expect(s[0].name).toBe('회남');
+  });
+});

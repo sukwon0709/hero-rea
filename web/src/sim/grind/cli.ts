@@ -11,6 +11,7 @@
 // Output (outside the repository; it is generated from the player's game files): cache/captures.v8,
 // state.json (learning state), progress.json + progress.html, results.json + guide.md.
 
+import { applyStoryNames } from './names';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,7 +74,7 @@ function loadCaptures(): BattleSnapshot[] {
       if (!existsSync(localCap())) throw e;
       console.error(`captures: ${capPath()} unreadable (${(e as Error).message}); using the local copy`);
     }
-  return deserialize(buf ?? readFileSync(existsSync(localCap()) ? localCap() : capPath())) as BattleSnapshot[];
+  return applyStoryNames(deserialize(buf ?? readFileSync(existsSync(localCap()) ? localCap() : capPath())) as BattleSnapshot[]);
 }
 
 const statePath = () => join(OUT, 'state.json');
