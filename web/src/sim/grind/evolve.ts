@@ -39,6 +39,8 @@ export interface GenerationRecord {
   frozen?: number[];
   /** This generation started over from battle 1 (no frozen plans): the frontier had stayed stuck. */
   fresh?: boolean;
+  /** The wall (best run's frontier) a restart was made for. */
+  wall?: number;
   /** Candidates sampled this generation (adaptive population). */
   pop?: number;
   /** Where this generation's best run stopped (null = it reached the end), and how many battles it cleared. */

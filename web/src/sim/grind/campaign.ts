@@ -122,7 +122,9 @@ export function progressObjective(cleared: number, n99: number, top15: number, l
 export function objectiveOf(n99: number, top15: number, levelsGained = 0): number {
   // Lv99 count first; then the top-15 level sum (x10) plus every level gained by anyone (the
   // top 15 is dominated by officers who join at preset levels, so gains alone give a finer signal)
-  return n99 * 100000 + top15 * 10 + levelsGained;
+  // top 15 x50 (Sukwon: prefer the run that clears with more levels, never a rushed clear): at most
+  // 74,250, still below one Lv99 officer
+  return n99 * 100000 + top15 * 50 + levelsGained;
 }
 
 export interface CampaignOptions {
@@ -153,8 +155,35 @@ export interface CampaignOptions {
   extra?: { battle: number; variants: number; rescue: number };
   /** Re-plan tries for frozen battles (their elite plan kept as the fallback); 0 = replay only. */
   replan?: number;
+  /**
+   * A full restart's level target (Sukwon: when a wall looks unwinnable, start over and raise the
+   * levels much higher): on reaching `battle` with the top-9 average level below `level`, go back
+   * one battle further each time (up to `passes`) and grind it again with three times the variants
+   * (the search keeps the won plan with the most exp), then replay forward.
+   */
+  levelGate?: { battle: number; level: number; passes: number };
   /** Called with the carry each battle starts from (bench fixtures). */
   onCarry?: (k: number, carry: CarryState | null) => void;
+}
+
+/** Average level of the `n` highest-level members of our faction (levels as carried). */
+export function topLevel(snap: BattleSnapshot, officers: OfficerCarry[], n: number): number {
+  const faction = snap.state.officers[0].dyn.flags & 0x1f;
+  const lv = snap.state.officers
+    .map((so, i) => ({ so, i }))
+    .filter(({ so, i }) => i < 0x100 && (so.dyn.flags & 0x80) !== 0 && (so.dyn.flags & 0x1f) === faction)
+    .map(({ i }) => Math.min(99, officers[i]?.level ?? 1))
+    .sort((a, b) => b - a)
+    .slice(0, n);
+  return lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
+}
+
+/** Average level of the enemy units a battle starts with or brings in (its deployment records). */
+export function enemyLevel(snap: BattleSnapshot): number {
+  const lv: number[] = [];
+  for (const u of (snap.script as unknown as { units?: { officer: number; flags: number }[] }).units ?? [])
+    if (u.flags & 1 && u.officer < snap.state.officers.length) lv.push(snap.state.officers[u.officer].dyn.level);
+  return lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
 }
 
 export async function runCampaign(
@@ -182,8 +211,27 @@ export async function runCampaign(
   // frozen battles whose old plan was replaced by a re-plan, and those not to re-plan again
   const replanned: number[] = [];
   const noReplan = new Set<number>();
+  let gatePasses = 0;
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
+    // the level target at the wall: below it, go back and grind (one battle further each pass)
+    const gate = o.levelGate;
+    if (gate && k === gate.battle && gatePasses < gate.passes && k - 1 - gatePasses >= 0) {
+      const avg = topLevel(snap, lastOfficers, 9);
+      if (avg < gate.level) {
+        const j = k - 1 - gatePasses;
+        gatePasses++;
+        o.log?.(`  [${k}] ${snap.name}: top-9 average Lv${avg.toFixed(1)} below the target Lv${gate.level}; going back to [${j}] ${list[j].name} to grind more exp (pass ${gatePasses}/${gate.passes})`);
+        regrind.add(j);
+        ({ lastOfficers, lastMoney, carry } = before[j]);
+        out.length = j;
+        for (const [off, at] of [...reached]) if (at >= j) reached.delete(off);
+        k = j - 1;
+        continue;
+      }
+      if (gatePasses) o.log?.(`  [${k}] ${snap.name}: top-9 average Lv${avg.toFixed(1)} meets the target Lv${gate.level}`);
+      gatePasses = gate.passes;
+    }
     before[k] = { lastOfficers, lastMoney, carry };
     // carry: last sandbox result + what the story changed since the previous baseline battle
     if (k > 0) carry = carryFor(list[k - 1], snap, lastOfficers, (carry as CarryState | null)?.formation, lastMoney);
@@ -301,8 +349,8 @@ export async function runCampaign(
     roster,
     n99,
     top15,
-    // 유비's level counts 20 extra per level (Sukwon: raise him with the team)
-    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 100) + 20 * (lastOfficers[0]?.level ?? 0)),
+    // the team's exp (/25) and 유비's level (x50) count too (Sukwon: raise him with the team; more exp beats a rushed clear)
+    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 25) + 50 * (lastOfficers[0]?.level ?? 0)),
     cleared: out.filter((b) => b.won).length,
     frontier,
     wins: out.filter((b) => b.won).length,

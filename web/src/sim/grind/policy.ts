@@ -116,6 +116,13 @@ export interface GrindParams {
   /** Terrain: stand on high-defence cells where enemies can reach, heal on villages/fortresses when hurt. */
   terrain: number;
   /**
+   * Brace for the waves (Sukwon: survive them while grinding, never rush the enemy leader): this
+   * many turns (+1) before a turn event brings 4+ enemy units, form up on defensible ground around
+   * 유비 (terrain, chokepoint, away from where the wave enters) and let them come, until the wave
+   * is thinned; at most 0.5 = off (learned: 하비 was won by finishing before its wave).
+   */
+  brace: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -162,6 +169,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'lead', min: 0, max: 4, def: 1.5 },
   { key: 'hold', min: 0, max: 1, def: 0 },
   { key: 'terrain', min: 0, max: 3, def: 1 },
+  { key: 'brace', min: 0, max: 3, def: 0.6 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -614,10 +622,18 @@ export class GrindPolicy {
     return n;
   }
 
+  private oursOnField(): number {
+    let n = 0;
+    for (let i = 0; i < PLAYER_SLOTS; i++) if (this.scene.units[i].status === Status.Field) n++;
+    return n;
+  }
+
   private killOk(target: number): boolean {
     if (this.finishing) return true;
     const off = this.scene.units[target].officer;
     if (this.know.protect.has(off)) return false;
+    // bracing against a wave: thin it while it outnumbers us (the grinding resumes on what is left)
+    if (this.bracing() && this.enemiesOnField() > this.oursOnField()) return true;
     return this.enemiesOnField() - 1 >= this.p.keep;
   }
 
@@ -632,7 +648,107 @@ export class GrindPolicy {
   private quietTurns = 0;
   private holdBroken = false;
   private holding(): boolean {
-    return this.p.hold > 0.5 && !this.holdBroken;
+    return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
+  }
+  /** The cell the formation gathers around: the brace anchor while bracing, else the hold anchor. */
+  private anchorNow(): [number, number] | null {
+    return this.bracing() ? this.braceAnchor : this.anchor;
+  }
+
+  // ---- brace: a wave is coming (or units are falling): form up on defensible ground around 유비
+
+  private waves: { turn: number; n: number; at: [number, number][] }[] | null = null;
+  private braceUntil = 0;
+  private braceAnchor: [number, number] | null = null;
+  private bracing(): boolean {
+    return this.p.brace > 0.5 && this.braceUntil >= this.b.info.turn + 1 && this.braceAnchor !== null;
+  }
+  private updateBrace() {
+    if (!(this.p.brace > 0.5) || this.finishing) return;
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    const units = this.scene.units;
+    if (this.waves === null) {
+      this.waves = [];
+      for (const e of this.know.turns) {
+        if (e.turn === null || e.turn < 2) continue;
+        const at: [number, number][] = [];
+        for (const off of e.reinforce) {
+          const i = b.slotOfOfficer(off);
+          if (i === NONE || i < PLAYER_SLOTS) continue;
+          const rec = this.scene.ctx.vm.state.units.find((d) => d.officer === off);
+          if (rec && rec.x < b.width && rec.y < b.height) at.push([rec.x, rec.y]);
+        }
+        if (at.length >= 4) this.waves.push({ turn: e.turn, n: at.length, at });
+      }
+      if (this.waves.length) this.log?.(`brace: waves ${this.waves.map((w) => `T${w.turn}x${w.n}`).join(' ')}`);
+    }
+    // the latest the bracing may hold: the finish needs its turns at the end
+    const cap = Math.min(b.info.turnLimit, this.know.deadline ?? 999) - this.p.finish - 4 - this.stepsLeft() * 12;
+    const ahead = Math.round(0.5 + this.p.brace);
+    let until = this.braceUntil;
+    for (const w of this.waves) if (turn >= w.turn - ahead && turn <= w.turn) until = Math.max(until, w.turn + 2);
+    const mine = units.slice(0, PLAYER_SLOTS).filter((u) => u.officer < 0x100 && u.status !== Status.Empty && u.status !== Status.Reserve);
+    const ours = mine.filter((u) => u.status === Status.Field).length;
+    const theirs = this.enemiesOnField();
+    // a wave still heavy: keep the formation while they outnumber us and are close
+    const waveOn = this.waves.some((w) => turn >= w.turn && turn <= w.turn + 6);
+    if (waveOn && until === turn && this.braceAnchor && theirs >= ours * 1.5) {
+      const [ax, ay] = this.braceAnchor;
+      if (units.slice(PLAYER_SLOTS).some((e) => e.status === Status.Field && Math.abs(e.x - ax) + Math.abs(e.y - ay) <= 7)) until = turn + 1;
+    }
+    until = Math.min(until, cap);
+    const was = this.bracing();
+    this.braceUntil = until;
+    if (until >= turn && (!was || !this.braceAnchor)) {
+      this.braceAnchor = this.pickBraceAnchor();
+      if (this.braceAnchor) this.log?.(`brace: T${turn}..T${until} at ${this.braceAnchor[0]},${this.braceAnchor[1]}`);
+    }
+  }
+  /**
+   * Where to brace: a cell 유비 reaches in about two turns whose surroundings are defensive terrain,
+   * narrow (fewer open sides: chokepoints, map edges, rivers) and away from the enemy and the wave's
+   * entry cells; healing terrain nearby counts too.
+   */
+  private pickBraceAnchor(): [number, number] | null {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const ls = b.slotOfOfficer(0);
+    const L = ls !== NONE ? this.scene.units[ls] : null;
+    if (!L || L.status !== Status.Field) return null;
+    const mt = moveTypeOf(b.s, L);
+    const mp = movePoints(b.officerOf(L), b.s.items);
+    const pass = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H && moveCost(mt, b.s.terrain[y * W + x]) !== 0xff;
+    const foes: [number, number][] = [];
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) if (e.status === Status.Field && e.officer !== 0xffff) foes.push([e.x, e.y]);
+    const turn = b.info.turn + 1;
+    for (const w of this.waves ?? []) if (w.turn >= turn) foes.push(...w.at);
+    let best: [number, number] | null = null, bv = -1e9;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        if (!pass(x, y)) continue;
+        const d = this.pathDist([L.x, L.y], mt, x, y);
+        if (d > mp * 2 + 2) continue;
+        let open = 0, def = 0, cells = 0, heal = 0;
+        for (let dy = -2; dy <= 2; dy++)
+          for (let dx = -2; dx <= 2; dx++) {
+            const r = Math.abs(dx) + Math.abs(dy);
+            if (r > 2 || !pass(x + dx, y + dy)) continue;
+            const t = b.s.terrain[(y + dy) * W + x + dx];
+            open++;
+            if (r <= 1) {
+              cells++;
+              def += Math.min(30, terrainDefence(t));
+            }
+            if (t === TERRAIN_VILLAGE || t === TERRAIN_FORTRESS || t === TERRAIN_BARRACKS) heal++;
+          }
+        let near = 99;
+        for (const [fx, fy] of foes) near = Math.min(near, Math.abs(fx - x) + Math.abs(fy - y));
+        if (near <= 2) continue;
+        const v = (def / Math.max(1, cells)) / 5 * this.p.terrain - 0.25 * open + heal * 1.5 + 0.5 * Math.min(near, 12) - 0.4 * Math.max(0, d - mp);
+        if (v > bv) [bv, best] = [v, [x, y]];
+      }
+    return best;
   }
   private updateHold() {
     if (this.p.hold <= 0.5 || this.holdBroken) return;
@@ -712,6 +828,7 @@ export class GrindPolicy {
       }
     }
     this.updateHold();
+    this.updateBrace();
     this.decideFinish();
     this.buildThreat();
     this.buildLeaderKills();
@@ -752,6 +869,18 @@ export class GrindPolicy {
   private decideFinish() {
     if (this.finishing) return;
     const b = this.b;
+    if (this.bracing()) {
+      // last resort only: 유비 about to fall (Sukwon: no rushing the enemy leader as a plan)
+      const L = this.scene.units[b.slotOfOfficer(0)];
+      if (L && L.status === Status.Field && b.officerOf(L).hp * 100 < maxHp(b.officerOf(L)) * 25 && this.deadline() - b.info.turn > this.p.finish) {
+        this.finishing = true;
+        this.stats.finishTurn = b.info.turn + 1;
+        this.stats.finishReason = 'leader';
+        this.log?.(`finish: leader (emergency while bracing) at turn ${b.info.turn + 1}`);
+        this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      }
+      return;
+    }
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const left = this.deadline() - b.info.turn; // turns left including this one
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
@@ -1240,11 +1369,13 @@ export class GrindPolicy {
       if (goal) dist = this.pathDist(goal, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
-      const holdHere = !fin && this.holding() && this.anchor;
-      if (holdHere) {
+      const anc = !fin && this.holding() ? this.anchorNow() : null;
+      if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
-        const da = Math.abs(this.anchor![0] - x) + Math.abs(this.anchor![1] - y);
+        const da = this.bracing() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         base -= 4 * Math.max(0, da - (guarded ? 1 : 2));
+        // bracing: tight around 유비 (the enemy finds no gap to reach him)
+        if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else {
         base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back

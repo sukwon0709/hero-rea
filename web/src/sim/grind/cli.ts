@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process';
 import { serialize, deserialize } from 'node:v8';
 import type { BattleSnapshot } from './sandbox';
 import { captureStory } from './capture';
-import { runCampaign, type CampaignResult } from './campaign';
+import { enemyLevel, runCampaign, topLevel, type CampaignResult } from './campaign';
 import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, PARAM_SPECS, type GrindParams } from './policy';
 import { frozenBattles, newEvolveState, populationSize, sampleGeneration, updateGeneration, type CandidateResult, type EvolveState } from './evolve';
@@ -215,6 +215,7 @@ interface Job {
   extra?: { battle: number; variants: number; rescue: number };
   backtrack?: number;
   replan?: number;
+  levelGate?: { battle: number; level: number; passes: number };
 }
 
 function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<CampaignResult> {
@@ -262,7 +263,7 @@ async function main() {
     const job = JSON.parse(readFileSync(sopt('job', ''), 'utf8')) as Job;
     const files = loadFiles();
     const snaps = loadCaptures();
-    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, replan: job.replan, log: (l) => process.stderr.write(`${l}\n`) });
+    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, replan: job.replan, levelGate: job.levelGate, log: (l) => process.stderr.write(`${l}\n`) });
     const outFile = sopt('job', '') + '.out';
     writeFileSync(outFile, JSON.stringify(res));
     console.log(`@@RESULT@@${outFile}`);
@@ -306,14 +307,31 @@ async function main() {
       const fr = st.best?.campaign.frontier;
       // escalating while it stays stuck there: +1x per generation with the same frontier, up to 8x
       let stuck = 0;
-      for (let h = st.history.length - 1; h >= 0 && fr && st.history[h].frontier?.index === fr.index; h--) stuck++;
+      // (restart generations are skipped: their own frontier is wherever the restart got to)
+      for (let h = st.history.length - 1; h >= 0 && fr; h--) {
+        if (st.history[h].fresh) continue;
+        if (st.history[h].frontier?.index !== fr.index) break;
+        stuck++;
+      }
       const mult = Math.min(8, 2 + stuck);
       // stuck for 3, 6, 9 ... generations (going back 1-2 battles was not enough): this generation
       // starts over from battle 1 with no frozen plans and no elites, with the learned parameters
       // and today's behaviour (stalling, feeding 유비), to build a stronger team on the way; the
       // CEM keeps whichever run reaches further (then more levels)
-      const fresh = fr !== null && fr !== undefined && stuck >= 3 && stuck % 3 === 0;
-      if (fresh) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart from battle 1 (no frozen plans)`);
+      const fresh = fr !== null && fr !== undefined && stuck >= 3 && stuck % 3 === 0 && !st.history[st.history.length - 1]?.fresh;
+      // the restart aims for much higher levels (Sukwon): twice the variants on the way (the search
+      // keeps the won plan with the most exp) and a level target at the wall (top-9 average at least
+      // the wall's enemy level and the stuck run's +3, +2 for every earlier restart at the same wall)
+      let levelGate: Job['levelGate'];
+      if (fresh) {
+        const before = st.history.filter((h) => h.fresh && h.wall === fr!.index).length;
+        // the generic enemies' levels are set when the battle starts, so the stuck run's arrival
+        // levels +3 are the floor of the target
+        const arrived = st.best?.campaign.carryOut?.officers ? topLevel(snaps[fr!.index], st.best.campaign.carryOut.officers, 9) : 0;
+        levelGate = { battle: fr!.index, level: Math.round(Math.max(enemyLevel(snaps[fr!.index]), arrived + 3)) + 2 * before, passes: 4 };
+        console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart from battle 1 (no frozen plans), level target Lv${levelGate.level} at the wall, ${variants * 2} variants per battle`);
+      }
+      const runVariants = fresh ? variants * 2 : variants;
       const extra = fr ? { battle: fr.index, variants: variants * Math.min(4, mult), rescue: rescue * mult } : undefined;
       if (extra) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name}, stuck ${stuck} generations: ${extra.variants} variants, ${extra.rescue} retries there`);
       // common random numbers: every candidate of a generation is played with the same search seed
@@ -363,7 +381,7 @@ async function main() {
         while (next < cands.length) {
           const i = next++;
           if (doneIdx.has(i)) continue;
-          const job: Job = { params: cands[i], variants, seed, limit, elites: fresh ? {} : st.elites, frozen: fresh ? [] : frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) };
+          const job: Job = { params: cands[i], variants: runVariants, seed, limit, elites: fresh ? {} : st.elites, frozen: fresh ? [] : frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate };
           // a worker that dies (I/O error, crash) is tried again, then the candidate is dropped
           let c: CampaignResult | null = null;
           for (let attempt = 1; attempt <= 2 && !c && workers > 1; attempt++)
@@ -381,7 +399,7 @@ async function main() {
             live.done++;
             continue;
           }
-          if (!c) c = await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: fresh ? {} : st.elites, frozen: new Set(fresh ? [] : frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) });
+          if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: fresh ? {} : st.elites, frozen: new Set(fresh ? [] : frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate });
           take(i, cands[i], c);
           savePending({ i, params: cands[i], campaign: c });
           writeProgress(st, live);
@@ -398,6 +416,7 @@ async function main() {
       rmSync(pendingPath, { force: true });
       if (fresh) {
         rec.fresh = true;
+        rec.wall = fr!.index;
         const top = [...results].sort((a, b) => b.cand.objective - a.cand.objective)[0]?.campaign;
         const kept = before && st.best && st.best.result.objective === before.objective;
         console.log(`gen ${rec.gen}: full restart result: cleared ${top?.cleared ?? 0}${top?.frontier ? ` (stopped at [${top.frontier.index}] ${top.frontier.name})` : ''}, top15 ${top?.top15 ?? 0}; ${kept ? `previous best kept (cleared ${before!.cleared})` : 'the restart is the new best'}`);
