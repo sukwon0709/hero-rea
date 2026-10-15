@@ -216,6 +216,11 @@ export async function runCampaign(
   const replanned: number[] = [];
   const noReplan = new Set<number>();
   let gatePasses = 0;
+  // the furthest chain of wins so far (the plans that won each battle, the carry after the last):
+  // a backtrack or an undone re-plan that does not get past it again ends the run with this chain
+  // (gen 110: 하비 won with 1/12 tries, 16 battles cleared, then [16] 연주 lost, the undo of [7]'s
+  // re-plan lost 하비 again and the run was scored as stopped at 11)
+  let furthest: { out: CampaignBattle[]; lastOfficers: OfficerCarry[]; lastMoney: number | undefined; carry: CarryState | null; reached: Map<number, number> } | null = null;
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
     // the level target at the wall: below it, go back and grind (one battle further each pass)
@@ -333,6 +338,25 @@ export async function runCampaign(
       lossReasons: !b.won ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
     o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
+    const wonNow = out.filter((x) => x.won).length;
+    if (b.won && wonNow > (furthest ? furthest.out.filter((x) => x.won).length : 0))
+      furthest = { out: [...out], lastOfficers, lastMoney, carry: carry as CarryState | null, reached: new Map(reached) };
+    if (stop && furthest && furthest.out.filter((x) => x.won).length > wonNow) {
+      // the backtrack did not get back past the furthest chain: that chain is the result
+      const f: NonNullable<typeof furthest> = furthest;
+      const at = f.out.length;
+      o.log?.(`  [${k}] ${snap.name}: stopped short of the furthest chain; restoring it (${f.out.filter((x) => x.won).length} cleared, stopped at [${at}] ${list[at]?.name ?? 'end'})`);
+      out.length = 0;
+      out.push(...f.out);
+      ({ lastOfficers, lastMoney, carry } = f);
+      reached.clear();
+      for (const [off, at2] of f.reached) reached.set(off, at2);
+      if (at < list.length) {
+        frontier = { index: at, name: list[at].name };
+        lastAt = at;
+      } else lastAt = list.length - 1;
+      break;
+    }
     if (stop) {
       frontier = { index: k, name: snap.name };
       lastAt = k;
