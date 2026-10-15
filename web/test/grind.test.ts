@@ -82,4 +82,27 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     // (the outcome echoes the parameters: compare the play)
     expect({ ...b, ms: 0, params: null }).toEqual({ ...a, ms: 0, params: null });
   }, 300_000);
+
+  it('회남 has no commander victory: 기령 (69) falling ends nothing; the wins are the wipe-out and 유비 at (0,2)', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle } = await import('../src/sim/grind/policy');
+    const { recordCommands } = await import('../src/native/battle/dev/setup');
+    const files = loadFiles();
+    let snap = null;
+    for (let n = 0; n < 20 && !snap; n++) {
+      const s = await scenarioSnapshot(files, 1, n, 1);
+      if (s.stage === 2 && s.block === 12) snap = s;
+    }
+    expect(snap).not.toBeNull();
+    const stage = new DevAssets(files).chapter(1).stages[2];
+    const k = analyseBattle(stage, snap!.script);
+    expect(snap!.script.victory.enabled).toBe(false);
+    expect(k.victory).toBeNull();
+    const recs = stage.blocks[12].records;
+    // no defeat event (trigger 12) for 기령 or anyone; the wipe-out record (trigger 7) ends the battle
+    expect(recs.some((r) => r.trigger === 12)).toBe(false);
+    expect(recs.some((r) => r.trigger === 7 && recordCommands(stage, r.code).some((c) => c.name === 'BATTLE_END'))).toBe(true);
+    expect(k.winCells.some((w) => w.officer === 0 && w.x0 === 0 && w.y0 === 2)).toBe(true);
+  }, 300_000);
 });

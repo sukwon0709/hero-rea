@@ -108,6 +108,16 @@ describe('grind: the best losing try and the frontier bonus', () => {
   });
 });
 
+describe('grind: loss reasons', () => {
+  it('the time limit comes first (the field is cleared when it runs out, 유비 included)', async () => {
+    const { lossLabel } = await import('../src/sim/grind/battle');
+    expect(lossLabel({ fallen: '유비', timeUp: true, scripted: false, wiped: true, result: 3 })).toBe('제한 턴 초과');
+    expect(lossLabel({ fallen: '유비', timeUp: false, scripted: false, wiped: false, result: 3 })).toBe('유비 퇴각');
+    expect(lossLabel({ fallen: null, timeUp: false, scripted: true, wiped: false, result: 3 })).toBe('이벤트 패배(기한 등)');
+    expect(lossLabel({ fallen: null, timeUp: false, scripted: false, wiped: true, result: 3 })).toBe('아군 전멸');
+  });
+});
+
 describe('grind: the 회남 sortie', () => {
   it('swaps the weak archers out for close-combat units, keeping each kept officer on its record', async () => {
     const { huainanPicks } = await import('../src/sim/grind/policy');

@@ -202,11 +202,13 @@ export async function runGrindBattle(
       const sl = scene.b.slotOfOfficer(off);
       return sl !== NONE_SLOT && scene.units[sl].status !== Status.Field;
     });
-    if (fallen !== undefined) loss = `${ctx.state.officers[fallen]?.name ?? fallen} 퇴각`;
-    else if (scene.b.info.turn >= scene.b.info.turnLimit) loss = '제한 턴 초과';
-    else if (ctx.state.status & 0x20) loss = '이벤트 패배(기한 등)';
-    else if (scene.units.slice(0, PLAYER_SLOTS).every((u) => u.status !== Status.Field)) loss = '아군 전멸';
-    else loss = `결과 ${result}`;
+    loss = lossLabel({
+      fallen: fallen !== undefined ? (ctx.state.officers[fallen]?.name ?? String(fallen)) : null,
+      timeUp: scene.b.info.turn >= scene.b.info.turnLimit,
+      scripted: (ctx.state.status & 0x20) !== 0,
+      wiped: scene.units.slice(0, PLAYER_SLOTS).every((u) => u.status !== Status.Field),
+      result,
+    });
     if (stats?.finishReason && stats.finishReason !== 'deadline') loss += ` · 마무리 계기 ${stats.finishReason}`;
     if (p.native) loss += ' (게임 AI)';
   }
@@ -282,6 +284,18 @@ export interface BattleSearch {
 /** A fighting preset for battles the team can barely win: kill, focus fire, avoid losses. */
 export function aggressive(base: GrindParams): GrindParams {
   return { ...base, keep: 1, conserve: 0, kill: 1.5, risk: Math.max(2, base.risk), approach: 0.6, finish: Math.max(base.finish, 10) };
+}
+
+/**
+ * Why a try was lost. The time limit first: when it runs out the field is cleared, so 유비's slot
+ * is off the field then too (회남: 44 tries held to turn 30 were all reported as 유비 퇴각).
+ */
+export function lossLabel(f: { fallen: string | null; timeUp: boolean; scripted: boolean; wiped: boolean; result: number }): string {
+  if (f.timeUp) return '제한 턴 초과';
+  if (f.fallen !== null) return `${f.fallen} 퇴각`;
+  if (f.scripted) return '이벤트 패배(기한 등)';
+  if (f.wiped) return '아군 전멸';
+  return `결과 ${f.result}`;
 }
 
 /**
