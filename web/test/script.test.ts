@@ -120,9 +120,9 @@ describe.skipIf(!hasGame)('script VM', () => {
     expect(vm.state.victory).toEqual({ enabled: true, officer: 5 });
 
     // A treasure tile, then Hua Xiong (#5, the victory target) is defeated.
-    await step({ type: 'unitAt', officer: 0x400, x: 7, y: 6 });
+    await step({ type: 'unitAt', officer: 0x400, x: 6, y: 7 });
     expect(host.log.slice(-2)).toEqual(['gold +100', 'caption: 금 100을 손에 넣었다!']);
-    await vm.dispatch({ type: 'unitAt', officer: 0x400, x: 7, y: 6 }); // already taken: IF skips
+    await vm.dispatch({ type: 'unitAt', officer: 0x400, x: 6, y: 7 }); // already taken: IF skips
     expect(host.log.at(-1)).toBe('caption: 금 100을 손에 넣었다!');
     await step({ type: 'targetDefeated' });
     expect(host.log).toContain('narrate: 유비군은 화웅군을 무찌르고 사수관을 점령했다.');
