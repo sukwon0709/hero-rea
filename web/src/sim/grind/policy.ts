@@ -101,6 +101,12 @@ export interface GrindParams {
   healers: number;
   /** Above 0.5: the merchants' gold goes to area heal scrolls (0x2e..0x33) first. */
   area: number;
+  /**
+   * Above 0.5: in a battle 유비 can win by reaching a cell while the enemy (waves counted) is twice
+   * our number or more, form up on defensible ground near that cell, grind there, and walk 유비 in
+   * when the turns left just cover his way (하비). Off by default: on 거록 and 계교 it lost.
+   */
+  exit: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -179,6 +185,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'walk', min: 0, max: 1, def: 0.4 },
   { key: 'healers', min: 0, max: 4, def: 0, int: true },
   { key: 'area', min: 0, max: 1, def: 0.4 },
+  { key: 'exit', min: 0, max: 1, def: 0.4 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -699,6 +706,7 @@ export class GrindPolicy {
   private braceAnchor: [number, number] | null = null;
   private regroupUntil = 0;
   private bracing(): boolean {
+    if (this.exitPlan && !this.finishing) return true;
     const t = this.b.info.turn + 1;
     return this.braceAnchor !== null && ((this.p.brace > 0.5 && this.braceUntil >= t) || this.regroupUntil >= t);
   }
@@ -905,9 +913,139 @@ export class GrindPolicy {
     }
   }
 
+  // ---- exit plan (하비): outnumbered 2:1 with an escape cell for 유비 -> hold near it, escape last
+
+  /** undefined: not decided yet; null: no exit plan in this battle. */
+  private exitPlan: { cell: [number, number]; anchor: [number, number] } | null | undefined = undefined;
+
+  private decideExit() {
+    if (this.exitPlan !== undefined) return;
+    this.exitPlan = null;
+    if (!(this.p.exit > 0.5)) return;
+    const b = this.b;
+    const ls = b.slotOfOfficer(0);
+    const L = ls !== NONE ? this.scene.units[ls] : null;
+    if (!L || L.status !== Status.Field) return;
+    const w = this.know.winCells.find((c) => c.officer === 0 || c.officer === 0x400);
+    if (!w || this.know.steps.length) return;
+    const ours = this.oursOnField();
+    let theirs = this.enemiesOnField();
+    for (const e of this.know.turns) {
+      if (e.turn === null) continue;
+      theirs += e.reinforce.filter((o) => {
+        const i = b.slotOfOfficer(o);
+        return i !== NONE && i >= PLAYER_SLOTS && this.scene.units[i].status !== Status.Field;
+      }).length;
+    }
+    if (theirs < ours * 2) return;
+    const cell: [number, number] = [w.x0, w.y0];
+    const mt = moveTypeOf(b.s, L);
+    const mp = movePoints(b.officerOf(L), b.s.items);
+    const W = b.width, H = b.height;
+    const pass = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H && moveCost(mt, b.s.terrain[y * W + x]) !== 0xff;
+    const foes: [number, number][] = [];
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) if (e.status === Status.Field && e.officer !== 0xffff) foes.push([e.x, e.y]);
+    for (const ev of this.know.turns)
+      for (const off of ev.reinforce) {
+        const i = b.slotOfOfficer(off);
+        if (i === NONE || i < PLAYER_SLOTS) continue;
+        const rec = this.scene.ctx.vm.state.units.find((d) => d.officer === off);
+        if (rec && rec.x < W && rec.y < H) foes.push([rec.x, rec.y]);
+      }
+    // the anchor: within three of 유비's moves of the cell, reachable, narrow and defensive, as far
+    // from the enemy and the waves' entry cells as possible
+    let best: [number, number] | null = null, bv = -1e9;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        if (!pass(x, y)) continue;
+        const dW = this.pathDist(cell, mt, x, y);
+        if (dW > mp * 3 || !this.reaches([L.x, L.y], mt, x, y) || !this.reaches(cell, mt, x, y)) continue;
+        let open = 0, def = 0, cells = 0;
+        for (let dy = -2; dy <= 2; dy++)
+          for (let dx = -2; dx <= 2; dx++) {
+            const r = Math.abs(dx) + Math.abs(dy);
+            if (r > 2 || !pass(x + dx, y + dy)) continue;
+            open++;
+            if (r <= 1) {
+              cells++;
+              def += Math.min(30, terrainDefence(b.s.terrain[(y + dy) * W + x + dx]));
+            }
+          }
+        let near = 99;
+        for (const [fx, fy] of foes) near = Math.min(near, this.pathDist([fx, fy], mt, x, y));
+        const v = ((def / Math.max(1, cells)) / 5) * this.p.terrain - 0.25 * open + 0.6 * Math.min(near, 16) - 0.15 * dW;
+        if (v > bv) [bv, best] = [v, [x, y]];
+      }
+    if (!best) return;
+    this.exitPlan = { cell, anchor: best };
+    this.braceAnchor = best;
+    this.log?.(`exit plan: ${theirs} enemies (waves counted) vs ${ours}: hold near ${best[0]},${best[1]}, escape to ${cell[0]},${cell[1]}`);
+  }
+
+  /**
+   * Turns 유비 needs to reach the exit cell now: move costs over the terrain, enemy units block,
+   * a cell next to an enemy (zone of control) ends the move (costs a whole turn).
+   */
+  private exitTurns(): number {
+    const plan = this.exitPlan;
+    const b = this.b;
+    const ls = b.slotOfOfficer(0);
+    if (!plan || ls === NONE) return 0;
+    const L = this.scene.units[ls];
+    const W = b.width, H = b.height;
+    const mt = moveTypeOf(b.s, L);
+    const mp = Math.max(1, movePoints(b.officerOf(L), b.s.items));
+    const zoc = new Uint8Array(W * H);
+    const blocked = new Uint8Array(W * H);
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
+      if (e.status !== Status.Field) continue;
+      blocked[e.y * W + e.x] = 1;
+      for (const [nx, ny] of [[e.x, e.y - 1], [e.x + 1, e.y], [e.x, e.y + 1], [e.x - 1, e.y]]) if (nx >= 0 && ny >= 0 && nx < W && ny < H) zoc[ny * W + nx] = 1;
+    }
+    const dist = new Float64Array(W * H).fill(Infinity);
+    const start = L.y * W + L.x;
+    dist[start] = 0;
+    const open = [start];
+    while (open.length) {
+      let bi = 0;
+      for (let i = 1; i < open.length; i++) if (dist[open[i]] < dist[open[bi]]) bi = i;
+      const c = open.splice(bi, 1)[0];
+      const cx = c % W, cy = (c - cx) / W;
+      if (cx === plan.cell[0] && cy === plan.cell[1]) break;
+      for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const k = ny * W + nx;
+        const mc = moveCost(mt, b.s.terrain[k]);
+        if (mc === 0xff) continue;
+        // an enemy on the way: it may move or fall, but count two turns for it
+        const d = dist[c] + mc + (zoc[k] ? mp : 0) + (blocked[k] ? mp * 2 : 0);
+        if (d < dist[k]) {
+          if (dist[k] === Infinity) open.push(k);
+          dist[k] = d;
+        }
+      }
+    }
+    const d = dist[plan.cell[1] * W + plan.cell[0]];
+    return d === Infinity ? 99 : Math.ceil(d / mp);
+  }
+
   private decideFinish() {
     if (this.finishing) return;
     const b = this.b;
+    this.decideExit();
+    if (this.exitPlan) {
+      // grind around the anchor; leave when the turns left just cover 유비's way (one spare)
+      const left = this.deadline() - b.info.turn;
+      const need = this.exitTurns();
+      if (left <= need + 1) {
+        this.finishing = true;
+        this.stats.finishTurn = b.info.turn + 1;
+        this.stats.finishReason = 'escape';
+        this.log?.(`finish: escape at turn ${b.info.turn + 1}, ${need} turns to ${this.exitPlan.cell[0]},${this.exitPlan.cell[1]} (deadline ${this.deadline()})`);
+        this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      }
+      return;
+    }
     const left = this.deadline() - b.info.turn; // turns left including this one
     // each pending step (defeat X, march into an area) needs about 12 turns of the finish
     const stepTurns = this.stepsLeft() * 12;
@@ -963,6 +1101,7 @@ export class GrindPolicy {
    */
   private charge(): boolean {
     if (!this.finishing) return false;
+    if (this.stats.finishReason === 'escape') return true;
     if (this.lateThird() || this.enemiesOnField() <= 3) return true;
     const stepTurns = this.stepsLeft() * 12;
     return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
@@ -1249,6 +1388,12 @@ export class GrindPolicy {
     for (const e of enemies) md = Math.min(md, Math.abs(e.x - x) + Math.abs(e.y - y));
     return md + 20;
   }
+  /** (x, y) is reachable from `goal` over the terrain (pathDist's map). */
+  private reaches(goal: [number, number], mt: number, x: number, y: number): boolean {
+    this.pathDist(goal, mt, x, y);
+    return this.distMaps.get(`${goal[0]},${goal[1]},${mt}`)![y * this.b.width + x] !== 0xffff;
+  }
+
   private pathDist(goal: [number, number], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
