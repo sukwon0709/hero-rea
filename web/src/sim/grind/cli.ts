@@ -219,7 +219,12 @@ async function main() {
       const frozen = [...frozenBattles(st)];
       // the battle where the best run so far stopped gets twice the variants and retries
       const fr = st.best?.campaign.frontier;
-      const extra = fr ? { battle: fr.index, variants: variants * 2, rescue: rescue * 2 } : undefined;
+      // escalating while it stays stuck there: +1x per generation with the same frontier, up to 8x
+      let stuck = 0;
+      for (let h = st.history.length - 1; h >= 0 && fr && st.history[h].frontier?.index === fr.index; h--) stuck++;
+      const mult = Math.min(8, 2 + stuck);
+      const extra = fr ? { battle: fr.index, variants: variants * Math.min(4, mult), rescue: rescue * mult } : undefined;
+      if (extra) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name}, stuck ${stuck} generations: ${extra.variants} variants, ${extra.rescue} retries there`);
       // common random numbers: every candidate of a generation is played with the same search seed
       const seed = st.seed * 1000 + st.gen * 37;
       const results: { cand: CandidateResult; campaign: CampaignResult }[] = [];

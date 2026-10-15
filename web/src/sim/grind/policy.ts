@@ -323,6 +323,11 @@ export class GrindPolicy {
     // a goal cell no unit can stand on never fires (거록: the gate cell (10,0) is impassable
     // terrain, so the battle is won by defeating the victory officer instead)
     const f = scene.b.s;
+    if (process.env.GRIND_TRACE_HITS)
+      for (const c of know.winCells) {
+        const t = c.x0 < f.width && c.y0 < f.height ? terrainAt(f, c.x0, c.y0) : -1;
+        console.error(`win cell ${c.x0},${c.y0} officer ${c.officer} terrain ${t} costs ${[0, 1, 2, 3].map((mt) => moveCost(mt, t)).join('/')} size ${f.width}x${f.height}`);
+      }
     know.winCells = know.winCells.filter((c) => {
       for (let y = c.y0; y <= c.y1; y++)
         for (let x = c.x0; x <= c.x1; x++) {
@@ -358,6 +363,23 @@ export class GrindPolicy {
   install(): void {
     const sc = this.scene as unknown as Record<string, unknown>;
     sc.playerPhase = () => this.playerPhase();
+    if (process.env.GRIND_TRACE_HITS) {
+      const real = this.scene as unknown as { doAttack: (a: number, d: number) => Promise<void>; castFlow: (s: number, t: number, p: boolean, tg?: number) => Promise<boolean> };
+      const atk = real.doAttack.bind(this.scene), cast = real.castFlow.bind(this.scene);
+      const L = () => this.b.slotOfOfficer(0);
+      real.doAttack = async (a, d) => {
+        const before = d === L() ? this.b.officerOf(this.scene.units[d]).hp : -1;
+        const pred = d === L() ? this.hitOn(this.scene.units[a], this.scene.units[d], this.scene.units[d].x, this.scene.units[d].y) : 0;
+        await atk(a, d);
+        if (before >= 0) this.log?.(`  hit on leader by ${this.scene.units[a].officer} cls ${this.b.officerOf(this.scene.units[a]).cls} from ${this.scene.units[a].x},${this.scene.units[a].y}: ${before - this.b.officerOf(this.scene.units[d]).hp} (pred ${pred})`);
+      };
+      real.castFlow = async (sl, t, p, tg) => {
+        const before = tg === L() ? this.b.officerOf(this.scene.units[tg]).hp : -1;
+        const r = await cast(sl, t, p, tg);
+        if (before >= 0) this.log?.(`  tactic ${t} on leader by ${this.scene.units[sl].officer}: ${before - this.b.officerOf(this.scene.units[tg!]).hp}`);
+        return r;
+      };
+    }
     // which records the VM runs (for the gains fired): the 10 bytes it copies into ScriptState.record
     const ctx = this.scene.ctx;
     const run = ctx.runEvent.bind(ctx);
@@ -460,6 +482,18 @@ export class GrindPolicy {
     return v * this.p.band;
   }
 
+  /** Mean level of the enemy units on the field. */
+  private enemyLevel(): number {
+    let n = 0, s = 0;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const e = this.scene.units[i];
+      if (e.status !== Status.Field || e.officer === 0xffff) continue;
+      s += this.b.officerOf(e).level;
+      n++;
+    }
+    return n ? s / n : 1;
+  }
+
   /** A defeat event (trigger 12) of this enemy gives something. */
   private killGain(officer: number): number {
     let v = 0;
@@ -470,6 +504,7 @@ export class GrindPolicy {
   /** Enemy slot -> the damage the leader can do to it this phase from a cell within its guard. */
   private leaderKills = new Map<number, number>();
   private leaderActed = false;
+  private leaderSeen: { hp: number; dw: number } | null = null;
 
   private buildLeaderKills() {
     this.leaderKills.clear();
@@ -556,11 +591,17 @@ export class GrindPolicy {
     if (this.p.native && !this.retreatNow) {
       // the computer plays our units from here on (computerPhases pass 0); units that join later
       // are handed over at the next player phase, before anything is drawn
+      // the guarded officers (유비, the defeat officer) stay with the policy: the game's AI would
+      // park 유비 in 대기 and walk it into the first enemy that comes in reach (거록, every try)
       for (let i = 0; i < PLAYER_SLOTS; i++) {
         const u = sc.units[i];
-        if (u.mode === AiMode.Player && !(u.flags & UnitFlag.Scripted)) u.mode = this.know.guarded.has(u.officer) ? AiMode.Wait : AiMode.AttackNearest;
+        if (u.mode === AiMode.Player && !(u.flags & UnitFlag.Scripted) && !this.know.guarded.has(u.officer)) u.mode = AiMode.AttackNearest;
       }
-      return;
+      if (!this.finishing) {
+        this.finishing = true;
+        this.stats.finishTurn = b.info.turn + 1;
+        this.stats.finishReason = 'native';
+      }
     }
     const any = sc.units.slice(0, PLAYER_SLOTS).some((u) => this.controllable(u));
     if (!any) return;
@@ -572,9 +613,26 @@ export class GrindPolicy {
       b.info.result = 1;
       return;
     }
+    if (this.log && this.leaderSeen) {
+      const ls = b.slotOfOfficer(0);
+      const L = ls !== NONE ? sc.units[ls] : null;
+      if (L && L.status === Status.Field) {
+        const hp = b.officerOf(L).hp;
+        if (hp < this.leaderSeen.hp) this.log(`  leader took ${this.leaderSeen.hp - hp} over the enemy phase (predicted worst ${Math.round(this.leaderSeen.dw)}) at ${L.x},${L.y}`);
+      }
+    }
+    if (process.env.GRIND_TRACE_HITS) {
+      const ls = b.slotOfOfficer(0);
+      if (ls !== NONE) {
+        const L = sc.units[ls];
+        this.log?.(`  enemies near leader: ${sc.units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && Math.abs(e.x - L.x) + Math.abs(e.y - L.y) <= 99).map((e) => `${e.officer}@${e.x},${e.y} m${e.mode} L${this.b.officerOf(e).level} c${this.b.officerOf(e).cls} hp${this.b.officerOf(e).hp}`).join(' ')}`);
+      }
+    }
     this.decideFinish();
     this.buildThreat();
     this.buildLeaderKills();
+    // the leader moves last: the enemies' reach is then computed with the others where they ended up
+    // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
     const feedLast = this.p.feed > 0 && !this.finishing;
     let gained = 0;
     const done = new Set<number>();
@@ -593,7 +651,10 @@ export class GrindPolicy {
       this.buildThreat();
       b.s.unitAt[at] = u.slot;
       const act = this.bestAction(u);
-      if (u.officer === 0) this.leaderActed = true;
+      if (u.officer === 0) {
+        this.leaderActed = true;
+        this.leaderSeen = { hp: b.officerOf(u).hp, dw: act.danger ?? 0 };
+      }
       gained += await this.execute(act);
       if (b.info.result) return;
       await sc.victoryCheck();
@@ -680,7 +741,20 @@ export class GrindPolicy {
       // the same reach without zones of control (our units die or move during the phase and
       // open the way: 소패, a cavalry unit through two fallen units): the leader's worst case
       if (range === NONE) continue;
+      // ... and through our own units too: the leader moves first, and the units that move after
+      // it can open the way (거록: a reinforcement reached 유비 through a cell 관우 left)
+      const lifted: number[] = [];
+      for (let p = 0; p < PLAYER_SLOTS; p++) {
+        const pu = this.scene.units[p];
+        if (pu.status !== Status.Field || pu.officer === 0) continue;
+        const k = pu.y * b.width + pu.x;
+        if (b.s.unitAt[k] === p) {
+          b.s.unitAt[k] = NONE;
+          lifted.push(p);
+        }
+      }
       floodMove(b.s, e, [e.x, e.y], grid, { flags: 1, maxCost: mp });
+      for (const p of lifted) b.s.unitAt[this.scene.units[p].y * b.width + this.scene.units[p].x] = p;
       grid[e.y * b.width + e.x] = 0;
       const lseen = new Uint8Array(n);
       for (let c = 0; c < n; c++) {
@@ -842,13 +916,16 @@ export class GrindPolicy {
     // other targets), so the cost rises smoothly from half the troops to one and a half times them
     // expected damage drives the cost for everyone; the leader (유비 / the defeat officer) losing
     // loses the battle, so for it the worst case counts
+    // level-aware: a leader weaker than the enemies around keeps a wider margin (worst case at most
+    // half its troops at half their level), the full `guard` once it has caught up
+    const guardEff = guarded ? this.p.guard * Math.min(1, Math.max(0.5, o.level / Math.max(1, this.enemyLevel()))) : this.p.guard;
     const deathCost = (d: { worst: number; expected: number; n?: number }, p: number) => {
       const r = d.expected / hp;
       const lethal = Math.min(1.5, Math.max(0, r - 0.6));
       let c = this.p.risk * (future * (fin ? 0.3 : 1) * lethal + (w + 0.5) * 4 * Math.min(r, 1) ** 2);
       if (guarded) {
         const rw = d.worst / hp;
-        c += 10000 * Math.min(1, Math.max(0, rw - this.p.guard) * 3) + 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0);
+        c += 10000 * Math.min(1, Math.max(0, rw - guardEff) * 3) + 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0);
       }
       return p * c;
     };

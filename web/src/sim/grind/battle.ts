@@ -322,7 +322,13 @@ export async function searchBattle(
   for (let r = 1; r <= rescue && !(best as BattleOutcome | null)?.won; r++) {
     // alternately: the game's own AI plays our side (native), and the fighting preset
     const a = aggressive(base);
-    const c: GrindParams = r % 2 ? { ...base, native: true, rerolls: (r - 1) / 2 } : { ...a, finish: r % 4 === 2 ? 99 : a.finish, rerolls: r + 7 };
+    // three plans in turn: the game's AI for the others (유비 kept safe by the policy), the fighting
+    // preset, and a defensive win-first plan (hold together near 유비, kill whatever comes)
+    const k = (r - 1) % 3;
+    const c: GrindParams =
+      k === 0 ? { ...base, native: true, rerolls: Math.floor((r - 1) / 3) }
+      : k === 1 ? { ...a, finish: r % 2 ? 99 : a.finish, rerolls: r + 7 }
+      : clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 });
     consider(await safeGrindBattle(files, snap, c, carry));
   }
   return { best: best as unknown as BattleOutcome, tried };
