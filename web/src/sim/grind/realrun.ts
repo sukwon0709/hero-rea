@@ -4,12 +4,12 @@
 // a snapshot of the real state (searchBattle), then the best plan is played in the real game with
 // the same policy and parameters. Predicted and actual results are both recorded.
 
-import { PLAYER_SLOTS, AiMode } from '../../engine/battle/types';
+import { PLAYER_SLOTS, AiMode, loadLearnTable } from '../../engine/battle/types';
 import { factionOf } from '../../native/battle/model';
 import type { BattleScene } from '../../native/battle/scene';
 import { playHooked } from './capture';
 import { shopVisit, type Purchase } from './shop';
-import { makeHeadless } from './sandbox';
+import { assetsFor, makeHeadless } from './sandbox';
 import { searchBattle, SearchRng, type BattleOutcome } from './battle';
 import { scriptNotes } from './battle';
 import { GrindPolicy, analyseBattle, pickFormation, type GrindParams } from './policy';
@@ -47,7 +47,7 @@ export async function realRun(
     files,
     { seed: opts.seed ?? 12345, botAttempts: 3 },
     {
-      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0),
+      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0, params.healers, loadLearnTable(assetsFor(files).main)),
       // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it
       onShop: (g, items) => {
         const got = shopVisit(g.state, items);

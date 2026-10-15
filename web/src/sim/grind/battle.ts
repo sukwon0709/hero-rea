@@ -3,7 +3,7 @@
 
 import type { GameState } from '../../engine/state';
 import type { ScriptState } from '../../engine/script';
-import { NONE as NONE_SLOT, PLAYER_SLOTS, Status } from '../../engine/battle/types';
+import { NONE as NONE_SLOT, PLAYER_SLOTS, Status, loadLearnTable } from '../../engine/battle/types';
 import { battleNameLines } from '../../engine/battle/map';
 import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
@@ -101,7 +101,7 @@ export interface CarryState {
 const dec = new TextDecoder('euc-kr');
 
 /** Applies carried levels and the formation picks to a cloned state. */
-export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams, bought?: Purchase[], shopping = true) {
+export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams, bought?: Purchase[], shopping = true, learn?: Uint8Array) {
   return (state: GameState, script: ScriptState, extras: { formation: number[] | undefined }) => {
     if (carry?.officers)
       carry.officers.forEach((c, i) => {
@@ -123,7 +123,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // over it removed that enemy, and with it the defeat event the battle needs
       const recs = fi.hexFormation ? fi.records : fi.records.filter((r) => !(script.units[r].flags & 1));
       const free = recs.length;
-      const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0);
+      const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0, params.healers, learn);
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
         recs.forEach((r, k) => {
@@ -163,7 +163,7 @@ export async function runGrindBattle(
       if (trace) policy.log = trace;
       before = scene.ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));
     },
-    prepareState(snap, carry, p, purchases),
+    prepareState(snap, carry, p, purchases, true, loadLearnTable(assetsFor(files).main)),
   );
   const { scene, ctx } = run;
   // a battle that never ends (should not happen: the turn limit ends every battle) is cut off

@@ -97,6 +97,8 @@ export interface GrindParams {
   approach: number;
   /** Formation: slots kept for the strongest officers (the rest go to the lowest levels). */
   strong: number;
+  /** Formation: officers who know a heal tactic, fielded right after 유비 and the band (lowest level first). */
+  healers: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -122,6 +124,8 @@ export interface GrindParams {
    * is thinned; at most 0.5 = off (learned: 하비 was won by finishing before its wave).
    */
   brace: number;
+  /** Above 0.5: units walk towards the nearest enemy by walking distance (a flood over passable terrain), not a straight line (팽성: 미방 waited 23 turns behind a river). */
+  walk: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -170,6 +174,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hold', min: 0, max: 1, def: 0 },
   { key: 'terrain', min: 0, max: 3, def: 1 },
   { key: 'brace', min: 0, max: 3, def: 0.6 },
+  { key: 'walk', min: 0, max: 1, def: 0.4 },
+  { key: 'healers', min: 0, max: 4, def: 0, int: true },
 ];
 
 export function defaultParams(): GrindParams {
@@ -290,7 +296,7 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
  * Picks for a FORMATION: the officers already placed by the setup, 유비, then `strong` of the
  * highest-level officers (to keep battles winnable), then the lowest levels below 99.
  */
-export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false): number[] {
+export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false, healers = 0, learn?: Uint8Array): number[] {
   const faction = state.officers[0].dyn.flags & 0x1f;
   const pool = state.officers
     .map((o, i) => ({ i, lv: o.dyn.level, ok: (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction && i < 0x100 }))
@@ -302,6 +308,17 @@ export function pickFormation(state: GameState, fixed: number[], free: number, s
   if (!fixed.includes(0) && pool.some((o) => o.i === 0)) take(0);
   // 군악대 officers: their neighbours regain MP every turn (heals and support tactics keep flowing)
   if (band) for (const o of pool) if (state.officers[o.i].dyn.cls === 12) take(o.i);
+  // healers (heal / morale tactics 21..35 learned at their level): troops stay up, and every heal
+  // is +8 exp for a unit that would otherwise wait
+  if (healers > 0 && learn) {
+    const heals = (i: number) => {
+      const d = state.officers[i].dyn;
+      for (let t = 21; t <= 35; t++) if (learn[t * CLASS_COUNT + d.cls] <= d.level) return true;
+      return false;
+    };
+    const hs = pool.filter((o) => o.lv < 99 && heals(o.i)).sort((a, b) => a.lv - b.lv || a.i - b.i);
+    for (const o of hs.slice(0, healers)) take(o.i);
+  }
   const byHigh = [...pool].sort((a, b) => b.lv - a.lv || a.i - b.i);
   for (const o of byHigh.slice(0, strong)) take(o.i);
   const byLow = [...pool].sort((a, b) => (a.lv >= 99 ? 1 : 0) - (b.lv >= 99 ? 1 : 0) || a.lv - b.lv || a.i - b.i);
@@ -628,8 +645,21 @@ export class GrindPolicy {
     return n;
   }
 
+  /** A duel / persuasion with this enemy is still to come (its actor on the field): it gives levels or a recruit, a kill would waste it. */
+  private duelPending(off: number): boolean {
+    if (this.deadline() - this.b.info.turn <= 2) return false;
+    for (const g of this.know.gains) {
+      if ((g.kind !== 'duel' && g.kind !== 'persuade') || g.other !== off || this.fired.has(g.record)) continue;
+      if (g.actor === 0x400) return true;
+      const s = g.actor !== null ? this.b.slotOfOfficer(g.actor) : NONE;
+      if (s !== NONE && s < PLAYER_SLOTS && this.scene.units[s].status === Status.Field) return true;
+    }
+    return false;
+  }
+
   private killOk(target: number): boolean {
     const off = this.scene.units[target].officer;
+    if (this.duelPending(off)) return false;
     if (this.finishing) return this.charge() || !this.know.protect.has(off);
     if (this.know.protect.has(off)) return false;
     // regrouping: kill what comes (the leader still spared)
@@ -1180,6 +1210,42 @@ export class GrindPolicy {
 
   /** Steps from (x, y) to `goal` over cells this move type can enter (terrain only; cached). */
   private distMaps = new Map<string, Uint16Array>();
+  /** Walking distance to the nearest enemy (multi-source flood over passable terrain, cached per enemy layout). */
+  private foeMaps = new Map<string, Uint16Array>();
+  private foeDist(enemies: Unit[], mt: number, x: number, y: number): number {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const key = `${mt}|${enemies.map((e) => e.y * W + e.x).join(',')}`;
+    let m = this.foeMaps.get(key);
+    if (!m) {
+      if (this.foeMaps.size > 64) this.foeMaps.clear();
+      m = new Uint16Array(W * H).fill(0xffff);
+      const q: number[] = [];
+      for (const e of enemies) {
+        const c = e.y * W + e.x;
+        if (m[c] !== 0) {
+          m[c] = 0;
+          q.push(c);
+        }
+      }
+      for (let h = 0; h < q.length; h++) {
+        const c = q[h], cx = c % W, cy = (c - cx) / W;
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = ny * W + nx;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          m[k] = m[c] + 1;
+          q.push(k);
+        }
+      }
+      this.foeMaps.set(key, m);
+    }
+    const d = m[y * W + x];
+    if (d !== 0xffff) return d;
+    let md = 99;
+    for (const e of enemies) md = Math.min(md, Math.abs(e.x - x) + Math.abs(e.y - y));
+    return md + 20;
+  }
   private pathDist(goal: [number, number], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
@@ -1397,6 +1463,7 @@ export class GrindPolicy {
       // walking distance over passable terrain (a manhattan pull leaves units stuck behind walls
       // and rivers: 서주 2nd, three units waited 20 turns in the corner north of 차주)
       if (goal) dist = this.pathDist(goal, moveTypeOf(b.s, u), x, y);
+      else if (this.p.walk > 0.5) dist = this.foeDist(enemies, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       const anc = !fin && this.holding() ? this.anchorNow() : null;
