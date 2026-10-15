@@ -113,6 +113,21 @@ export interface GrindParams {
   exitMargin: number;
   /** Exit plan: how much the anchor prefers cells close to the exit cell (per step). */
   exitNear: number;
+  /**
+   * Merchants: this many of the cheapest 병법서 (초열서 first: fire works on the common terrain) for
+   * each officer below Lv99, lowest levels first; a hit with one is the usual hit exp (+4 and up,
+   * never misses, no counter) on a turn the officer has no MP. Absent (older plans): one strong
+   * scroll for the six smartest, as before.
+   */
+  scrolls: number;
+  /**
+   * Above 0.5: where 유비 reaching a cell wins with a victory bonus for every unit (거록, 계교, 서주:
+   * 전원 경험치 +50), the enemy leader is spared and 유비 walks in timed to arrive near the turn
+   * limit (exitMargin spare turns). Absent (older plans): off.
+   */
+  bonusExit: number;
+  /** Above 0.5: an enemy 군악대 is not killed while grinding (it gives our neighbours MP too, 7cc8). Absent: off. */
+  spareBand: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -194,6 +209,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'exit', min: 0, max: 1, def: 0.6 },
   { key: 'exitMargin', min: 0, max: 3, def: 1, int: true },
   { key: 'exitNear', min: 0, max: 1, def: 0.15 },
+  { key: 'scrolls', min: 0, max: 4, def: 2, int: true },
+  { key: 'bonusExit', min: 0, max: 1, def: 0.6 },
+  { key: 'spareBand', min: 0, max: 1, def: 0.4 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -675,9 +693,25 @@ export class GrindPolicy {
     return false;
   }
 
+  /** The victory officer is below 70% of its troops (it may fall to a counter any time). */
+  private victoryWorn(): boolean {
+    const v = this.know.victory;
+    const s = v === null ? NONE : this.b.slotOfOfficer(v);
+    if (s === NONE || this.scene.units[s].status !== Status.Field) return false;
+    const o = this.b.officerOf(this.scene.units[s]);
+    return o.hp < maxHp(o) * 0.7;
+  }
+
+  /** The victory officer kept alive for the bonus walk-in (GrindParams.bonusExit). */
+  private spared(off: number): boolean {
+    return off === this.know.victory && this.bonusCell() !== null && this.bonusOn();
+  }
+
   private killOk(target: number): boolean {
     const off = this.scene.units[target].officer;
     if (this.duelPending(off)) return false;
+    if (off === this.know.victory && this.bonusOn()) return false;
+    if (this.p.spareBand > 0.5 && !this.finishing && this.b.officerOf(this.scene.units[target]).cls === 12 && this.ourTacticUsers() > 0) return false;
     if (this.finishing) return this.charge() || !this.know.protect.has(off);
     if (this.know.protect.has(off)) return false;
     // regrouping: kill what comes (the leader still spared)
@@ -992,12 +1026,18 @@ export class GrindPolicy {
     this.log?.(`exit plan: ${theirs} enemies (waves counted) vs ${ours}: hold near ${best[0]},${best[1]}, escape to ${cell[0]},${cell[1]}`);
   }
 
+  /** Our units on the field that know a tactic (an enemy 군악대 next to them refills their MP). */
+  private ourTacticUsers(): number {
+    const b = this.b;
+    return this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff && b.learn.some((lv, i) => i % CLASS_COUNT === b.officerOf(u).cls && lv <= b.officerOf(u).level)).length;
+  }
+
   /**
    * Turns 유비 needs to reach the exit cell now: move costs over the terrain, enemy units block,
    * a cell next to an enemy (zone of control) ends the move (costs a whole turn).
    */
-  private exitTurns(): number {
-    const plan = this.exitPlan;
+  private exitTurns(cell: [number, number] | undefined = this.exitPlan?.cell): number {
+    const plan = cell ? { cell } : null;
     const b = this.b;
     const ls = b.slotOfOfficer(0);
     if (!plan || ls === NONE) return 0;
@@ -1039,9 +1079,64 @@ export class GrindPolicy {
     return d === Infinity ? 99 : Math.ceil(d / mp);
   }
 
+  /** The arrival cell that wins with a bonus for every unit (전원 경험치 +50), when bonusExit is on. */
+  private bonusCellMemo: [number, number] | null | undefined = undefined;
+  private bonusCell(): [number, number] | null {
+    if (this.bonusCellMemo !== undefined) return this.bonusCellMemo;
+    this.bonusCellMemo = null;
+    if (!(this.p.bonusExit > 0.5) || this.know.steps.length) return null;
+    for (const g of this.know.gains) {
+      // (계교: the +50 record does not end the battle itself, a win cell on the same square does)
+      if (g.bonus <= 0 || !g.cell || (g.trigger !== 6 && g.trigger !== 11) || g.actor !== 0 || g.needsFlags.length) continue;
+      if (!this.know.winCells.some((w) => w.officer === 0 && w.x0 <= g.cell!.x1 && w.x1 >= g.cell!.x0 && w.y0 <= g.cell!.y1 && w.y1 >= g.cell!.y0)) continue;
+      this.bonusCellMemo = [g.cell.x0, g.cell.y0];
+      break;
+    }
+    return this.bonusCellMemo;
+  }
+
+  /** The bonus arrival is still reachable in the turns left (the leader is spared for it). */
+  private bonusOn(): boolean {
+    const c = this.bonusCell();
+    if (!c || this.fired.size < 0) return false;
+    const ls = this.b.slotOfOfficer(0);
+    if (ls === NONE || this.scene.units[ls].status !== Status.Field) return false;
+    if (this.exitTurns(c) > this.deadline() - this.b.info.turn) return false;
+    // only once the field is nearly clear (the leader and at most one more, the expert way: grind the
+    // rest down, then walk in) or the walk-in has begun; a guarded cell (거록: six fresh units by the
+    // gate) turns the walk-in into a loss on time
+    return this.stats.finishReason === 'escape' || this.enemiesOnField() <= 2;
+  }
+
   private decideFinish() {
+    if (this.finishing && this.stats.finishReason !== 'escape' && this.bonusCell() && this.bonusOn()) {
+      // a finish already running (routing, the leader spared) turns into the walk-in when it is time
+      const left = this.deadline() - this.b.info.turn;
+      const need = this.exitTurns(this.bonusCell()!);
+      const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
+      if (left <= need + margin || this.victoryWorn()) {
+        this.stats.finishReason = 'escape';
+        this.log?.(`finish: walk-in for the bonus at turn ${this.b.info.turn + 1}, ${need} turns to ${this.bonusCell()!.join(',')}`);
+      }
+      return;
+    }
     if (this.finishing) return;
     const b = this.b;
+    if (this.bonusCell() && this.bonusOn()) {
+      const left = this.deadline() - b.info.turn;
+      const need = this.exitTurns(this.bonusCell()!);
+      const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
+      // (or the leader worn down: it may fall to a counter or an allied army in
+      // the enemy phase and end the battle without the bonus, 계교's 원소)
+      if (left <= need + margin || this.victoryWorn()) {
+        this.finishing = true;
+        this.stats.finishTurn = b.info.turn + 1;
+        this.stats.finishReason = 'escape';
+        this.log?.(`finish: walk-in for the bonus at turn ${b.info.turn + 1}, ${need} turns to ${this.bonusCell()!.join(',')} (deadline ${this.deadline()})`);
+        this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+        return;
+      }
+    }
     this.decideExit();
     if (this.exitPlan) {
       // grind around the anchor; leave when the turns left just cover 유비's way (exitMargin spare)
@@ -1114,6 +1209,8 @@ export class GrindPolicy {
   private charge(): boolean {
     if (!this.finishing) return false;
     if (this.stats.finishReason === 'escape') return true;
+    // the bonus arrival still possible: no charge at the leader; the walk-in comes when it is time
+    if (this.bonusOn()) return false;
     if (this.lateThird() || this.enemiesOnField() <= 3) return true;
     const stepTurns = this.stepsLeft() * 12;
     return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
@@ -1475,6 +1572,7 @@ export class GrindPolicy {
 
   /** The officer whose defeat moves the battle on now: a pending defeat step, else the victory officer. */
   private victoryNow(): number | null {
+    if (this.bonusOn()) return null;
     const st = this.step();
     if (st) return st.trigger === 12 ? st.officer : null;
     return this.know.victory;
@@ -1569,7 +1667,11 @@ export class GrindPolicy {
     const ownAdj = this.wadj().find((a) => a.actor === u.officer);
     const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
     const chg = this.charge();
-    const goal = !fin || !chg ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    // the bonus walk-in (GrindParams.bonusExit) heads for its cell whatever the way round: the turns were counted for it
+    const walkIn = guarded && u.officer === 0 && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
+    // ... and the others clear the way there (the guards of the cell), leaving the spared leader be
+    const walkAll = !walkIn && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
+    const goal = !fin || !chg ? null : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -1615,8 +1717,14 @@ export class GrindPolicy {
     // the best script gain open to this unit (duel partner, persuasion target, bonus cell): walk to it
     const gg = !fin ? this.gainGoal(u) : null;
     const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
+    // a duel with the leader kept for the bonus walk-in would end the battle first (계교: 장비-문추):
+    // its actor keeps off the cells next to it
+    const vic = this.know.victory;
+    const vs = vic !== null && this.spared(vic) && this.ownDuel(u, vic) ? b.slotOfOfficer(vic) : NONE;
+    const avoid = vs !== NONE && this.scene.units[vs].status === Status.Field ? this.scene.units[vs] : null;
     for (const [x, y] of this.reachable(u)) {
       if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
+      if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
@@ -1699,6 +1807,9 @@ export class GrindPolicy {
           if (lethal && !kg && !this.killOk(d) && !(guarded && !this.know.protect.has(D.officer) && !this.duelPending(D.officer))) continue;
           // 태산: 유비 next to 이명 killed him on the last turn instead of persuading him
           if (lethal && this.ownDuel(u, D.officer)) continue;
+          // the leader kept for the bonus walk-in: no blow that could take it with the rolls
+          // (a badly hurt leader flees or routs, 계교's 원소 at turn 11: keep it above half)
+          if (this.spared(D.officer) && (od.hp - dmg * 1.5 < maxHp(od) * 0.5 || walkAll)) continue;
           const hit = combatExp(true, o.level, od.level, false, d);
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
@@ -1805,6 +1916,9 @@ export class GrindPolicy {
       const element = 2 - Math.trunc((id - 0x22) / 3);
       const power = (id - 0x22) % 3;
       if (element === 0 && WEATHER_TYPE[b.info.weather] === RAIN) return null;
+      // a stock of cheap scrolls (GrindParams.scrolls) is meant to be thrown: a sure, counter-free hit
+      const held = o.items.filter((v) => v >= 0x22 && v <= 0x2a).length;
+      const cost = Number.isFinite(this.p.scrolls) && held >= 2 ? 1 : 6;
       let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
       for (const d of unitsInRange(b.s, u, power | 0x80, x, y, false)) {
         const D = this.scene.units[d];
@@ -1813,8 +1927,9 @@ export class GrindPolicy {
         const [lo] = this.tacticDamageRange({ level: o.level, intel: o.intel }, { level: od.level, intel: od.intel, cls: od.cls }, element, power, terrainAt(b.s, D.x, D.y));
         const lethal = lo >= od.hp;
         if (lethal && !this.killOk(d)) continue;
+        if (this.spared(D.officer) && od.hp - lo * 2 < maxHp(od) * 0.5) continue;
         const ex = combatExp(true, o.level, od.level, lethal, d);
-        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - 6;
+        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - cost;
         if (!best || v > best.value) best = { value: v, target: d, exp: ex, lethal };
       }
       return best;
@@ -1872,6 +1987,7 @@ export class GrindPolicy {
           const H = this.scene.units[h];
           const oh = b.officerOf(H);
           const [lo, hi] = this.tacticDamageRange(o, oh, e, p, terrainAt(b.s, H.x, H.y));
+          if (this.spared(H.officer) && oh.hp - hi * 1.5 < maxHp(oh) * 0.5) ok = false;
           if (hi >= oh.hp) {
             if (this.finishing || (!this.know.protect.has(H.officer) && left - 1 >= this.p.keep)) {
               left--;
@@ -1909,6 +2025,8 @@ export class GrindPolicy {
         for (const s of affected) {
           const drop = tc >= 18 ? moraleDrop(o, b.officerOf(this.scene.units[s]), p, this.scene.units[s].morale) : 0;
           if (leaves(s, drop) && !this.killOk(s)) bad = true;
+          // the leader kept for the bonus walk-in: a routed leader (morale 0) is a defeat too
+          if (this.spared(this.scene.units[s].officer)) bad = true;
         }
         if (bad) continue;
         void od;

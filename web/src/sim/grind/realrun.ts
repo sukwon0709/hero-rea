@@ -50,7 +50,7 @@ export async function realRun(
       onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0, params.healers, loadLearnTable(assetsFor(files).main)),
       // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it
       onShop: (g, items) => {
-        const got = shopVisit(g.state, items, { areaHeals: params.area > 0.5 });
+        const got = shopVisit(g.state, items, { areaHeals: params.area > 0.5, scrolls: params.scrolls });
         bought.push(...got);
         if (got.length) opts.log?.(`shop: ${got.map((x) => `${g.state.officers[x.officer].name}<-${g.state.items[x.item]?.name}`).join(' ')} (gold ${g.state.progress.money})`);
       },
