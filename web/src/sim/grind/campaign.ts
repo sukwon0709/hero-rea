@@ -138,7 +138,7 @@ export interface CampaignOptions {
   /** Only the first n battles (quick runs). */
   limit?: number;
   log?: (line: string) => void;
-  /** Extra tries for a battle nothing won (native AI / fighting preset with rerolls). */
+  /** Extra tries for a battle nothing won (fighting / defensive / hold plans with rerolls; no rushes). */
   rescue?: number;
   /**
    * A battle nothing wins after every retry ends the run there (the player would be stuck), instead

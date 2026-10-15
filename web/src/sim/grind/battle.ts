@@ -285,8 +285,8 @@ export function aggressive(base: GrindParams): GrindParams {
  * Searches plans for one battle: the base parameters, the elite plan kept for this battle, the
  * fighting preset, then mutations around the best plan so far (keep / finish / weights) and
  * rerolls (총퇴각 at turn 1, which moves the RNG on). Keeps the best win (need-weighted exp). If
- * nothing wins within `variants` tries, up to `rescue` more tries alternate between the game's own
- * AI playing our side (native) and the fighting preset, each with further rerolls.
+ * nothing wins within `variants` tries, up to `rescue` more tries cycle through the fighting
+ * preset, a defensive plan and the hold plan, each with further rerolls (no rushing plans).
  */
 export async function searchBattle(
   files: Map<string, Uint8Array>,
@@ -327,16 +327,16 @@ export async function searchBattle(
     consider(await safeGrindBattle(files, snap, c, carry));
   }
   for (let r = 1; r <= rescue && !(best as BattleOutcome | null)?.won; r++) {
-    // alternately: the game's own AI plays our side (native), and the fighting preset
+    // more tries that still play the battle out (Sukwon: no emergency means, walls are passed by
+    // levels): the fighting preset (its usual finish, no finish-from-turn-1), a defensive plan
+    // (hold together near 유비, kill whatever comes, finish at the end) and the hold plan (하비:
+    // form up near the start, let the waves come, push out after), each with rerolls. The game's
+    // own AI (native, charging from turn 1) and the finish-99 rush are gone.
     const a = aggressive(base);
-    // three plans in turn: the game's AI for the others (유비 kept safe by the policy), the fighting
-    // preset, and a defensive win-first plan (hold together near 유비, kill whatever comes)
-    // ... and a hold plan (하비: form up near the start, let the waves come, push out after)
-    const k = (r - 1) % 4;
+    const k = (r - 1) % 3;
     const c: GrindParams =
-      k === 0 ? { ...base, native: true, rerolls: Math.floor((r - 1) / 4) }
-      : k === 1 ? { ...a, finish: r % 2 ? 99 : a.finish, rerolls: r + 7 }
-      : k === 2 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
+      k === 0 ? { ...a, rerolls: r + 7 }
+      : k === 1 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
       : clampParams({ ...base, hold: 1, brace: 0, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
     consider(await safeGrindBattle(files, snap, c, carry));
   }

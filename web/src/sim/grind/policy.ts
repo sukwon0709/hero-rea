@@ -869,18 +869,8 @@ export class GrindPolicy {
   private decideFinish() {
     if (this.finishing) return;
     const b = this.b;
-    if (this.bracing()) {
-      // last resort only: 유비 about to fall (Sukwon: no rushing the enemy leader as a plan)
-      const L = this.scene.units[b.slotOfOfficer(0)];
-      if (L && L.status === Status.Field && b.officerOf(L).hp * 100 < maxHp(b.officerOf(L)) * 25 && this.deadline() - b.info.turn > this.p.finish) {
-        this.finishing = true;
-        this.stats.finishTurn = b.info.turn + 1;
-        this.stats.finishReason = 'leader';
-        this.log?.(`finish: leader (emergency while bracing) at turn ${b.info.turn + 1}`);
-        this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
-      }
-      return;
-    }
+    // bracing: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
+    if (this.bracing()) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const left = this.deadline() - b.info.turn; // turns left including this one
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
