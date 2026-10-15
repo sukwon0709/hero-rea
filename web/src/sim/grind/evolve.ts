@@ -95,12 +95,13 @@ export function newEvolveState(seed = 1, start?: Partial<GrindParams>): EvolveSt
 
 export function toParams(x: number[]): GrindParams {
   const p = {} as GrindParams;
-  PARAM_SPECS.forEach((s, i) => (p[s.key] = s.min + Math.min(1, Math.max(0, x[i])) * (s.max - s.min)));
+  PARAM_SPECS.forEach((s, i) => (p[s.key] = Number.isFinite(x[i]) ? s.min + Math.min(1, Math.max(0, x[i])) * (s.max - s.min) : s.def));
   return clampParams(p);
 }
 
 export function toVector(p: GrindParams): number[] {
-  return PARAM_SPECS.map((s) => (p[s.key] - s.min) / (s.max - s.min));
+  // a parameter added after the plan was learned counts at its default
+  return PARAM_SPECS.map((s) => ((Number.isFinite(p[s.key]) ? p[s.key] : s.def) - s.min) / (s.max - s.min));
 }
 
 /** Candidates of the next generation: the best so far, then samples around the mean. */

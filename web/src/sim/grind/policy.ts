@@ -56,6 +56,10 @@ import {
   TACTIC_MP,
   TACTIC_POWER,
   TERRAIN_FOREST,
+  TERRAIN_VILLAGE,
+  TERRAIN_FORTRESS,
+  TERRAIN_BARRACKS,
+  terrainDefence,
   UNIT_SLOTS,
   UnitFlag,
   WEATHER_TYPE,
@@ -107,6 +111,10 @@ export interface GrindParams {
   band: number;
   /** The leader fights like the others: pull per cell towards the nearest enemy (the don't-die check stays). */
   lead: number;
+  /** Above 0.5: hold a position near the start and let the enemy come in waves (하비); push out once they are broken. */
+  hold: number;
+  /** Terrain: stand on high-defence cells where enemies can reach, heal on villages/fortresses when hurt. */
+  terrain: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -152,6 +160,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'safe', min: 0, max: 3, def: 0 },
   { key: 'band', min: 0, max: 3, def: 1 },
   { key: 'lead', min: 0, max: 4, def: 1.5 },
+  { key: 'hold', min: 0, max: 1, def: 0 },
+  { key: 'terrain', min: 0, max: 3, def: 1 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -613,7 +623,44 @@ export class GrindPolicy {
 
   private deadline(): number {
     const lim = this.b.info.turnLimit;
-    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999, this.know.soft ?? 999);
+    return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999, this.holding() ? 999 : this.know.soft ?? 999);
+  }
+
+  // ---- hold plan: form up near the start, let the enemy come, push out once the waves are broken
+
+  private anchor: [number, number] | null = null;
+  private quietTurns = 0;
+  private holdBroken = false;
+  private holding(): boolean {
+    return this.p.hold > 0.5 && !this.holdBroken;
+  }
+  private updateHold() {
+    if (this.p.hold <= 0.5 || this.holdBroken) return;
+    const b = this.b;
+    const mine = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && this.controllable(u));
+    if (!this.anchor) {
+      if (!mine.length) return;
+      // the middle of our formation, snapped to a cell our units can stand on
+      const cx = Math.round(mine.reduce((a, u) => a + u.x, 0) / mine.length), cy = Math.round(mine.reduce((a, u) => a + u.y, 0) / mine.length);
+      let best: [number, number] = [mine[0].x, mine[0].y], bd = 1e9;
+      for (let y = 0; y < b.height; y++)
+        for (let x = 0; x < b.width; x++) {
+          const t = terrainAt(b.s, x, y);
+          if ([0, 1, 2, 3].every((mt) => moveCost(mt, t) === 0xff)) continue;
+          const d = Math.abs(x - cx) + Math.abs(y - cy);
+          if (d < bd) [bd, best] = [d, [x, y]];
+        }
+      this.anchor = best;
+    }
+    const turn = b.info.turn + 1;
+    const near = this.scene.units.slice(PLAYER_SLOTS).some((e) => e.status === Status.Field && Math.abs(e.x - this.anchor![0]) + Math.abs(e.y - this.anchor![1]) <= 7);
+    this.quietTurns = near ? 0 : this.quietTurns + 1;
+    // broken: the wave turn is past and nobody came near for 2 turns; or time is short for the push
+    const waveDone = turn > (this.know.soft ?? 0) + 1;
+    if ((waveDone && this.quietTurns >= 2) || turn >= b.info.turnLimit - 10) {
+      this.holdBroken = true;
+      this.log?.(`hold: pushing out at turn ${turn}`);
+    }
   }
 
   // ---- player phase (1cb6:44de without the input loop)
@@ -664,6 +711,7 @@ export class GrindPolicy {
         this.log?.(`  enemies near leader: ${sc.units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && Math.abs(e.x - L.x) + Math.abs(e.y - L.y) <= 99).map((e) => `${e.officer}@${e.x},${e.y} m${e.mode} L${this.b.officerOf(e).level} c${this.b.officerOf(e).cls} hp${this.b.officerOf(e).hp}`).join(' ')}`);
       }
     }
+    this.updateHold();
     this.decideFinish();
     this.buildThreat();
     this.buildLeaderKills();
@@ -704,6 +752,7 @@ export class GrindPolicy {
   private decideFinish() {
     if (this.finishing) return;
     const b = this.b;
+    if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const left = this.deadline() - b.info.turn; // turns left including this one
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
     // going badly (the leader hurt, a third of the units gone): stop grinding and win now
@@ -998,6 +1047,23 @@ export class GrindPolicy {
     return d === 0xffff ? Math.abs(goal[0] - x) + Math.abs(goal[1] - y) + 20 : d;
   }
 
+  /**
+   * Terrain worth of a cell (verified tables: TERRAIN_DEFENCE cuts physical damage taken by that
+   * percent, defender side only — 1cb6:df14 has no attacker-terrain term; villages and fortresses
+   * restore troops and morale at the turn start, barracks troops): a defensive cell counts where
+   * enemies can reach it, a healing cell counts by the troops missing.
+   */
+  private terrainValue(u: Unit, x: number, y: number, hp: number, max: number): number {
+    const b = this.b;
+    const t = terrainAt(b.s, x, y);
+    const k = y * b.width + x;
+    const def = terrainDefence(t);
+    const exposed = (this.threat[k]?.length ?? 0) + (this.tthreat[k]?.length ?? 0) > 0;
+    let v = def < 100 ? (def / 10) * (exposed ? 1 : 0.2) : 0;
+    if (t === TERRAIN_VILLAGE || t === TERRAIN_FORTRESS || t === TERRAIN_BARRACKS) v += (1 - hp / Math.max(1, max)) * 8;
+    return v * this.p.terrain * (this.know.guarded.has(u.officer) ? 1.5 : 1);
+  }
+
   /** Group number of the script's current group (only its records can fire). */
   private activeGroup(): number {
     const st = this.scene.ctx.vm.state;
@@ -1174,12 +1240,20 @@ export class GrindPolicy {
       if (goal) dist = this.pathDist(goal, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
-      base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
-      // the leader levels like the others: it walks up to the fight instead of waiting at the back
-      if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
+      const holdHere = !fin && this.holding() && this.anchor;
+      if (holdHere) {
+        // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
+        const da = Math.abs(this.anchor![0] - x) + Math.abs(this.anchor![1] - y);
+        base -= 4 * Math.max(0, da - (guarded ? 1 : 2));
+      } else {
+        base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
+        // the leader levels like the others: it walks up to the fight instead of waiting at the back
+        if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
+      }
       if (!fin && !guarded && leaderPos) base -= this.p.escort * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 3);
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
       if (this.p.band) base += this.bandValue(u, x, y, w);
+      if (this.p.terrain) base += this.terrainValue(u, x, y, hp, max);
       if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       if (fin && this.winAdjacent(u, x, y)) base += 400;

@@ -331,11 +331,13 @@ export async function searchBattle(
     const a = aggressive(base);
     // three plans in turn: the game's AI for the others (유비 kept safe by the policy), the fighting
     // preset, and a defensive win-first plan (hold together near 유비, kill whatever comes)
-    const k = (r - 1) % 3;
+    // ... and a hold plan (하비: form up near the start, let the waves come, push out after)
+    const k = (r - 1) % 4;
     const c: GrindParams =
-      k === 0 ? { ...base, native: true, rerolls: Math.floor((r - 1) / 3) }
+      k === 0 ? { ...base, native: true, rerolls: Math.floor((r - 1) / 4) }
       : k === 1 ? { ...a, finish: r % 2 ? 99 : a.finish, rerolls: r + 7 }
-      : clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 });
+      : k === 2 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
+      : clampParams({ ...base, hold: 1, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
     consider(await safeGrindBattle(files, snap, c, carry));
   }
   return { best: best as unknown as BattleOutcome, tried };

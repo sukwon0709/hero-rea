@@ -20,7 +20,7 @@ import type { BattleSnapshot } from './sandbox';
 import { captureStory } from './capture';
 import { runCampaign, type CampaignResult } from './campaign';
 import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
-import { defaultParams, type GrindParams } from './policy';
+import { defaultParams, PARAM_SPECS, type GrindParams } from './policy';
 import { frozenBattles, newEvolveState, populationSize, sampleGeneration, updateGeneration, type CandidateResult, type EvolveState } from './evolve';
 import { realRun } from './realrun';
 import { progressHtml, progressJson, progressMarkdown, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
@@ -104,7 +104,15 @@ function loadState(hints?: Partial<GrindParams>): EvolveState {
         return [];
       }
     });
-    if (cands.length) return cands.reduce((a, b) => (b.gen > a.gen ? b : a));
+    if (cands.length) {
+      const st = cands.reduce((a, b) => (b.gen > a.gen ? b : a));
+      // parameters added since the state was saved: their default as the mean, a wide spread
+      PARAM_SPECS.forEach((sp, i) => {
+        if (!Number.isFinite(st.mean[i])) st.mean[i] = (sp.def - sp.min) / (sp.max - sp.min);
+        if (!Number.isFinite(st.std[i])) st.std[i] = 0.25;
+      });
+      return st;
+    }
   }
   return newEvolveState(opt('seed', 1), hints);
 }
