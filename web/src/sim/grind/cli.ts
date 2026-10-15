@@ -144,6 +144,7 @@ interface Job {
   frozen: number[];
   hints: Record<number, Partial<GrindParams>>;
   rescue: number;
+  extra?: { battle: number; variants: number; rescue: number };
 }
 
 function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<CampaignResult> {
@@ -185,7 +186,7 @@ async function main() {
     const job = JSON.parse(readFileSync(sopt('job', ''), 'utf8')) as Job;
     const files = loadFiles();
     const snaps = loadCaptures();
-    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, log: (l) => process.stderr.write(`${l}\n`) });
+    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, log: (l) => process.stderr.write(`${l}\n`) });
     const outFile = sopt('job', '') + '.out';
     writeFileSync(outFile, JSON.stringify(res));
     console.log(`@@RESULT@@${outFile}`);
@@ -216,6 +217,9 @@ async function main() {
       const pop = populationSize(st, maxPop);
       const cands = sampleGeneration(st, pop);
       const frozen = [...frozenBattles(st)];
+      // the battle where the best run so far stopped gets twice the variants and retries
+      const fr = st.best?.campaign.frontier;
+      const extra = fr ? { battle: fr.index, variants: variants * 2, rescue: rescue * 2 } : undefined;
       // common random numbers: every candidate of a generation is played with the same search seed
       const seed = st.seed * 1000 + st.gen * 37;
       const results: { cand: CandidateResult; campaign: CampaignResult }[] = [];
@@ -226,7 +230,7 @@ async function main() {
       const one = async () => {
         while (next < cands.length) {
           const i = next++;
-          const job: Job = { params: cands[i], variants, seed, limit, elites: st.elites, frozen, hints: hints.perBattle, rescue };
+          const job: Job = { params: cands[i], variants, seed, limit, elites: st.elites, frozen, hints: hints.perBattle, rescue, extra };
           const c = workers > 1
             ? await campaignInChild(job, (k) => {
                 live.battles[i] = k + 1;
@@ -235,15 +239,15 @@ async function main() {
                   writeProgress(st, live);
                 }
               })
-            : await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: st.elites, frozen: new Set(frozen), hints: hints.perBattle, rescue });
+            : await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: st.elites, frozen: new Set(frozen), hints: hints.perBattle, rescue, extra });
           results.push({
-            cand: { params: cands[i], objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun },
+            cand: { params: cands[i], objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun, cleared: c.cleared, frontier: c.frontier },
             campaign: c,
           });
           live.done++;
-          live.candidates.push({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: c.ms / 1000 });
+          live.candidates.push({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: c.ms / 1000, cleared: c.cleared, frontier: c.frontier });
           writeProgress(st, live);
-          console.log(`gen ${st.gen} cand ${i}: n99 ${c.n99} top15 ${c.top15} wins ${c.wins}/${c.battles.length} forced ${c.forced} ${(c.ms / 1000).toFixed(0)} s (${c.battlesRun} battles)`);
+          console.log(`gen ${st.gen} cand ${i}: cleared ${c.cleared}${c.frontier ? ` (stopped at [${c.frontier.index}] ${c.frontier.name})` : ' (reached the end)'} n99 ${c.n99} top15 ${c.top15} ${(c.ms / 1000).toFixed(0)} s (${c.battlesRun} battles)`);
         }
       };
       await Promise.all(Array.from({ length: Math.max(1, workers) }, one));
@@ -288,7 +292,7 @@ async function main() {
     if (existsSync(fx)) carries = deserialize(readFileSync(fx)) as Record<number, CarryState | null>;
     else {
       carries = {};
-      await runCampaign(files, snaps, params, { variants: 3, seed: 1, limit: Math.max(...list) + 1, rescue: 3, log: (l) => console.log(l), onCarry: (k, c) => (carries[k] = c ? structuredClone(c) : null) });
+      await runCampaign(files, snaps, params, { variants: 3, seed: 1, limit: Math.max(...list) + 1, rescue: 3, stopOnLoss: false, log: (l) => console.log(l), onCarry: (k, c) => (carries[k] = c ? structuredClone(c) : null) });
       writeFileSync(fx, serialize(carries));
     }
     // --boost N: every officer of our side starts N levels higher (how far from winnable are we?)

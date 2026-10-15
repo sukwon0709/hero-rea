@@ -18,6 +18,10 @@ export interface CandidateResult {
   forced: number;
   ms: number;
   battlesRun: number;
+  /** Battles won in story order before the run stopped. */
+  cleared?: number;
+  /** Where the run stopped (null = it reached the end). */
+  frontier?: { index: number; name: string } | null;
 }
 
 export interface GenerationRecord {
@@ -35,6 +39,9 @@ export interface GenerationRecord {
   frozen?: number[];
   /** Candidates sampled this generation (adaptive population). */
   pop?: number;
+  /** Where this generation's best run stopped (null = it reached the end), and how many battles it cleared. */
+  frontier?: { index: number; name: string } | null;
+  cleared?: number;
 }
 
 export interface EvolveState {
@@ -156,6 +163,8 @@ export function updateGeneration(
     eliteChanges: changes,
     frozen: [...frozenBattles(st)],
     pop: results.length,
+    frontier: top.campaign.frontier ?? null,
+    cleared: top.campaign.cleared,
   };
   st.history.push(rec);
   st.gen++;

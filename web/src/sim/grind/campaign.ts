@@ -56,6 +56,10 @@ export interface CampaignResult {
   forced: number;
   ms: number;
   battlesRun: number;
+  /** Battles won in story order before the run stopped (all of them when it reached the end). */
+  cleared: number;
+  /** The battle the run could not win after every retry: the run stopped there (null = reached the end). */
+  frontier: { index: number; name: string } | null;
 }
 
 /**
@@ -109,6 +113,12 @@ export function carryFor(prev: BattleSnapshot, snap: BattleSnapshot, lastOfficer
   return { officers, formation, money };
 }
 
+/** Progress first: a run that gets further always scores higher; the level objective breaks ties. */
+export const CLEARED_WEIGHT = 10_000_000;
+export function progressObjective(cleared: number, n99: number, top15: number, levelsGained = 0): number {
+  return cleared * CLEARED_WEIGHT + objectiveOf(n99, top15, levelsGained);
+}
+
 export function objectiveOf(n99: number, top15: number, levelsGained = 0): number {
   // Lv99 count first; then the top-15 level sum (x10) plus every level gained by anyone (the
   // top 15 is dominated by officers who join at preset levels, so gains alone give a finer signal)
@@ -128,6 +138,13 @@ export interface CampaignOptions {
   log?: (line: string) => void;
   /** Extra tries for a battle nothing won (native AI / fighting preset with rerolls). */
   rescue?: number;
+  /**
+   * A battle nothing wins after every retry ends the run there (the player would be stuck), instead
+   * of forcing a win and going on. Default true.
+   */
+  stopOnLoss?: boolean;
+  /** More effort where earlier runs stopped: this battle gets these variants/retries. */
+  extra?: { battle: number; variants: number; rescue: number };
   /** Called with the carry each battle starts from (bench fixtures). */
   onCarry?: (k: number, carry: CarryState | null) => void;
 }
@@ -147,6 +164,8 @@ export async function runCampaign(
   const list = o.limit ? snaps.slice(0, o.limit) : snaps;
   let lastOfficers: OfficerCarry[] = list[0].state.officers.map((x) => ({ level: x.dyn.level, exp: x.dyn.exp, cls: x.dyn.cls, items: [...x.dyn.items] }));
   let lastMoney: number | undefined = list[0].state.progress.money;
+  let frontier: CampaignResult['frontier'] = null;
+  let lastAt = list.length - 1;
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
     // carry: last sandbox result + what the story changed since the previous baseline battle
@@ -154,10 +173,12 @@ export async function runCampaign(
     o.onCarry?.(k, carry as CarryState | null);
     const hint = o.hints?.[k] ? clampHint({ ...params, ...o.hints[k] }) : undefined;
     let s: BattleSearch | null = o.frozen?.has(k) && o.elites?.[k] ? await searchBattle(files, snap, o.elites[k], carry, 1, rng, undefined, 0) : null;
-    if (!s || !s.best.won) s = await searchBattle(files, snap, params, carry, o.variants, rng, o.elites?.[k] ?? hint, o.rescue ?? 6, hint && o.elites?.[k] ? hint : undefined);
+    const ex = o.extra && o.extra.battle === k ? o.extra : null;
+    if (!s || !s.best.won) s = await searchBattle(files, snap, params, carry, ex ? Math.max(ex.variants, o.variants) : o.variants, rng, o.elites?.[k] ?? hint, ex ? Math.max(ex.rescue, o.rescue ?? 6) : (o.rescue ?? 6), hint && o.elites?.[k] ? hint : undefined);
     battlesRun += s.tried.length;
     const b: BattleOutcome = s.best;
-    const forced = !b.won;
+    const stop = !b.won && o.stopOnLoss !== false;
+    const forced = !b.won && !stop;
     if (b.won) {
       lastOfficers = b.officersAfter;
       lastMoney = b.moneyAfter;
@@ -191,12 +212,17 @@ export async function runCampaign(
       purchases: b.purchases,
       attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
       script: b.script,
-      lossReasons: forced ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
+      lossReasons: !b.won ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
-    o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
+    o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
+    if (stop) {
+      frontier = { index: k, name: snap.name };
+      lastAt = k;
+      break;
+    }
   }
   // final roster: the last snapshot's faction members, with the carried levels
-  const last = list[list.length - 1];
+  const last = list[lastAt];
   const faction = last.state.officers[0].dyn.flags & 0x1f;
   const roster = last.state.officers
     .map((so, i) => ({ so, i }))
@@ -211,7 +237,9 @@ export async function runCampaign(
     roster,
     n99,
     top15,
-    objective: objectiveOf(n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 100)),
+    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 100)),
+    cleared: out.filter((b) => b.won).length,
+    frontier,
     wins: out.filter((b) => b.won).length,
     forced: out.filter((b) => b.forced).length,
     ms: performance.now() - t0,

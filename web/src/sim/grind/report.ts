@@ -101,6 +101,9 @@ export function campaignFacts(c: CampaignResult | { battles: CampaignBattle[] })
   if (topT.length) out.push(`가장 많이 쓴 책략: ${topT.map(([t, n]) => `${tname(t)} ${n}회`).join(', ')}.`);
   const forced = c.battles.filter((b) => b.forced);
   if (forced.length) out.push(`정책으로 이기지 못한 전투(강제 진행): ${forced.map((b) => b.name).join(', ')}.`);
+  const cr = c as Partial<CampaignResult>;
+  if (cr.frontier) out.push(`최고 실행은 ${cr.frontier.index + 1}번째 전투 ${cr.frontier.name}에서 모든 재도전이 실패해 멈췄다(앞의 ${cr.cleared}전투 클리어).`);
+  else if (cr.cleared !== undefined && c.battles.length) out.push(`최고 실행은 ${cr.cleared}전투를 모두 이기고 끝까지 갔다.`);
   return out;
 }
 
@@ -162,7 +165,7 @@ export interface LiveStatus {
   /** Battles finished so far by each candidate's campaign. */
   battles: number[];
   battleCount: number;
-  candidates: { objective: number; n99: number; top15: number; wins: number; forced: number; seconds: number }[];
+  candidates: { objective: number; n99: number; top15: number; wins: number; forced: number; seconds: number; cleared?: number; frontier?: { index: number; name: string } | null }[];
 }
 
 /** One campaign from the plain defaults vs one from defaults + the hints.json defaults (cli ab). */
@@ -206,7 +209,7 @@ function abHtml(ab: HintAb | undefined, st: EvolveState): string {
   const row = (t: string, f: (x: AbSide) => string | number) => `<tr><td>${t}</td><td class="num">${f(ab.without)}</td><td class="num">${f(ab.with)}</td></tr>`;
   return `<div class="card"><p>힌트: <code>${esc(JSON.stringify(ab.hint))}</code>. 같은 탐색 시드·같은 예산으로 게임 전체를 두 번 시뮬레이션(학습 없이 시작값 그대로)한 비교.</p>
 <table><tr><th></th><th class="num">힌트 없음(기본값)</th><th class="num">힌트 적용</th></tr>
-${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('정책 승리 / 강제 진행', (x) => `${x.wins} / ${x.forced}`)}
+${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('이긴 전투 / 강제 진행(5차까지의 비교만)', (x) => `${x.wins} / ${x.forced}`)}
 ${row('회복 책략 사용(회)', (x) => x.heals)}${row('회복으로 얻은 경험치', (x) => x.healExp)}${row('공격·상태 책략(회)', (x) => x.tactics)}${row('총 경험치', (x) => x.exp)}
 ${row('상위 장수', (x) => esc(x.roster.slice(0, 6).map((r) => `${r.name}${r.level}`).join(' ')))}</table>${learned}</div>`;
 }
@@ -219,7 +222,7 @@ export function tipsAbHtml(abs: HintAb[]): string {
       const row = (t: string, f: (x: AbSide) => string | number | undefined) => `<tr><td>${t}</td><td class="num">${f(ab.without) ?? '-'}</td><td class="num">${f(ab.with) ?? '-'}</td></tr>`;
       return `<div class="card"><h3>${esc(ab.title ?? ab.label ?? '')}</h3><p>팁 없음: <code>${esc(JSON.stringify(ab.base ?? {}))}</code><br>팁 적용: <code>${esc(JSON.stringify(ab.hint))}</code><br><span class="dim">같은 탐색 시드·예산, 학습 없이 시작값 그대로 ${esc(ab.date.slice(0, 16))}</span></p>
 <table><tr><th></th><th class="num">팁 없음</th><th class="num">팁 적용</th></tr>
-${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('정책 승리 / 강제 진행', (x) => `${x.wins} / ${x.forced}`)}${row('유비 최종 레벨', (x) => x.liuBei)}
+${row('Lv99 장수', (x) => x.n99)}${row('상위 15명 레벨 합', (x) => x.top15)}${row('이긴 전투 / 강제 진행(5차까지의 비교만)', (x) => `${x.wins} / ${x.forced}`)}${row('유비 최종 레벨', (x) => x.liuBei)}
 ${row('스크립트 이득 달성 / 가능(이긴 전투)', (x) => (x.gainsFired === undefined ? undefined : `${x.gainsFired} / ${x.gainsOpen}`))}${row('전원 경험치 보너스 받은 전투', (x) => x.bonuses)}
 ${row('견제 책략(혼란·사기, 회)', (x) => x.control)}${row('회복 책략(회)', (x) => x.heals)}${row('총 경험치', (x) => x.exp)}${row('상위 장수', (x) => esc(x.roster.slice(0, 6).map((r) => `${r.name}${r.level}`).join(' ')))}</table></div>`;
     })
@@ -232,7 +235,7 @@ export function scriptHtml(battles: CampaignBattle[]): string {
     .filter((b) => b.script && (b.script.gains.length || b.script.early.length))
     .map((b) => {
       const g = b.script!.gains.map((x) => `${x.automatic ? '<span class="dim">' : ''}${esc(x.when)} → ${esc(x.gives)} ${x.automatic ? '(자동)</span>' : !b.won ? '<span class="dim">(패배)</span>' : x.fired ? '<b>✓</b>' : '✗'}`).join('<br>');
-      return `<tr><td>${b.index + 1}. ${esc(b.name)}</td><td>${b.won ? '승리' : '강제'}</td><td class="dim">${g}</td><td class="num">${b.script!.bonus || ''}</td><td class="dim">${esc(b.script!.early.join(' · '))}</td></tr>`;
+      return `<tr><td>${b.index + 1}. ${esc(b.name)}</td><td>${b.won ? '승리' : b.forced ? '강제' : '멈춤'}</td><td class="dim">${g}</td><td class="num">${b.script!.bonus || ''}</td><td class="dim">${esc(b.script!.early.join(' · '))}</td></tr>`;
     })
     .join('');
   return `<div class="card"><p>각 전투 스크립트(이벤트 블록)에서 찾은 이득: <b>전원 경험치</b>(DATA 4 → 승리 시 전장의 아군 전원이 받는 보너스, 4a30), <b>일기토</b>(지정 장수가 지정 적 옆에서 행동 → 그 장수 Lv+1, 적 퇴장), <b>설득</b>(유비가 지정 적 옆에서 행동 → 아군 합류, 유비 Lv+1), 그 밖의 레벨 증가. ✓ = 최고 실행의 봇이 달성, ✗ = 못 함. 오른쪽 열은 제한 턴보다 먼저 끝나거나 판이 바뀌는 조건(봇은 큰 증원 전에 마무리를 시작).</p>
@@ -303,7 +306,10 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
       bestN99: h.bestN99,
       pop: h.pop ?? h.candidates.length,
       frozen: h.frozen ?? [],
-      candidates: h.candidates.map((c) => ({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: Math.round(c.ms / 100) / 10, params: c.params })),
+      candidates: h.candidates.map((c) => ({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, cleared: c.cleared ?? null, frontier: c.frontier ?? null, seconds: Math.round(c.ms / 100) / 10, params: c.params })),
+      // where this generation's best run stopped (null = it reached the end); cleared = battles won before it
+      frontier: h.frontier ?? null,
+      cleared: h.cleared ?? null,
       meanParams: h.meanParams,
       stdParams: h.stdParams,
       eliteChanges: (h.eliteChanges ?? []).map((e) => ({ battle: e.battle, name: e.name, from: e.from, to: e.to })),
@@ -317,13 +323,15 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
           top15: st.best.result.top15,
           wins: st.best.result.wins,
           forced: st.best.result.forced,
+          cleared: st.best.campaign.cleared ?? null,
+          frontier: st.best.campaign.frontier ?? null,
           roster: st.best.campaign.roster,
           battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0 })),
         }
       : null,
     rules: learnedRules(st),
     facts: st.best ? campaignFacts(st.best.campaign) : [],
-    objective: 'Lv99 장수 수 × 100000 + 상위 15명 레벨 합 × 10 + 전체 장수가 얻은 레벨 수',
+    objective: '클리어한 전투 수(이야기 순서, 못 이긴 전투에서 그 실행은 멈춤) × 10,000,000 + Lv99 장수 수 × 100,000 + 상위 15명 레벨 합 × 10 + 전체 장수가 얻은 레벨 수. 즉 더 멀리 간 실행이 항상 위이고, 같은 곳까지 갔으면 레벨로 비교. (5차까지의 실행은 못 이긴 전투를 강제 진행했고 클리어 항이 없었음)',
     paramSpecs: PARAM_SPECS.map((s) => ({ key: s.key, label: PARAM_KO[s.key], min: s.min, max: s.max, int: !!s.int })),
   };
 }
@@ -377,7 +385,7 @@ export function progressHtml(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
     .flatMap((g) => g.eliteChanges.map((e) => `<tr><td>${g.gen}</td><td>${e.battle + 1}. ${esc(e.name)}</td><td>${esc(diff(e.from, e.to))}</td></tr>`))
     .join('');
   const battles = (data.best?.battles ?? [])
-    .map((b) => `<tr><td>${b.index + 1}</td><td>${esc(b.name)}</td><td>${b.won ? '승리' : b.forced ? '<span class="bad">강제 진행</span>' : '패배'}</td><td class="num">${b.turns}/${b.turnLimit}</td><td class="num">${b.expTotal}</td><td class="num">${b.native ? '-' : b.keep}</td><td class="num">${b.rerolls}</td><td>${b.won ? (b.native ? '자동(게임 AI)' : '노가다 정책') : ''}</td><td class="num">${b.won ? b.attempts ?? '' : ''}</td><td class="dim">${esc(b.bought)}${b.promoted ? ` · 승진 ${b.promoted}` : ''}${b.items ? ` · 도구 사용 ${b.items}` : ''}</td><td class="dim">${b.lossReasons ? esc(Object.entries(b.lossReasons).sort((x, y) => y[1] - x[1]).map(([r, n]) => `${r} ×${n}`).join(', ')) : ''}</td></tr>`)
+    .map((b) => `<tr><td>${b.index + 1}</td><td>${esc(b.name)}</td><td>${b.won ? '승리' : b.forced ? '<span class="bad">강제 진행</span>' : '<span class="bad">여기서 멈춤</span>'}</td><td class="num">${b.turns}/${b.turnLimit}</td><td class="num">${b.expTotal}</td><td class="num">${b.native ? '-' : b.keep}</td><td class="num">${b.rerolls}</td><td>${b.won ? (b.native ? '자동(게임 AI)' : '노가다 정책') : ''}</td><td class="num">${b.won ? b.attempts ?? '' : ''}</td><td class="dim">${esc(b.bought)}${b.promoted ? ` · 승진 ${b.promoted}` : ''}${b.items ? ` · 도구 사용 ${b.items}` : ''}</td><td class="dim">${b.lossReasons ? esc(Object.entries(b.lossReasons).sort((x, y) => y[1] - x[1]).map(([r, n]) => `${r} ×${n}`).join(', ')) : ''}</td></tr>`)
     .join('');
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -423,7 +431,7 @@ li{margin:4px 0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@medi
 <li><b>군악대</b>: 원작 7cc8 확인: 매 턴 시작에 군악대(병종 12) 상하좌우 4칸의 모든 부대(적 포함)가 MP += 군악대 레벨/10+1(최대 MP까지). 시뮬레이터도 같은 규칙. 봇은 책략을 쓰는 장수를 군악대 옆에 붙이고(band), 군악대 장수는 출진에 항상 넣는다.</li>
 <li><b>유비도 싸운다</b>: 유비가 거의 공격하지 않은 이유는 위험 비용 때문에 뒤에 머물러 사거리 안에 적이 없었기 때문(신야2까지 Lv2는 강제 진행 기준 캡처의 값, 시뮬레이터 캠페인에서도 Lv4–5). 이제 유비도 가장 가까운 적에게 다가가고(lead), 막는 것은 "최악의 경우에도 죽지 않는가"(guard 1.0) 하나뿐이다.</li>
 <li><b>견제 책략</b>: 혼란·사기 저하(15–20)는 공격 책략과 따로 가중(control)한다. 적을 죽이지 않고 묶어 두면서 +8을 받으므로 사냥을 오래 할 수 있다(유저 팁).</li>
-<li><b>재도전</b>: 모든 작전이 지면, 플레이어처럼 전투 시작부터 다시 한다(시작 직후 총퇴각으로 난수를 바꿔 정책·게임 AI 번갈아, 최대 K번). 그래도 지면 강제 진행.</li>
+<li><b>재도전</b>: 모든 작전이 지면, 플레이어처럼 전투 시작부터 다시 한다(시작 직후 총퇴각으로 난수를 바꿔 정책·게임 AI 번갈아, 최대 K번, 직전 최고 실행이 멈춘 전투는 2K번). 그래도 지면 그 실행은 거기서 멈춘다(예전: 강제 진행.</li>
 <li><b>적응형 개체 수</b>: 분포가 넓을 때(초반)는 후보를 많이, 수렴하면 적게 뽑는다(--pop이 상한, 최소 4).</li>
 </ol>
 </div>
@@ -451,7 +459,7 @@ ${scriptHtml(st.best?.campaign.battles ?? [])}
 
 <h2>전투별 결과(최고 실행)</h2>
 <div class="card"><table><tr><th>#</th><th>전투</th><th>결과</th><th class="num">턴</th><th class="num">경험치</th><th class="num">남긴 적</th><th class="num">총퇴각</th><th>방식</th><th class="num">승리까지 시도</th><th>상점 구입 · 승진 · 도구</th><th>실패 원인(시도별)</th></tr>${battles}</table>
-<p class="dim">강제 진행 = 이 실행의 모든 시도(기본·엘리트·변형·게임 AI·총퇴각 재시도)가 졌다는 뜻. 그 전투는 경험치 0으로 치고 레벨을 그대로 다음 전투로 넘긴다(실제 게임이라면 이길 때까지 다시 해야 함). 원인 집계: ${esc(lossSummary(data.best?.battles ?? []))}</p></div>
+<p class="dim">멈춤 = 이 실행의 모든 시도(기본·엘리트·변형·게임 AI·총퇴각 재시도)가 진 전투. 그 실행은 거기서 끝난다(강제로 이기고 넘어가지 않음). 점수는 그 전까지 클리어한 전투 수가 먼저이고, 다음 세대는 그 전투에 변형·재도전을 두 배로 쓴다. 원인 집계: ${esc(lossSummary(data.best?.battles ?? []))}</p></div>
 
 <h2>자주 지는 전투: 수정 전후 승률</h2>
 ${benchHtml(benches)}
@@ -466,10 +474,10 @@ ${benchHtml(benches)}
 <div class="card"><ul>
 <li><b>상한</b>: 레벨은 99를 넘지 못한다(한 번에 받는 경험치가 최대 64, Lv99부터는 경험치를 받지 않음, 스크립트의 능력치 증가도 99에서 멈춤).</li>
 <li><b>행동 수</b>: 48전투의 제한 턴 합은 1847턴, 기본 출진 인원으로 곱하면 아군 장수 행동 기회가 약 16,800번. 15명을 Lv1→99로 올리려면 약 147,000 경험치가 필요하다. 상대가 5레벨 이상 높을 때의 타격 16을 매 행동마다 받아도 약 269,000이 상한이고, 아군이 적보다 높아지면 타격은 4, 책략은 8로 떨어진다(행동당 평균 8이면 134,000). 즉 이론상 가능 범위의 끝자락이고, 거의 모든 턴에 전원이 경험치 행동을 해야 한다.</li>
-<li><b>지금 막히는 곳</b>: 강제 진행 전투의 대부분은 <b>유비 퇴각</b>으로 진다(위 표의 실패 원인). 유비가 Lv1~5에 머물러 병력 500으로는 장(3장) 이후 적 한 번의 공격에 쓰러진다.</li>
+<li><b>지금 막히는 곳</b>: 실행이 멈추는 전투(이전에는 강제 진행)의 대부분은 <b>유비 퇴각</b>으로 진다(위 표의 실패 원인). 유비가 Lv1~5에 머물러 병력 500으로는 장(3장) 이후 적 한 번의 공격에 쓰러진다.</li>
 <li><b>유비의 경험치원(스크립트·엔진 조사)</b>: ① 승리 보너스(DATA 4, 보통 50)는 승리 순간 전장에 있는 아군 <i>전원</i>에게 주어진다(4a30). 유비는 모든 전투에 출진하므로 매번 받는다. ② 설득 이벤트는 유비가 지정 적 옆에서 행동하면 그 적이 합류하고 유비 Lv+1(태산·하구·팽성, 신도1 3회, 부 5회, 정군산 등 약 13레벨). ③ 레벨이 낮을수록 타격 경험치가 크다((레벨차+3)×2, 최대 16, 상대가 높으면 처치 32). 그래서 실제 플레이에서는 늘 출진하는 유비가 오히려 99를 찍기 쉽다. 봇은 이제 유비를 안전한 칸에만 두되(위험 비용, 닿는 적 1명당 비용, 유비 우선 회복) 다른 장수가 적을 깎아 두고 막타를 유비에게 넘긴다(feed). 유비도 15×99 목표에 포함된다.</li>
 <li><b>장비</b>: 이 게임의 상점은 무기·방어구·말을 팔지 않는다(이야기로만 얻음). 상점에서 사는 것은 승진 도구, 회복·사기 도구, 책략서(폭탄류)다. 승진은 Lv15/30이 필요해서 레벨이 낮은 초반에는 도움이 안 된다. 상점 방문은 "그 마을에 상점 목록이 있으면 들른다"로 근사했다(포트의 필드 엔진은 도구상 건물 진입을 아직 구현하지 않음).</li>
-<li><b>강제 진행의 취급</b>: 정책이 못 이긴 전투는 경험치 0, 레벨 그대로 다음 전투로 간다(실제로는 이길 때까지 재도전). 그래서 앞에서 막히면 뒤 전투도 줄줄이 막힌다.</li>
+<li><b>못 이긴 전투의 취급</b>: 재도전을 다 써도 못 이기면 그 실행은 그 전투에서 멈춘다(플레이어라면 거기서 막힌 것). 강제로 이기고 넘어가지 않는다. 학습 점수는 몇 번째 전투까지 갔는지가 먼저이고, 레벨은 같은 곳까지 간 실행끼리의 비교에 쓴다. 각 세대에서 최고 실행이 멈춘 전투는 progress.json의 generations[].frontier에 있다.</li>
 </ul></div>
 
 <h2>사람의 지식 넣기: hints.json</h2>
@@ -490,10 +498,10 @@ const k=document.getElementById('kpis');
 const best=D.best;
 const kp=(t,v)=>{const d=document.createElement('div');d.className='kpi';d.innerHTML='<span class="dim">'+t+'</span><b>'+v+'</b>';k.appendChild(d)};
 kp('세대 수',G.length);kp('Lv99 장수',best?best.n99:'-');kp('상위 15명 레벨 합',best?best.top15:'-');
-kp('승리/강제',best?best.wins+' / '+best.forced:'-');
+kp('클리어 전투',best?(best.cleared??best.wins)+(best.frontier?' (멈춤: '+(best.frontier.index+1)+'. '+best.frontier.name+')':' (끝까지)'):'-');
 kp('세대당 평균 시간',G.length?Math.round(G.reduce((s,g)=>s+g.seconds,0)/G.length)+'초':'-');
 if(D.running){const r=D.running;const el=document.getElementById('live');const mins=Math.round((Date.now()-r.startedAt)/60000);
- el.innerHTML='<div class="card live"><b>진행 중: 세대 '+r.gen+'</b> · 후보 '+r.done+'/'+r.total+' 완료 · 시작 후 '+mins+'분<br><span class="dim">후보별 진행(전투): '+r.battles.map((b,i)=>'#'+i+' '+b+'/'+r.battleCount).join(' · ')+'</span>'+(r.candidates.length?'<br><span class="dim">끝난 후보: '+r.candidates.map(c=>'Lv99 '+c.n99+', 합 '+c.top15+', 승 '+c.wins+' ('+Math.round(c.seconds)+'초)').join(' · ')+'</span>':'')+'<br><span class="dim">마지막 갱신 '+new Date(D.updated).toLocaleString()+'</span></div>'}
+ el.innerHTML='<div class="card live"><b>진행 중: 세대 '+r.gen+'</b> · 후보 '+r.done+'/'+r.total+' 완료 · 시작 후 '+mins+'분<br><span class="dim">후보별 진행(전투): '+r.battles.map((b,i)=>'#'+i+' '+b+'/'+r.battleCount).join(' · ')+'</span>'+(r.candidates.length?'<br><span class="dim">끝난 후보: '+r.candidates.map(c=>'클리어 '+(c.cleared??c.wins)+(c.frontier?' (멈춤 '+(c.frontier.index+1)+'. '+c.frontier.name+')':'')+', Lv99 '+c.n99+', 합 '+c.top15+' ('+Math.round(c.seconds)+'초)').join(' · ')+'</span>':'')+'<br><span class="dim">마지막 갱신 '+new Date(D.updated).toLocaleString()+'</span></div>'}
 const tb=document.getElementById('gens');
 for(const g of G){const r=tb.insertRow();r.innerHTML='<td>'+g.gen+'</td><td class="num">'+g.best+'</td><td class="num">'+g.mean+'</td><td class="num">'+g.bestN99+'</td><td class="num">'+g.pop+'</td><td class="num">'+g.frozen.length+'</td><td class="num">'+g.seconds+'</td>'}
 const svg=document.getElementById('chart');const W=900,H=300,L=56,R=40,T=14,B=30;
@@ -573,7 +581,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
   L.push('## 결과 요약');
   L.push('');
   L.push(`- Lv99 도달 장수: **${r.n99}명**, 상위 15명 레벨 합 ${r.top15}`);
-  L.push(`- 전투 ${r.battles.length}회 (정책으로 승리 ${r.battles.filter((b) => b.won).length}, 강제 진행 ${r.battles.filter((b) => b.forced).length})`);
+  L.push(`- 전투 ${r.battles.length}회 (정책으로 승리 ${r.battles.filter((b) => b.won).length}, 봇이 못 이겨 하네스가 대신 넘긴 전투 ${r.battles.filter((b) => !b.won).length}; 학습(evolve)에서는 못 이긴 전투에서 실행이 멈추지만, 실제 게임 실행은 가이드를 끝까지 쓰려고 하네스가 대신 진행)`);
   L.push(`- 소요 시간: ${(r.ms / 1000).toFixed(0)}초 (샌드박스 시뮬레이션 ${r.sandboxBattles}전투 포함)`);
   L.push('');
   L.push('| 장수 | 최종 Lv | Lv99 도달 전투 |');
@@ -606,7 +614,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
     L.push('');
     if (b.purchases?.length) L.push(`- 전투 전 상점 구입: ${boughtText(b.purchases)}.`);
     if (!b.won) {
-      L.push(`- 시뮬레이터 정책으로는 이기지 못해 일반 플레이(강제 진행)로 넘김. 경험치 ${b.expTotal}.`);
+      L.push(`- 시뮬레이터 정책으로는 이기지 못함(학습 실행이라면 여기서 멈춤). 이후 전투는 참고용으로 하네스가 이 전투를 대신 넘긴 상태에서 계속. 경험치 ${b.expTotal}.`);
       L.push('');
       continue;
     }
