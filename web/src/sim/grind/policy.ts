@@ -134,7 +134,7 @@ export interface ParamSpec {
 export const PARAM_SPECS: ParamSpec[] = [
   { key: 'need', min: 0, max: 4, def: 1.5 },
   { key: 'keep', min: 1, max: 8, def: 2, int: true },
-  { key: 'finish', min: 2, max: 16, def: 7, int: true },
+  { key: 'finish', min: 2, max: 16, def: 3, int: true },
   { key: 'tactic', min: 0.2, max: 2.5, def: 1 },
   { key: 'control', min: 0.2, max: 3, def: 1 },
   { key: 'heal', min: 0.2, max: 2.5, def: 1 },
@@ -198,8 +198,18 @@ export interface BattleKnowledge {
   block?: number;
 }
 
-function winning(stage: Stage, code: number, victory: number | null): boolean {
+function winning(stage: Stage, code: number, victory: number | null, block?: number, group?: number): boolean {
   const cmds = recordCommands(stage, code);
+  // LEAVE_GROUP into a group whose auto record ends the battle in a win (태산: persuading 이명 moves
+  // the block to group 4, whose first record is the victory)
+  if (block !== undefined && group !== undefined && cmds.some((c) => c.name === 'LEAVE_GROUP') && !cmds.some((c) => c.name === 'GAME_OVER' || c.name === 'BATTLE_END')) {
+    const next = stage.blocks[block].records.find((r) => r.group === group + 1 && r.trigger === 0);
+    if (next) {
+      const nc = recordCommands(stage, next.code);
+      const i = nc.findIndex((c) => c.name === 'BATTLE_END');
+      if (i >= 0 && nc[i + 1]?.name !== 'GAME_OVER') return true;
+    }
+  }
   // the victory officer taken off the field (a duel: REMOVE) wins through its defeat event
   if (victory !== null && cmds.some((c) => c.name === 'REMOVE' && (c as unknown as { officer: number }).officer === victory)) return true;
   const i = cmds.findIndex((c) => c.name === 'BATTLE_END');
@@ -217,17 +227,17 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
   if (script.defeat.enabled) k.guarded.add(script.defeat.officer);
   for (const r of stage.blocks[script.block]?.records ?? []) {
     const cmds = recordCommands(stage, r.code);
-    if (r.trigger === 12 && winning(stage, r.code, k.victory)) k.protect.add(r.p1);
-    if ((r.trigger === 6 || r.trigger === 11) && winning(stage, r.code, k.victory) && !cmds.some((c) => c.name === 'GAME_OVER')) {
+    if (r.trigger === 12 && winning(stage, r.code, k.victory, script.block, r.group)) k.protect.add(r.p1);
+    if ((r.trigger === 6 || r.trigger === 11) && winning(stage, r.code, k.victory, script.block, r.group) && !cmds.some((c) => c.name === 'GAME_OVER')) {
       const x0 = r.p2 & 0xff, y0 = r.p2 >> 8;
       const [x1, y1] = r.trigger === 6 ? [x0, y0] : [r.p3 & 0xff, r.p3 >> 8];
       k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
     }
-    if (r.trigger === 4 && winning(stage, r.code, k.victory)) k.winAdj.push({ actor: r.p1, other: r.p2 });
+    if (r.trigger === 4 && winning(stage, r.code, k.victory, script.block, r.group)) k.winAdj.push({ actor: r.p1, other: r.p2 });
     if (r.trigger === 6 && cmds.some((c) => c.name === 'ADD_ITEM') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER'))
       k.treasure.push({ officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 });
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
-    else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+    else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
   }
   return k;
 }
@@ -681,6 +691,7 @@ export class GrindPolicy {
     // safely until the event; the danger costs already pull a hurt leader back
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
     if (survive) return;
+    // stalling is only safe while nobody falls: a third of the units lost ends the grinding
     if (left <= this.p.finish || !needy || this.idleTurns >= 8 || leaderHurt || gone * 3 >= mine.length) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -906,7 +917,10 @@ export class GrindPolicy {
     const future = 10 + w * Math.min(turnsLeft, 10) * 4;
     // the leader heads only for a winning cell of its own (거록: 유비 reaching the gate wins)
     const own = this.know.winCells.find((c) => c.officer === u.officer);
-    const goal = !fin ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : null) : this.goalFor(u);
+    // ... or an enemy it wins by acting next to (태산: 유비 persuading 이명)
+    const ownAdj = this.know.winAdj.find((a) => a.actor === u.officer);
+    const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
+    const goal = !fin ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vslot = this.know.victory !== null ? b.slotOfOfficer(this.know.victory) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
@@ -967,6 +981,18 @@ export class GrindPolicy {
         if (v !== NONE && v !== slot && sideOf(v)) mates++;
       }
       base += mates * (guarded ? 1.5 : 0.5);
+      // let a weakened enemy get away to heal (village, its own healers, regeneration) and come back
+      // for more hits and tactics: do not stand next to it while grinding
+      if (!fin)
+        for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
+          if (nx < 0 || ny < 0 || nx >= b.width || ny >= b.height) continue;
+          const v = unitAt(b.s, nx, ny);
+          if (v === NONE || v < PLAYER_SLOTS) continue;
+          const E = this.scene.units[v];
+          if (E.status !== Status.Field || E.officer === 0xffff) continue;
+          const oe = b.officerOf(E);
+          if (oe.hp * 10 < maxHp(oe) * 3) base -= this.p.conserve * 4;
+        }
       let dist = 99;
       if (goal) dist = Math.abs(goal[0] - x) + Math.abs(goal[1] - y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));

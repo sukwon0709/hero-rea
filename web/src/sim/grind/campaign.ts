@@ -143,6 +143,12 @@ export interface CampaignOptions {
    * of forcing a win and going on. Default true.
    */
   stopOnLoss?: boolean;
+  /**
+   * When the run is about to stop at a battle, go back up to this many battles (one at a time) and
+   * search them again with three times the variants (the search keeps the won plan with the most
+   * exp), then replay forward: more levels on arrival. Those battles still count as cleared.
+   */
+  backtrack?: number;
   /** More effort where earlier runs stopped: this battle gets these variants/retries. */
   extra?: { battle: number; variants: number; rescue: number };
   /** Called with the carry each battle starts from (bench fixtures). */
@@ -166,17 +172,40 @@ export async function runCampaign(
   let lastMoney: number | undefined = list[0].state.progress.money;
   let frontier: CampaignResult['frontier'] = null;
   let lastAt = list.length - 1;
+  // state before each battle, for going back (backtrack)
+  const before: { lastOfficers: OfficerCarry[]; lastMoney: number | undefined; carry: CarryState | null }[] = [];
+  const regrind = new Set<number>();
+  let backLeft = o.backtrack ?? 0;
+  let backFrom = -1;
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
+    before[k] = { lastOfficers, lastMoney, carry };
     // carry: last sandbox result + what the story changed since the previous baseline battle
     if (k > 0) carry = carryFor(list[k - 1], snap, lastOfficers, (carry as CarryState | null)?.formation, lastMoney);
     o.onCarry?.(k, carry as CarryState | null);
     const hint = o.hints?.[k] ? clampHint({ ...params, ...o.hints[k] }) : undefined;
-    let s: BattleSearch | null = o.frozen?.has(k) && o.elites?.[k] ? await searchBattle(files, snap, o.elites[k], carry, 1, rng, undefined, 0) : null;
-    const ex = o.extra && o.extra.battle === k ? o.extra : null;
-    if (!s || !s.best.won) s = await searchBattle(files, snap, params, carry, ex ? Math.max(ex.variants, o.variants) : o.variants, rng, o.elites?.[k] ?? hint, ex ? Math.max(ex.rescue, o.rescue ?? 6) : (o.rescue ?? 6), hint && o.elites?.[k] ? hint : undefined);
+    const again = regrind.has(k);
+    let s: BattleSearch | null = !again && o.frozen?.has(k) && o.elites?.[k] ? await searchBattle(files, snap, o.elites[k], carry, 1, rng, undefined, 0) : null;
+    const ex = o.extra && (o.extra.battle === k || (backFrom >= 0 && k === backFrom)) ? o.extra : null;
+    // battles the best run already cleared (before its frontier) get its escalated retries too: a
+    // policy change can make an old elite plan lose there, and retries only cost when it loses
+    const exRescue = ex ? ex.rescue : o.extra && k < o.extra.battle ? o.extra.rescue : 0;
+    if (!s || !s.best.won) s = await searchBattle(files, snap, params, carry, again ? o.variants * 3 : ex ? Math.max(ex.variants, o.variants) : o.variants, rng, o.elites?.[k] ?? hint, Math.max(exRescue, o.rescue ?? 6), hint && o.elites?.[k] ? hint : undefined);
     battlesRun += s.tried.length;
     const b: BattleOutcome = s.best;
+    // about to stop: go back one more battle and grind it harder (then replay forward)
+    if (!b.won && o.stopOnLoss !== false && backLeft > 0 && k - (o.backtrack! - backLeft) - 1 >= 0) {
+      const j = k - (o.backtrack! - backLeft) - 1;
+      backLeft--;
+      backFrom = backFrom < 0 ? k : backFrom;
+      o.log?.(`  [${k}] ${snap.name}: lost; going back to [${j}] ${list[j].name} to grind more exp`);
+      regrind.add(j);
+      ({ lastOfficers, lastMoney, carry } = before[j]);
+      out.length = j;
+      for (const [off, at] of [...reached]) if (at >= j) reached.delete(off);
+      k = j - 1;
+      continue;
+    }
     const stop = !b.won && o.stopOnLoss !== false;
     const forced = !b.won && !stop;
     if (b.won) {

@@ -145,6 +145,7 @@ interface Job {
   hints: Record<number, Partial<GrindParams>>;
   rescue: number;
   extra?: { battle: number; variants: number; rescue: number };
+  backtrack?: number;
 }
 
 function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<CampaignResult> {
@@ -186,7 +187,7 @@ async function main() {
     const job = JSON.parse(readFileSync(sopt('job', ''), 'utf8')) as Job;
     const files = loadFiles();
     const snaps = loadCaptures();
-    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, log: (l) => process.stderr.write(`${l}\n`) });
+    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, log: (l) => process.stderr.write(`${l}\n`) });
     const outFile = sopt('job', '') + '.out';
     writeFileSync(outFile, JSON.stringify(res));
     console.log(`@@RESULT@@${outFile}`);
@@ -200,7 +201,16 @@ async function main() {
     const fx = join(OUT, 'cache', 'bench-carry.v8');
     const carries = existsSync(fx) ? (deserialize(readFileSync(fx)) as Record<number, CarryState | null>) : {};
     const params: GrindParams = { ...defaultParams(), ...(flag('nohints') ? {} : loadHints(snaps).defaults ?? {}), finish: opt('finish', defaultParams().finish), ...(JSON.parse(sopt('set', '{}')) as Partial<GrindParams>) };
-    const o = await runGrindBattle(files, snap, params, carries[snap.index] ?? null, flag('trace') ? (l) => console.log(l) : undefined);
+    // --best: the carry the best evolve run arrived with at its frontier battle (state.json)
+    let carry: CarryState | null = carries[snap.index] ?? null;
+    if (flag('best') && existsSync(statePath())) {
+      const st = JSON.parse(readFileSync(statePath(), 'utf8')) as EvolveState;
+      const c = st.best?.campaign;
+      if (c?.frontier?.index === snap.index && c.carryOut) carry = { officers: c.carryOut.officers, formation: c.carryOut.formation, money: c.carryOut.money };
+      else console.log('no best-run carry for this battle; using the bench carry');
+      if (st.best && !flag('nohints')) Object.assign(params, st.best.params, JSON.parse(sopt('set', '{}')));
+    }
+    const o = await runGrindBattle(files, snap, params, carry, flag('trace') ? (l) => console.log(l) : undefined);
     if (o.script) console.log(JSON.stringify(o.script));
     console.log(JSON.stringify({ name: snap.name, won: o.won, turns: o.turns, limit: o.turnLimit, finish: o.finishTurn, exp: o.expTotal, ms: Math.round(o.ms), actions: o.actions, kept: o.kept }));
     for (const g of o.gains) console.log(`  ${g.name} ${g.levelBefore} -> ${g.levelAfter} (+${g.expGained}: hits ${g.hits} kills ${g.kills} tactics ${g.tactics} heals ${g.heals})`);
@@ -235,7 +245,7 @@ async function main() {
       const one = async () => {
         while (next < cands.length) {
           const i = next++;
-          const job: Job = { params: cands[i], variants, seed, limit, elites: st.elites, frozen, hints: hints.perBattle, rescue, extra };
+          const job: Job = { params: cands[i], variants, seed, limit, elites: st.elites, frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2) };
           const c = workers > 1
             ? await campaignInChild(job, (k) => {
                 live.battles[i] = k + 1;
@@ -244,7 +254,7 @@ async function main() {
                   writeProgress(st, live);
                 }
               })
-            : await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: st.elites, frozen: new Set(frozen), hints: hints.perBattle, rescue, extra });
+            : await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: st.elites, frozen: new Set(frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2) });
           results.push({
             cand: { params: cands[i], objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun, cleared: c.cleared, frontier: c.frontier },
             campaign: c,
