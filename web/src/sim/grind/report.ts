@@ -64,6 +64,7 @@ const PARAM_KO: Record<ParamKey, string> = {
   hnRest: '회남 작전: 다음 끌어내기 전에 회복할 병력비',
   hnFront: '회남 작전: 전열(회복 담당·군악대 제외)이 거점에서 적 쪽으로 나가는 칸 수',
   hnFocus: '회남 작전: 집중 공격(가장 다친 적부터 쓰러뜨리기)',
+  hnWeak: '회남 작전: 상위 3명보다 이만큼 레벨이 낮은 장수는 진형 안쪽에서 사거리 밖에 둠(출진은 강한 장수부터)',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -175,6 +176,7 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   hnRest: ['끌어내기 사이에 더 많이 회복하는 편이 낫다고 배움', '회복을 덜 하고 계속 끌어내는 편이 낫다고 배움'],
   hnFront: ['전열을 적 쪽으로 더 내미는 편이 낫다고 배움', '전열을 거점에 붙이는 편이 낫다고 배움'],
   hnFocus: ['다친 적에게 공격을 더 모으는 편이 낫다고 배움', '공격을 고르게 나누는 편이 낫다고 배움'],
+  hnWeak: ['레벨 차이가 더 커야 약한 장수로 보는 편이 낫다고 배움', '조금만 낮아도 약한 장수로 보호하는 편이 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

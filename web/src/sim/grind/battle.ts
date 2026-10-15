@@ -9,7 +9,7 @@ import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
-import { GrindPolicy, analyseBattle, clampParams, pickFormation, type GrindParams, type GrindStats } from './policy';
+import { GrindPolicy, analyseBattle, clampParams, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
   officer: number;
@@ -123,7 +123,10 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // over it removed that enemy, and with it the defeat event the battle needs
       const recs = fi.hexFormation ? fi.records : fi.records.filter((r) => !(script.units[r].flags & 1));
       const free = recs.length;
+      // 회남 plan (with hnWeak): close-combat units and the strongest go out, weak archers stay behind
+      const hn = params.hnPlan > 0.5 && Number.isFinite(params.hnWeak) && isHuainanAt(snap.chapter, snap.stage, snap.block);
       const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0, params.healers, learn);
+      if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
         recs.forEach((r, k) => {
@@ -282,6 +285,16 @@ export function aggressive(base: GrindParams): GrindParams {
 }
 
 /**
+ * A win beats a loss; wins by their need-weighted exp; losses (all scored -1) by the turns held,
+ * then the exp made (the STOP line and the battle record show the best losing try, not the first).
+ */
+export function betterTry(o: Pick<BattleOutcome, 'won' | 'score' | 'turns' | 'expTotal'>, best: Pick<BattleOutcome, 'won' | 'score' | 'turns' | 'expTotal'>): boolean {
+  if (o.won !== best.won) return o.won;
+  if (o.won) return o.score > best.score;
+  return o.turns > best.turns || (o.turns === best.turns && o.expTotal > best.expTotal);
+}
+
+/**
  * Searches plans for one battle: the base parameters, the elite plan kept for this battle, the
  * fighting preset, then mutations around the best plan so far (keep / finish / weights) and
  * rerolls (총퇴각 at turn 1, which moves the RNG on). Keeps the best win (need-weighted exp). If
@@ -303,7 +316,7 @@ export async function searchBattle(
   let best: BattleOutcome | null = null;
   const consider = (o: BattleOutcome) => {
     tried.push({ params: o.params, won: o.won, score: o.score, turns: o.turns, loss: o.loss });
-    if (!best || (o.won && !best.won) || (o.won === best.won && o.score > best.score)) best = o;
+    if (!best || betterTry(o, best)) best = o;
   };
   const queue: GrindParams[] = [{ ...base, rerolls: 0 }];
   if (elite) queue.push({ ...elite });

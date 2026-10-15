@@ -153,6 +153,11 @@ export interface GrindParams {
   hnFront: number;
   /** 회남 plan: focus fire, the pull towards hitting the most hurt enemy and finishing it. */
   hnFocus: number;
+  /**
+   * 회남 plan: units this many levels or more below our three strongest stay inside the formation
+   * and keep out of reach (the sortie also takes the strongest officers there, not the lowest).
+   */
+  hnWeak: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -247,6 +252,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnRest', min: 0.4, max: 1, def: 0.75 },
   { key: 'hnFront', min: 0, max: 2, def: 1, int: true },
   { key: 'hnFocus', min: 0, max: 2, def: 1 },
+  { key: 'hnWeak', min: 1, max: 8, def: 3, int: true },
 ];
 
 /** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
@@ -254,7 +260,10 @@ const HN_TRAP = [3, 10, 9, 13] as const;
 
 /** 회남: chapter 1 stage 2 block 12 (the map table calls it 하비). */
 export function isHuainan(k: Pick<BattleKnowledge, 'stage' | 'block'>): boolean {
-  return k.stage?.chapter === 1 && k.stage?.index === 2 && k.block === 12;
+  return !!k.stage && isHuainanAt(k.stage.chapter, k.stage.index, k.block);
+}
+export function isHuainanAt(chapter: number, stage: number, block: number | undefined): boolean {
+  return chapter === 1 && stage === 2 && block === 12;
 }
 
 export function defaultParams(): GrindParams {
@@ -403,6 +412,39 @@ export function pickFormation(state: GameState, fixed: number[], free: number, s
   const byLow = [...pool].sort((a, b) => (a.lv >= 99 ? 1 : 0) - (b.lv >= 99 ? 1 : 0) || a.lv - b.lv || a.i - b.i);
   for (const o of byLow) take(o.i);
   return picks;
+}
+
+/**
+ * 회남 sortie (GrindParams.hnPlan with hnWeak): the usual picks, then the ones left out swapped in
+ * for the weakest, keeping each kept officer on its record (the start cells matter). The order of
+ * worth: the band and the healers as usual, then close-combat units by level (L8 infantry still
+ * screen the formation: benching 경무 for a L13 archer held to turn 30 in 3 of 20 seeds instead of
+ * 15), then the rest by level.
+ */
+export function huainanPicks(state: GameState, fixed: number[], free: number, picks: number[], band: boolean, healers: number, learn?: Uint8Array): number[] {
+  const faction = state.officers[0].dyn.flags & 0x1f;
+  const pool = state.officers
+    .map((o, i) => ({ i, lv: o.dyn.level, melee: CLASS_RANGE[o.dyn.cls] === 0, ok: (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction && i < 0x100 }))
+    .filter((o) => o.ok && !fixed.includes(o.i));
+  // the band and the healers as pickFormation takes them (it then fills up with the lowest levels)
+  const keep = new Set<number>();
+  if (pool.some((o) => o.i === 0)) keep.add(0);
+  if (band) for (const o of pool) if (state.officers[o.i].dyn.cls === 12) keep.add(o.i);
+  if (healers > 0 && learn) {
+    const heals = (i: number) => {
+      const d = state.officers[i].dyn;
+      for (let t = 21; t <= 35; t++) if (learn[t * CLASS_COUNT + d.cls] <= d.level) return true;
+      return false;
+    };
+    for (const o of pool.filter((o) => o.lv < 99 && heals(o.i)).sort((a, b) => a.lv - b.lv || a.i - b.i).slice(0, healers)) keep.add(o.i);
+  }
+  const rest = pool.filter((o) => !keep.has(o.i)).sort((a, b) => Number(b.melee) - Number(a.melee) || b.lv - a.lv || a.i - b.i);
+  const want = new Set<number>([...keep]);
+  for (const o of rest) if (want.size < free) want.add(o.i);
+  const out = [...picks];
+  const add = [...want].filter((i) => !out.includes(i));
+  for (let k = 0; k < out.length && add.length; k++) if (!want.has(out[k])) out[k] = add.shift()!;
+  return out;
 }
 
 // ---------------------------------------------------------------- statistics
@@ -1030,11 +1072,25 @@ export class GrindPolicy {
     return this.hnOn() && this.finishing && this.stats.finishReason === 'escape' && !!this.exitPlan;
   }
 
-  /** Healers and the band stay inside the formation; the others form its front. */
+  /** Healers, the band and the weak (hnWeak levels or more below our three strongest) stay inside the formation; the others form its front. */
   private hnInner(u: Unit): boolean {
     const o = this.b.officerOf(u);
     if (o.cls === 12) return true;
+    if (this.hnWeakUnit(u)) return true;
     return castableTactics(o, 999, this.b.learn).some((t) => t >= 21 && t <= 35);
+  }
+
+  /** A unit hnWeak levels or more below the average of our three strongest (absent hnWeak: none). */
+  private hnWeakUnit(u: Unit): boolean {
+    if (!Number.isFinite(this.p.hnWeak) || u.officer >= 0x100) return false;
+    const lv = this.scene.units
+      .slice(0, PLAYER_SLOTS)
+      .filter((a) => a.status === Status.Field && a.officer < 0x100)
+      .map((a) => this.b.officerOf(a).level)
+      .sort((a, b) => b - a)
+      .slice(0, 3);
+    if (!lv.length) return false;
+    return this.b.officerOf(u).level <= lv.reduce((a, b) => a + b, 0) / lv.length - this.p.hnWeak;
   }
 
   /** Steps from `from` to `to` over the terrain (our leader's move type), as a cell list. */
@@ -1971,6 +2027,7 @@ export class GrindPolicy {
     const hnEsc = this.hnEsc();
     const hnLive = this.hnOn() && !fin && !!this.exitPlan;
     const hnBan = hnLive ? this.hnBan : null;
+    const hnWeak = hnLive && !guarded && this.hnWeakUnit(u);
     const hnAnc = !hnLive ? null : guarded ? this.hnLeaderAnchor : this.hnInner(u) ? this.hnAnchor : this.hnFrontAt;
     for (const [x, y] of this.reachable(u)) {
       if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -1985,7 +2042,7 @@ export class GrindPolicy {
       // 회남: keep out of the reach of the waiting units not being peeled
       if (hnBan && hnBan[y * b.width + x]) base -= 300;
       // ... and wake the target alone: someone sturdy stands where only it can reach
-      if (hnLive && !guarded && this.hnBait && this.hnBait[0] === x && this.hnBait[1] === y) base += 30 * (hp / Math.max(1, max));
+      if (hnLive && !guarded && !hnWeak && this.hnBait && this.hnBait[0] === x && this.hnBait[1] === y) base += 30 * (hp / Math.max(1, max));
       const t = terrainAt(b.s, x, y);
       if (hp < max * this.p.retreat && (t === 8 || t === 13 || t === 14)) base += 6;
       // stand next to allies: fewer sides open to the enemy

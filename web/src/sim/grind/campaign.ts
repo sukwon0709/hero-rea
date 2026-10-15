@@ -34,6 +34,8 @@ export interface CampaignBattle {
   ms: number;
   /** For a battle nothing won: how many tries ended for each reason. */
   lossReasons?: Record<string, number>;
+  /** For a battle nothing won: the exp of the best losing try (the longest held, then the most exp; not carried on). */
+  lostExp?: number;
   /** Bought at the merchants before this battle. */
   purchases?: { officer: number; item: number; price: number }[];
   /** Attempts until the win (1 = first try); the retries a player would make. */
@@ -115,6 +117,17 @@ export function carryFor(prev: BattleSnapshot, snap: BattleSnapshot, lastOfficer
 
 /** Progress first: a run that gets further always scores higher; the level objective breaks ties. */
 export const CLEARED_WEIGHT = 10_000_000;
+
+/**
+ * A run stopped by a lost battle: a small bonus for how long its best try held there (x10 per
+ * turn) and the exp it made (/25), so the learning gets a pull towards holding the wall (회남: the
+ * plan that holds to turn 30 against the one that falls at turn 13). At most a few hundred: worth a
+ * few levels of the top 15, never a battle cleared.
+ */
+export function frontierBonus(b: { won: boolean; turns: number; lostExp?: number } | undefined): number {
+  if (!b || b.won) return 0;
+  return b.turns * 10 + Math.round((b.lostExp ?? 0) / 25);
+}
 export function progressObjective(cleared: number, n99: number, top15: number, levelsGained = 0): number {
   return cleared * CLEARED_WEIGHT + objectiveOf(n99, top15, levelsGained);
 }
@@ -335,6 +348,7 @@ export async function runCampaign(
       purchases: b.purchases,
       attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
       script: b.script,
+      lostExp: !b.won ? b.expTotal : undefined,
       lossReasons: !b.won ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
     o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
@@ -380,7 +394,7 @@ export async function runCampaign(
     n99,
     top15,
     // the team's exp (/25) and 유비's level (x50) count too (Sukwon: raise him with the team; more exp beats a rushed clear)
-    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 25) + 50 * (lastOfficers[0]?.level ?? 0)),
+    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 25) + 50 * (lastOfficers[0]?.level ?? 0)) + frontierBonus(out[out.length - 1]),
     cleared: out.filter((b) => b.won).length,
     frontier,
     wins: out.filter((b) => b.won).length,

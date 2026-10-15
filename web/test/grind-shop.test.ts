@@ -73,7 +73,7 @@ describe('grind params: the 회남 plan', () => {
     expect(d.hnPlan).toBeGreaterThan(0.5);
     expect([d.hnX, d.hnY]).toEqual([21, 8]);
     const keys = PARAM_SPECS.map((s) => s.key).filter((k) => k.startsWith('hn'));
-    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus']);
+    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak']);
     const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('hn'))) as unknown as typeof d);
     for (const k of keys) expect(Number.isNaN(old[k])).toBe(true);
     // NaN never turns the plan on
@@ -84,6 +84,46 @@ describe('grind params: the 회남 plan', () => {
     expect(isHuainan({ stage: st(1, 3), block: 12 })).toBe(false);
     expect(isHuainan({ stage: st(2, 2), block: 12 })).toBe(false);
     expect(isHuainan({ block: 12 })).toBe(false);
+  });
+});
+
+describe('grind: the best losing try and the frontier bonus', () => {
+  it('losses rank by turns held, then exp; a win beats any loss', async () => {
+    const { betterTry } = await import('../src/sim/grind/battle');
+    const loss = (turns: number, expTotal: number) => ({ won: false, score: -1, turns, expTotal });
+    expect(betterTry(loss(30, 500), loss(13, 900))).toBe(true);
+    expect(betterTry(loss(13, 900), loss(30, 500))).toBe(false);
+    expect(betterTry(loss(30, 600), loss(30, 500))).toBe(true);
+    expect(betterTry(loss(30, 500), loss(30, 500))).toBe(false);
+    expect(betterTry({ won: true, score: 1, turns: 5, expTotal: 1 }, loss(30, 5000))).toBe(true);
+    expect(betterTry({ won: true, score: 9, turns: 5, expTotal: 1 }, { won: true, score: 3, turns: 30, expTotal: 900 })).toBe(true);
+  });
+  it('a stopped run gets a few hundred for holding the wall, never a cleared battle', async () => {
+    const { frontierBonus, CLEARED_WEIGHT } = await import('../src/sim/grind/campaign');
+    expect(frontierBonus(undefined)).toBe(0);
+    expect(frontierBonus({ won: true, turns: 30 })).toBe(0);
+    expect(frontierBonus({ won: false, turns: 30, lostExp: 1000 })).toBe(340);
+    expect(frontierBonus({ won: false, turns: 30, lostExp: 1000 })).toBeGreaterThan(frontierBonus({ won: false, turns: 13, lostExp: 300 }));
+    expect(frontierBonus({ won: false, turns: 50, lostExp: 5000 })).toBeLessThan(CLEARED_WEIGHT / 1000);
+  });
+});
+
+describe('grind: the 회남 sortie', () => {
+  it('swaps the weak archers out for close-combat units, keeping each kept officer on its record', async () => {
+    const { huainanPicks } = await import('../src/sim/grind/policy');
+    // officer -> [level, class]: 0 유비, 1 L9 c6 (close), 57 L9 c0, 58 L8 c3 archer, 81 L13 c0 (left out), 82 L8 c3 archer
+    const spec: Record<number, [number, number]> = { 0: [12, 0], 1: [9, 6], 2: [14, 6], 57: [9, 0], 58: [8, 3], 63: [14, 18], 64: [13, 12], 81: [13, 0], 82: [8, 3], 220: [14, 14] };
+    const officers = Array.from({ length: 0x100 }, (_, i) => ({ dyn: { level: spec[i]?.[0] ?? 1, cls: spec[i]?.[1] ?? 0, flags: spec[i] ? 0x80 | 1 : 0 } }));
+    const state = { officers } as unknown as import('../src/engine/state').GameState;
+    const picks = [2, 63, 220, 58, 1, 57, 82, 64];
+    const out = huainanPicks(state, [0], 8, picks, true, 0);
+    expect(out).toHaveLength(8);
+    expect(out).toContain(81);
+    expect(out.filter((i) => i === 58 || i === 82)).toHaveLength(1);
+    // the others stay on their records
+    for (const [k, i] of picks.entries()) if (i !== 58 && i !== 82) expect(out[k]).toBe(i);
+    // the band is kept whatever its level
+    expect(out).toContain(64);
   });
 });
 
