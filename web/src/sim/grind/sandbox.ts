@@ -211,6 +211,16 @@ export function makeHeadless(scene: BattleScene): void {
   };
   v.ensureVisible = () => {};
   v.centre = () => {};
+  // every drawing primitive (the duel scene and the close-ups redraw the map and a shaded panel per
+  // frame: a third of a campaign's time went into pixels nobody sees); pure display, no game state
+  const proto = Object.getPrototypeOf(scene.v) as Record<string, unknown>;
+  for (const k of Object.getOwnPropertyNames(proto)) if (/^(draw|shade$|text$|rect$|bar$|clipUnit$|blitImg$)/.test(k) && typeof proto[k] === 'function') v[k] = () => {};
+  const scr = scene.ctx.screen as unknown as Record<string, unknown>;
+  scr.fillRect = () => {};
+  scr.blit = () => {};
+  scr.clear = () => {};
+  scr.present = () => {};
+  scr.grab = (_x: number, _y: number, w: number, h: number) => new Uint8Array(w * h);
   const sc = scene as unknown as Record<string, unknown>;
   // showHit is the hit display (close-up or blink) and the recursion into the counter's display
   sc.showHit = async () => {};

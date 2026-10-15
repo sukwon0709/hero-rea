@@ -118,11 +118,15 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
     if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list));
     const fi = snap.formationInfo;
     if (fi) {
-      const free = fi.records.length;
+      // a record that held a placeholder at FORMATION time but now holds an enemy (the setup's
+      // BATTLE_UNITS wrote over it: 서주 2nd's 차주, 연주's record 8) is not a free pick; writing
+      // over it removed that enemy, and with it the defeat event the battle needs
+      const recs = fi.hexFormation ? fi.records : fi.records.filter((r) => !(script.units[r].flags & 1));
+      const free = recs.length;
       const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0);
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
-        fi.records.forEach((r, k) => {
+        recs.forEach((r, k) => {
           script.units[r].officer = picks[k] ?? 0xffff;
         });
     } else if (script.hexFlag & 1 && carry?.formation) extras.formation = [...carry.formation];
@@ -169,6 +173,11 @@ export async function runGrindBattle(
   const dep = scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status !== Status.Empty && u.officer < 0x100).map((u) => u.officer);
   const gains: OfficerGain[] = [];
   let score = 0, expTotal = 0;
+  // 유비 (officer 0) behind the others: his exp counts up to 5x (1 + half the level gap), so plans
+  // that feed him win the search
+  const others = dep.filter((off) => off !== 0).map((off) => before[off]?.level ?? ctx.state.officers[off].dyn.level);
+  const avgOthers = others.length ? others.reduce((a, c) => a + c, 0) / others.length : 0;
+  const liuMul = 1 + Math.max(0, Math.min(4, (avgOthers - (before[0]?.level ?? ctx.state.officers[0].dyn.level)) / 2));
   for (const off of dep) {
     const o = ctx.state.officers[off];
     const b0 = before[off] ?? { level: o.dyn.level, exp: o.dyn.exp };
@@ -177,7 +186,7 @@ export async function runGrindBattle(
     gains.push({ officer: off, name: o.name, levelBefore: b0.level, levelAfter: o.dyn.level, expGained: g, ...st });
     expTotal += g;
     // need-weighted: exp below level 99 counts, more for officers further away
-    score += g * (1 + (99 - Math.min(99, b0.level)) / 99);
+    score += g * (1 + (99 - Math.min(99, b0.level)) / 99) * (off === 0 ? liuMul : 1);
   }
   const won = result === 2;
   // why a try was lost (for the report): the leader / defeat officer gone, the time limit, a
@@ -198,8 +207,6 @@ export async function runGrindBattle(
     if (stats?.finishReason && stats.finishReason !== 'deadline') loss += ` · 마무리 계기 ${stats.finishReason}`;
     if (p.native) loss += ' (게임 AI)';
   }
-  const names = battleNameLines(assetsFor(files).file('HEXZMAP.R3'));
-  void names;
   const formationOut = won ? scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status !== Status.Empty && u.officer < 0x400).map((u) => u.officer) : undefined;
   void scene0;
   return {

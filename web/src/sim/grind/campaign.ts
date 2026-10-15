@@ -151,6 +151,8 @@ export interface CampaignOptions {
   backtrack?: number;
   /** More effort where earlier runs stopped: this battle gets these variants/retries. */
   extra?: { battle: number; variants: number; rescue: number };
+  /** Re-plan tries for frozen battles (their elite plan kept as the fallback); 0 = replay only. */
+  replan?: number;
   /** Called with the carry each battle starts from (bench fixtures). */
   onCarry?: (k: number, carry: CarryState | null) => void;
 }
@@ -177,6 +179,9 @@ export async function runCampaign(
   const regrind = new Set<number>();
   let backLeft = o.backtrack ?? 0;
   let backFrom = -1;
+  // frozen battles whose old plan was replaced by a re-plan, and those not to re-plan again
+  const replanned: number[] = [];
+  const noReplan = new Set<number>();
   for (let k = 0; k < list.length; k++) {
     const snap = list[k];
     before[k] = { lastOfficers, lastMoney, carry };
@@ -186,6 +191,21 @@ export async function runCampaign(
     const hint = o.hints?.[k] ? clampHint({ ...params, ...o.hints[k] }) : undefined;
     const again = regrind.has(k);
     let s: BattleSearch | null = !again && o.frozen?.has(k) && o.elites?.[k] ? await searchBattle(files, snap, o.elites[k], carry, 1, rng, undefined, 0) : null;
+    // a frozen battle is re-planned too (stall longer, feed 유비): the new plan replaces the old one
+    // only when it also wins, scores higher (exp, 유비 weighted up), gives the team at least 95% of the exp and
+    // uses no fewer turns (a stronger carry for the battles after it); the old plan is the fallback
+    if (s?.best.won && (o.replan ?? 0) > 0 && !noReplan.has(k)) {
+      const r = await searchBattle(files, snap, params, carry, o.replan!, rng, undefined, 0, hint);
+      battlesRun += r.tried.length;
+      if (r.best.won && r.best.score > s.best.score && r.best.expTotal * 100 >= s.best.expTotal * 95 && r.best.turns >= Math.min(s.best.turns, r.best.turnLimit - 3)) {
+        o.log?.(`  [${k}] ${snap.name}: re-planned, score ${Math.round(s.best.score)} -> ${Math.round(r.best.score)}, turns ${s.best.turns} -> ${r.best.turns}`);
+        s = { best: r.best, tried: [...s.tried, ...r.tried] };
+        replanned.push(k);
+      } else {
+        if (process.env.GRIND_TRACE_REPLAN) o.log?.(`  [${k}] ${snap.name}: re-plan kept old (old score ${Math.round(s.best.score)} exp ${s.best.expTotal} turns ${s.best.turns}; new ${r.best.won ? `score ${Math.round(r.best.score)} exp ${r.best.expTotal} turns ${r.best.turns}` : `lost: ${r.tried.map((t) => t.loss).join(' / ')}`})`);
+        s = { best: s.best, tried: [...s.tried, ...r.tried] };
+      }
+    }
     const ex = o.extra && (o.extra.battle === k || (backFrom >= 0 && k === backFrom)) ? o.extra : null;
     // battles the best run already cleared (before its frontier) get its escalated retries too: a
     // policy change can make an old elite plan lose there, and retries only cost when it loses
@@ -193,6 +213,21 @@ export async function runCampaign(
     if (!s || !s.best.won) s = await searchBattle(files, snap, params, carry, again ? o.variants * 3 : ex ? Math.max(ex.variants, o.variants) : o.variants, rng, o.elites?.[k] ?? hint, Math.max(exRescue, o.rescue ?? 6), hint && o.elites?.[k] ? hint : undefined);
     battlesRun += s.tried.length;
     const b: BattleOutcome = s.best;
+    // about to stop after a re-plan changed the carry: undo the latest re-plan (that battle replays
+    // its old plan, which got this far before) and go on from there
+    if (!b.won && o.stopOnLoss !== false && replanned.length) {
+      const j = replanned.pop()!;
+      noReplan.add(j);
+      o.log?.(`  [${k}] ${snap.name}: lost; undoing the re-plan of [${j}] ${list[j].name} (back to its old plan)`);
+      ({ lastOfficers, lastMoney, carry } = before[j]);
+      out.length = j;
+      for (const [off, at] of [...reached]) if (at >= j) reached.delete(off);
+      for (const g of [...regrind]) if (g >= j) regrind.delete(g);
+      backLeft = o.backtrack ?? 0;
+      backFrom = -1;
+      k = j - 1;
+      continue;
+    }
     // about to stop: go back one more battle and grind it harder (then replay forward)
     if (!b.won && o.stopOnLoss !== false && backLeft > 0 && k - (o.backtrack! - backLeft) - 1 >= 0) {
       const j = k - (o.backtrack! - backLeft) - 1;
@@ -266,7 +301,8 @@ export async function runCampaign(
     roster,
     n99,
     top15,
-    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 100)),
+    // 유비's level counts 20 extra per level (Sukwon: raise him with the team)
+    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 100) + 20 * (lastOfficers[0]?.level ?? 0)),
     cleared: out.filter((b) => b.won).length,
     frontier,
     wins: out.filter((b) => b.won).length,

@@ -290,6 +290,13 @@ function benchHtml(benches: Bench[]): string {
   return `<div class="card"><p>같은 출발 레벨(기준 캠페인의 그 전투 시작 시점)에서 난수 시드만 바꿔 여러 번 싸운 승리 수. 왼쪽이 이전, 오른쪽이 나중 측정(전투 정책 수정 전후).</p><table><tr><th>전투</th><th>방식</th>${head}</tr>${rows}</table></div>`;
 }
 
+/** 유비's level after a won battle and the average level of the other officers that fought in it. */
+function liuBeiAndTeam(b: CampaignBattle): { liuBei: number | null; teamAvg: number | null } {
+  const liu = b.gains.find((g) => g.officer === 0);
+  const team = b.gains.filter((g) => g.officer !== 0);
+  return { liuBei: liu ? liu.levelAfter : null, teamAvg: team.length ? Math.round((team.reduce((a, g) => a + g.levelAfter, 0) / team.length) * 10) / 10 : null };
+}
+
 export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, benches: Bench[] = [], abs: HintAb[] = []) {
   return {
     benches,
@@ -310,6 +317,7 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
       // where this generation's best run stopped (null = it reached the end); cleared = battles won before it
       frontier: h.frontier ?? null,
       cleared: h.cleared ?? null,
+      fresh: !!h.fresh,
       meanParams: h.meanParams,
       stdParams: h.stdParams,
       eliteChanges: (h.eliteChanges ?? []).map((e) => ({ battle: e.battle, name: e.name, from: e.from, to: e.to })),
@@ -326,12 +334,12 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
           cleared: st.best.campaign.cleared ?? null,
           frontier: st.best.campaign.frontier ?? null,
           roster: st.best.campaign.roster,
-          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0 })),
+          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0, ...liuBeiAndTeam(b), early: b.script?.early ?? [] })),
         }
       : null,
     rules: learnedRules(st),
     facts: st.best ? campaignFacts(st.best.campaign) : [],
-    objective: '클리어한 전투 수(이야기 순서, 못 이긴 전투에서 그 실행은 멈춤) × 10,000,000 + Lv99 장수 수 × 100,000 + 상위 15명 레벨 합 × 10 + 전체 장수가 얻은 레벨 수. 즉 더 멀리 간 실행이 항상 위이고, 같은 곳까지 갔으면 레벨로 비교. (5차까지의 실행은 못 이긴 전투를 강제 진행했고 클리어 항이 없었음)',
+    objective: '클리어한 전투 수(이야기 순서, 못 이긴 전투에서 그 실행은 멈춤) × 10,000,000 + Lv99 장수 수 × 100,000 + 상위 15명 레벨 합 × 10 + 전체 장수가 얻은 레벨 수 + 유비 레벨 × 20(유비를 아군과 함께 키우기). 즉 더 멀리 간 실행이 항상 위이고, 같은 곳까지 갔으면 레벨로 비교. (5차까지의 실행은 못 이긴 전투를 강제 진행했고 클리어 항이 없었음)',
     paramSpecs: PARAM_SPECS.map((s) => ({ key: s.key, label: PARAM_KO[s.key], min: s.min, max: s.max, int: !!s.int })),
   };
 }
@@ -640,4 +648,66 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
     L.push('');
   }
   return L.join('\n');
+}
+
+/** progress.md: the same summary as progress.html for readers who cannot open HTML. */
+export function progressMarkdown(d: ReturnType<typeof progressJson>): string {
+  const L: string[] = [];
+  const best = d.best;
+  L.push('# 노가다 학습 진행 상황\n');
+  L.push(`갱신: ${d.updated}  `);
+  L.push(`점수 기준: ${d.objective}\n`);
+  L.push('## 현재 최고 기록\n');
+  if (best) {
+    const fr = best.frontier;
+    L.push(`- 클리어한 전투: ${best.cleared ?? best.wins}개${fr ? ` (여기서 멈춤: ${fr.name})` : ' (끝까지 클리어)'}`);
+    L.push(`- 상위 15명 레벨 합: ${best.top15} (목표 1485 = 15 × 99)`);
+    L.push(`- Lv99 장수: ${best.n99}명`);
+    const lb = best.roster.find((r) => r.officer === 0);
+    if (lb) L.push(`- 유비: Lv${lb.level}`);
+    L.push('\n| 순위 | 장수 | 레벨 |\n|---|---|---|');
+    best.roster.slice(0, 15).forEach((r, i) => L.push(`| ${i + 1} | ${r.name} | ${r.level} |`));
+    L.push('');
+    if (best.battles.length) {
+      L.push('## 최고 기록의 전투별 결과\n');
+      L.push('턴: 사용한 턴 / 제한 턴. ※ 표시는 제한 턴 전에 끝나거나 바뀌는 전투(버티기 승리, 증원 등)라 턴을 다 못 쓰는 것이 정상일 수 있음.\n');
+      L.push('| # | 전투 | 결과 | 턴 | 얻은 경험치 | 유비 레벨 | 아군 평균 레벨 | 시도 | 구입 |');
+      L.push('|---|---|---|---|---|---|---|---|---|');
+      for (const x of best.battles) {
+        const res = x.won ? '승리' : x.forced ? '강제 진행' : '여기서 멈춤';
+        const early = x.early.length ? ` ※ ${x.early.join(', ')}` : '';
+        L.push(`| ${x.index + 1} | ${x.name} | ${res} | ${x.turns}/${x.turnLimit}${early} | ${x.expTotal} | ${x.liuBei ?? '-'} | ${x.teamAvg ?? '-'} | ${x.tries} | ${x.bought || ''} |`);
+      }
+      L.push('');
+    }
+  }
+  L.push('## 세대별 결과\n');
+  L.push('| 세대 | 막힌 전투 | 최고 점수 | 평균 점수 | 최고 후보 클리어 | 최고 후보 상위15 합 | Lv99 | 고정된 전투 수 |');
+  L.push('|---|---|---|---|---|---|---|---|');
+  for (const g of d.generations) {
+    const c = g.candidates.length ? g.candidates.reduce((a, b) => (b.objective > a.objective ? b : a)) : null;
+    L.push(`| ${g.gen + 1}${g.fresh ? ' (처음부터 재시작)' : ''} | ${g.frontier ? g.frontier.name : g.cleared !== null ? '끝까지' : '-'} | ${g.best} | ${g.mean} | ${c?.cleared ?? c?.wins ?? ''} | ${c?.top15 ?? ''} | ${g.bestN99} | ${g.frozen.length} |`);
+  }
+  if (d.running) L.push(`\n${d.running.gen + 1}세대 진행 중: 후보 ${d.running.done} / ${d.running.total}개 완료`);
+  L.push('');
+  L.push('## 학습으로 바뀐 전략\n');
+  for (const m of d.moves) L.push(`- ${m.gen + 1}세대: ${m.text}`);
+  L.push('');
+  L.push('## 지금 쓰는 규칙\n');
+  for (const r of d.rules) L.push(`- ${r}`);
+  L.push('');
+  L.push('## 관찰된 사실\n');
+  for (const f of d.facts) L.push(`- ${f}`);
+  L.push('');
+  L.push('## 고수 팁 비교 (A/B)\n');
+  L.push('| 비교 | 승리 (전/후) | 상위15 합 (전/후) | 총 경험치 (전/후) | 유비 (전/후) |');
+  L.push('|---|---|---|---|---|');
+  for (const ab of d.tipsAb) {
+    const w = ab.without as unknown as Record<string, unknown>, x = ab.with as unknown as Record<string, unknown>;
+    const t = ab as unknown as { title?: string; label?: string };
+    const name = t.title || t.label || Object.entries(ab.hint ?? {}).map(([k, v]) => `${k}=${v}`).join(', ');
+    L.push(`| ${name} | ${w.wins} → ${x.wins} | ${w.top15} → ${x.top15} | ${w.exp} → ${x.exp} | ${w.liuBei} → ${x.liuBei} |`);
+  }
+  L.push('');
+  return L.join('\n') + '\n';
 }

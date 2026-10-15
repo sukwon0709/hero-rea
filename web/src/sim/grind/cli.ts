@@ -11,7 +11,8 @@
 // Output (outside the repository; it is generated from the player's game files): cache/captures.v8,
 // state.json (learning state), progress.json + progress.html, results.json + guide.md.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { serialize, deserialize } from 'node:v8';
@@ -22,7 +23,7 @@ import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, type GrindParams } from './policy';
 import { frozenBattles, newEvolveState, populationSize, sampleGeneration, updateGeneration, type CandidateResult, type EvolveState } from './evolve';
 import { realRun } from './realrun';
-import { progressHtml, progressJson, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
+import { progressHtml, progressJson, progressMarkdown, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
 import { dsTable, S } from '../../native/battle/strings';
 import { parseBakData } from '../../formats/tables';
 
@@ -39,6 +40,9 @@ const sopt = (name: string, def: string): string => {
 const flag = (name: string) => argv.includes(`--${name}`);
 
 const OUT = sopt('out', '/mnt/project-files/grind');
+// local working directory (job / result files, the captures and state copies): OUT may be a network
+// mount (rclone), where many small file writes failed with EIO and crashed a run
+const WORK = sopt('work', join(tmpdir(), 'hero-grind-work'));
 const GAME = process.env.HERO_GAME_DIR ?? '';
 
 function loadFiles(): Map<string, Uint8Array> {
@@ -53,8 +57,20 @@ function loadFiles(): Map<string, Uint8Array> {
 }
 
 const capPath = () => join(OUT, 'cache', 'captures.v8');
+const localCap = () => join(WORK, 'captures.v8');
+/** Captures: workers read the local copy; the main process refreshes it from OUT (falls back to it). */
 function loadCaptures(): BattleSnapshot[] {
-  return deserialize(readFileSync(capPath())) as BattleSnapshot[];
+  let buf: Buffer | null = null;
+  if (cmd !== 'worker')
+    try {
+      buf = readFileSync(capPath());
+      mkdirSync(WORK, { recursive: true });
+      writeFileSync(localCap(), buf);
+    } catch (e) {
+      if (!existsSync(localCap())) throw e;
+      console.error(`captures: ${capPath()} unreadable (${(e as Error).message}); using the local copy`);
+    }
+  return deserialize(buf ?? readFileSync(existsSync(localCap()) ? localCap() : capPath())) as BattleSnapshot[];
 }
 
 const statePath = () => join(OUT, 'state.json');
@@ -79,15 +95,37 @@ function loadHints(snaps: BattleSnapshot[] | null): { defaults?: Partial<GrindPa
 }
 
 function loadState(hints?: Partial<GrindParams>): EvolveState {
-  if (!flag('reset') && existsSync(statePath())) return JSON.parse(readFileSync(statePath(), 'utf8')) as EvolveState;
+  if (!flag('reset')) {
+    // the newer of OUT/state.json and the local copy (a save to OUT may have failed)
+    const cands = [statePath(), join(WORK, 'state.json')].flatMap((p) => {
+      try {
+        return [JSON.parse(readFileSync(p, 'utf8')) as EvolveState];
+      } catch {
+        return [];
+      }
+    });
+    if (cands.length) return cands.reduce((a, b) => (b.gen > a.gen ? b : a));
+  }
   return newEvolveState(opt('seed', 1), hints);
 }
 
-/** Write then rename, so a reader never sees a half-written file. */
-function atomicWrite(path: string, data: string) {
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, data);
-  renameSync(tmp, path);
+/** Write then rename, so a reader never sees a half-written file. Retries on I/O errors and never throws (logs instead). */
+function atomicWrite(path: string, data: string): boolean {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const tmp = `${path}.tmp-${process.pid}`;
+      writeFileSync(tmp, data);
+      renameSync(tmp, path);
+      return true;
+    } catch (e) {
+      if (attempt === 4) {
+        console.error(`write ${path} failed: ${(e as Error).message} (skipped; the run goes on)`);
+        return false;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000 * attempt);
+    }
+  }
+  return false;
 }
 
 function loadAb(): HintAb | undefined {
@@ -102,15 +140,37 @@ function loadAbs(): HintAb[] {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+let lastLiveWrite = 0;
 function writeProgress(st: EvolveState, live?: LiveStatus, saveState = !live) {
-  if (saveState) atomicWrite(statePath(), JSON.stringify(st));
-  const ab = loadAb();
-  const benches = readdirSync(OUT)
-    .filter((f) => /^bench-.*\.json$/.test(f))
-    .map((f) => JSON.parse(readFileSync(join(OUT, f), 'utf8')) as Bench)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  const abs = loadAbs();
-  atomicWrite(join(OUT, 'progress.json'), JSON.stringify(progressJson(st, live, ab, benches, abs), null, 1));
+  // live updates (during a generation) at most once a minute: few writes to a network mount
+  if (live) {
+    if (Date.now() - lastLiveWrite < 60_000) return;
+    lastLiveWrite = Date.now();
+  }
+  if (saveState) {
+    const js = JSON.stringify(st);
+    try {
+      mkdirSync(WORK, { recursive: true });
+      writeFileSync(join(WORK, 'state.json'), js);
+    } catch {
+      /* local copy only */
+    }
+    atomicWrite(statePath(), js);
+  }
+  let ab: HintAb | undefined, benches: Bench[] = [], abs: HintAb[] = [];
+  try {
+    ab = loadAb();
+    benches = readdirSync(OUT)
+      .filter((f) => /^bench-.*\.json$/.test(f))
+      .map((f) => JSON.parse(readFileSync(join(OUT, f), 'utf8')) as Bench)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    abs = loadAbs();
+  } catch (e) {
+    console.error(`progress: reading ${OUT} failed (${(e as Error).message}); writing without the A/B and bench data`);
+  }
+  const pj = progressJson(st, live, ab, benches, abs);
+  atomicWrite(join(OUT, 'progress.json'), JSON.stringify(pj, null, 1));
+  atomicWrite(join(OUT, 'progress.md'), progressMarkdown(pj));
   atomicWrite(join(OUT, 'progress.html'), progressHtml(st, live, ab, benches, abs));
 }
 
@@ -146,13 +206,15 @@ interface Job {
   rescue: number;
   extra?: { battle: number; variants: number; rescue: number };
   backtrack?: number;
+  replan?: number;
 }
 
 function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<CampaignResult> {
   return new Promise((resolve, reject) => {
-    const job = join(OUT, 'cache', `job-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+    mkdirSync(WORK, { recursive: true });
+    const job = join(WORK, `job-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
     writeFileSync(job, JSON.stringify(j));
-    const child = spawn(process.execPath, [process.argv[1], new URL(import.meta.url).pathname, 'worker', '--job', job, '--out', OUT], {
+    const child = spawn(process.execPath, [process.argv[1], new URL(import.meta.url).pathname, 'worker', '--job', job, '--out', OUT, '--work', WORK], {
       cwd: process.cwd(),
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -165,8 +227,13 @@ function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<Campai
     });
     child.on('close', (code) => {
       const m = buf.match(/@@RESULT@@(.*)$/m);
-      if (code === 0 && m) resolve(JSON.parse(readFileSync(m[1], 'utf8')) as CampaignResult);
-      else reject(new Error(`worker exited ${code}`));
+      try {
+        if (code === 0 && m) resolve(JSON.parse(readFileSync(m[1], 'utf8')) as CampaignResult);
+        else reject(new Error(`worker exited ${code}`));
+      } catch (e) {
+        reject(e as Error);
+      }
+      for (const f of [job, `${job}.out`]) rmSync(f, { force: true });
     });
   });
 }
@@ -187,7 +254,7 @@ async function main() {
     const job = JSON.parse(readFileSync(sopt('job', ''), 'utf8')) as Job;
     const files = loadFiles();
     const snaps = loadCaptures();
-    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, log: (l) => process.stderr.write(`${l}\n`) });
+    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, replan: job.replan, log: (l) => process.stderr.write(`${l}\n`) });
     const outFile = sopt('job', '') + '.out';
     writeFileSync(outFile, JSON.stringify(res));
     console.log(`@@RESULT@@${outFile}`);
@@ -233,6 +300,12 @@ async function main() {
       let stuck = 0;
       for (let h = st.history.length - 1; h >= 0 && fr && st.history[h].frontier?.index === fr.index; h--) stuck++;
       const mult = Math.min(8, 2 + stuck);
+      // stuck for 3, 6, 9 ... generations (going back 1-2 battles was not enough): this generation
+      // starts over from battle 1 with no frozen plans and no elites, with the learned parameters
+      // and today's behaviour (stalling, feeding 유비), to build a stronger team on the way; the
+      // CEM keeps whichever run reaches further (then more levels)
+      const fresh = fr !== null && fr !== undefined && stuck >= 3 && stuck % 3 === 0;
+      if (fresh) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart from battle 1 (no frozen plans)`);
       const extra = fr ? { battle: fr.index, variants: variants * Math.min(4, mult), rescue: rescue * mult } : undefined;
       if (extra) console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name}, stuck ${stuck} generations: ${extra.variants} variants, ${extra.rescue} retries there`);
       // common random numbers: every candidate of a generation is played with the same search seed
@@ -245,16 +318,25 @@ async function main() {
       const one = async () => {
         while (next < cands.length) {
           const i = next++;
-          const job: Job = { params: cands[i], variants, seed, limit, elites: st.elites, frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2) };
-          const c = workers > 1
-            ? await campaignInChild(job, (k) => {
-                live.battles[i] = k + 1;
-                if (Date.now() - lastLive > 20000) {
-                  lastLive = Date.now();
-                  writeProgress(st, live);
-                }
-              })
-            : await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: st.elites, frozen: new Set(frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2) });
+          const job: Job = { params: cands[i], variants, seed, limit, elites: fresh ? {} : st.elites, frozen: fresh ? [] : frozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) };
+          // a worker that dies (I/O error, crash) is tried again, then the candidate is dropped
+          let c: CampaignResult | null = null;
+          for (let attempt = 1; attempt <= 2 && !c && workers > 1; attempt++)
+            c = await campaignInChild(job, (k) => {
+              live.battles[i] = k + 1;
+              if (Date.now() - lastLive > 20000) {
+                lastLive = Date.now();
+                writeProgress(st, live);
+              }
+            }).catch((e: Error) => {
+              console.log(`gen ${st.gen} cand ${i}: worker failed (${e.message})${attempt < 2 ? ', trying again' : ', dropped'}`);
+              return null;
+            });
+          if (workers > 1 && !c) {
+            live.done++;
+            continue;
+          }
+          if (!c) c = await runCampaign(files, snaps, cands[i], { variants, seed, limit: limit || undefined, elites: fresh ? {} : st.elites, frozen: new Set(fresh ? [] : frozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2) });
           results.push({
             cand: { params: cands[i], objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, ms: c.ms, battlesRun: c.battlesRun, cleared: c.cleared, frontier: c.frontier },
             campaign: c,
@@ -266,7 +348,18 @@ async function main() {
         }
       };
       await Promise.all(Array.from({ length: Math.max(1, workers) }, one));
+      const before = st.best ? { cleared: st.best.campaign.cleared, objective: st.best.result.objective } : null;
+      if (!results.length) {
+        console.log(`gen ${st.gen}: every worker failed; trying the generation again`);
+        continue;
+      }
       const rec = updateGeneration(st, results, performance.now() - t0);
+      if (fresh) {
+        rec.fresh = true;
+        const top = [...results].sort((a, b) => b.cand.objective - a.cand.objective)[0]?.campaign;
+        const kept = before && st.best && st.best.result.objective === before.objective;
+        console.log(`gen ${rec.gen}: full restart result: cleared ${top?.cleared ?? 0}${top?.frontier ? ` (stopped at [${top.frontier.index}] ${top.frontier.name})` : ''}, top15 ${top?.top15 ?? 0}; ${kept ? `previous best kept (cleared ${before!.cleared})` : 'the restart is the new best'}`);
+      }
       console.log(`gen ${rec.gen}: best ${rec.best} (n99 ${rec.bestN99}) mean ${rec.mean.toFixed(0)} in ${(rec.ms / 1000).toFixed(0)} s`);
       writeProgress(st);
     }
@@ -341,6 +434,29 @@ async function main() {
     const label = sopt('label', 'now');
     atomicWrite(join(OUT, `bench-${label}.json`), JSON.stringify({ label, date: new Date().toISOString(), seeds, params, rows }, null, 1));
     if (existsSync(statePath())) writeProgress(loadState(), undefined, false);
+    return;
+  }
+  if (cmd === 'speed') {
+    // simulation speed: the same battles (bench carry, a few RNG seeds) back to back in one process
+    const files = loadFiles();
+    const snaps = loadCaptures();
+    const fx = join(OUT, 'cache', 'bench-carry.v8');
+    const carries = existsSync(fx) ? (deserialize(readFileSync(fx)) as Record<number, CarryState | null>) : {};
+    const params: GrindParams = { ...defaultParams(), ...(loadHints(snaps).defaults ?? {}) };
+    const list = sopt('battles', '0,3,6,8').split(',').map(Number);
+    const seeds = opt('seeds', 3);
+    let n = 0, turns = 0, sig = 0;
+    const t0 = performance.now();
+    for (const k of list)
+      for (let s = 0; s < seeds; s++) {
+        const o = await runGrindBattle(files, { ...snaps[k], rngSeed: (snaps[k].rngSeed + s * 7777) >>> 0 }, params, carries[k] ?? null);
+        n++;
+        turns += o.turns;
+        sig = (sig * 31 + o.expTotal + o.turns * 1000 + (o.won ? 7 : 0)) >>> 0;
+      }
+    const sec = (performance.now() - t0) / 1000;
+    // sig: a checksum of the outcomes (an optimisation must not change any battle)
+    console.log(`speed: ${n} battles, ${turns} turns in ${sec.toFixed(1)} s = ${(n / sec).toFixed(2)} battles/s, ${(turns / sec).toFixed(1)} turns/s, sig ${sig}`);
     return;
   }
   if (cmd === 'real') {

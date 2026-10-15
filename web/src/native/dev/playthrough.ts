@@ -722,8 +722,8 @@ export class Playthrough {
       // a position the current event group waits for, or one whose event wins the battle
       const end = cmds.findIndex((c) => c.name === 'BATTLE_END');
       if (!current.has(r.index) && end < 0) continue;
-      const x0 = r.p2 & 0xff, y0 = r.p2 >> 8;
-      const [x, y] = r.trigger === 6 ? [x0, y0] : [(x0 + (r.p3 & 0xff)) >> 1, (y0 + (r.p3 >> 8)) >> 1];
+      const x0 = r.p2 >> 8, y0 = r.p2 & 0xff;
+      const [x, y] = r.trigger === 6 ? [x0, y0] : [(x0 + (r.p3 >> 8)) >> 1, (y0 + (r.p3 & 0xff)) >> 1];
       goals.push({ officer: r.p1, x, y });
     }
     const vm = this.game.script;
@@ -813,13 +813,14 @@ export class Playthrough {
       case 4:
         return { type: 'adjacent', other: r.p1, officer: r.p2 };
       case 6:
-        return { type: 'unitAt', officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 };
+        // cells are x<<8|y (engine/script.ts, MAIN.EXE a172)
+        return { type: 'unitAt', officer: r.p1, x: r.p2 >> 8, y: r.p2 & 0xff };
       case 7:
         return { type: 'targetDefeated' };
       case 9:
         return { type: 'turn', turn: r.p1 };
       case 11:
-        return { type: 'unitInArea', officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 };
+        return { type: 'unitInArea', officer: r.p1, x: r.p2 >> 8, y: r.p2 & 0xff };
       case 12:
         return { type: 'unitDefeated', officer: r.p1 };
       case 0:

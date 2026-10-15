@@ -37,6 +37,8 @@ export interface GenerationRecord {
   eliteChanges?: { battle: number; name: string; from: GrindParams | null; to: GrindParams | null }[];
   /** Battles whose plan is settled (curriculum): they run their kept plan only. */
   frozen?: number[];
+  /** This generation started over from battle 1 (no frozen plans): the frontier had stayed stuck. */
+  fresh?: boolean;
   /** Candidates sampled this generation (adaptive population). */
   pop?: number;
   /** Where this generation's best run stopped (null = it reached the end), and how many battles it cleared. */

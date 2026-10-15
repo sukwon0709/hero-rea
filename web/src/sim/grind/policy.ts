@@ -25,9 +25,9 @@ import type { GameState } from '../../engine/state';
 import type { ScriptState } from '../../engine/script';
 import type { Stage } from '../../formats/scenario';
 import { recordCommands } from '../../native/battle/dev/setup';
-import { scriptGains, recordIndexOf, turnEvents, type ScriptGain, type TurnEvent } from './events';
+import { scriptGains, recordIndexOf, turnEvents, cellOf, type ScriptGain, type TurnEvent } from './events';
 import { S } from '../../native/battle/strings';
-import { floodMove, rangeCells, terrainAt, unitAt, unitsInRange, sideOf } from '../../engine/battle/hex';
+import { floodMove, rangeCells, terrainAt, unitAt, unitsInRange, sideOf, moveTypeOf } from '../../engine/battle/hex';
 import {
   attackPower,
   castableTactics,
@@ -179,9 +179,9 @@ export interface BattleKnowledge {
   /** Officers whose loss loses the battle (유비, the defeat officer). */
   guarded: Set<number>;
   /** Cells (y*width+x per officer, 0x400 = any) whose arrival event wins the battle. */
-  winCells: { officer: number; x0: number; y0: number; x1: number; y1: number }[];
+  winCells: { officer: number; x0: number; y0: number; x1: number; y1: number; group?: number }[];
   /** Adjacency events (trigger 4) that end the battle: `actor` acting next to `other`. */
-  winAdj: { actor: number; other: number }[];
+  winAdj: { actor: number; other: number; group?: number }[];
   /** A turn event ends the game at this turn (deadline before the limit). */
   deadline: number | null;
   /** A turn event wins the battle at this turn (survive until then: 소패). */
@@ -194,6 +194,12 @@ export interface BattleKnowledge {
   turns: TurnEvent[];
   /** Turn of a big enemy wave (5+ units, turn 6 or later): the grinding finishes before it. */
   soft: number | null;
+  /**
+   * Steps before the winning group (서주 2nd): one-shot groups whose event moves the script on,
+   * in order (defeat officer X, then 유비 into an area). Only the current group's records can fire,
+   * so the win cells and the victory of later groups wait for these.
+   */
+  steps: { group: number; trigger: number; officer: number; x0: number; y0: number; x1: number; y1: number }[];
   stage?: Stage;
   block?: number;
 }
@@ -219,7 +225,7 @@ function winning(stage: Stage, code: number, victory: number | null, block?: num
 
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -229,15 +235,33 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     const cmds = recordCommands(stage, r.code);
     if (r.trigger === 12 && winning(stage, r.code, k.victory, script.block, r.group)) k.protect.add(r.p1);
     if ((r.trigger === 6 || r.trigger === 11) && winning(stage, r.code, k.victory, script.block, r.group) && !cmds.some((c) => c.name === 'GAME_OVER')) {
-      const x0 = r.p2 & 0xff, y0 = r.p2 >> 8;
-      const [x1, y1] = r.trigger === 6 ? [x0, y0] : [r.p3 & 0xff, r.p3 >> 8];
-      k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+      const [x0, y0] = cellOf(r.p2);
+      const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
+      k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), group: r.group });
     }
-    if (r.trigger === 4 && winning(stage, r.code, k.victory, script.block, r.group)) k.winAdj.push({ actor: r.p1, other: r.p2 });
+    if (r.trigger === 4 && winning(stage, r.code, k.victory, script.block, r.group)) k.winAdj.push({ actor: r.p1, other: r.p2, group: r.group });
     if (r.trigger === 6 && cmds.some((c) => c.name === 'ADD_ITEM') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER'))
-      k.treasure.push({ officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 });
+      k.treasure.push({ officer: r.p1, x: cellOf(r.p2)[0], y: cellOf(r.p2)[1] });
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+  }
+  // steps: non-resident groups (done when their one event ends) of a single defeat / arrival event
+  // that neither ends nor loses the battle, before the group holding the winning records
+  const recs = stage.blocks[script.block]?.records ?? [];
+  const winGroups = new Set([...k.winCells.map((c) => c.group), ...k.winAdj.map((a) => a.group)]);
+  const lastWin = Math.max(-1, ...[...winGroups].filter((g): g is number => g !== undefined));
+  const groups = [...new Set(recs.map((r) => r.group))].sort((a, b) => a - b);
+  for (const g of groups) {
+    if (g >= lastWin) break;
+    const rs = recs.filter((r) => r.group === g);
+    if (rs[0].resident || rs.length !== 1) continue;
+    const r = rs[0];
+    if (r.trigger !== 12 && r.trigger !== 6 && r.trigger !== 11) continue;
+    const cmds = recordCommands(stage, r.code);
+    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER')) continue;
+    const [x0, y0] = cellOf(r.p2);
+    const [x1, y1] = r.trigger === 11 ? cellOf(r.p3) : [x0, y0];
+    k.steps.push({ group: g, trigger: r.trigger, officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
   }
   return k;
 }
@@ -338,6 +362,8 @@ export class GrindPolicy {
         const t = c.x0 < f.width && c.y0 < f.height ? terrainAt(f, c.x0, c.y0) : -1;
         console.error(`win cell ${c.x0},${c.y0} officer ${c.officer} terrain ${t} costs ${[0, 1, 2, 3].map((mt) => moveCost(mt, t)).join('/')} size ${f.width}x${f.height}`);
       }
+    if (process.env.GRIND_TRACE_HITS)
+      for (const u of scene.units) if (u.status !== Status.Empty) console.error(`unit ${u.slot} officer ${u.officer} at ${u.x},${u.y} status ${u.status} mode ${u.mode} flags ${u.flags}`);
     know.winCells = know.winCells.filter((c) => {
       for (let y = c.y0; y <= c.y1; y++)
         for (let x = c.x0; x <= c.x1; x++) {
@@ -692,10 +718,12 @@ export class GrindPolicy {
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
     if (survive) return;
     // stalling is only safe while nobody falls: a third of the units lost ends the grinding
-    if (left <= this.p.finish || !needy || this.idleTurns >= 8 || leaderHurt || gone * 3 >= mine.length) {
+    // each pending step (defeat X, march into an area) needs about 12 turns of the finish
+    const stepTurns = this.stepsLeft() * 12;
+    if (left <= this.p.finish + stepTurns || !needy || this.idleTurns >= 8 || leaderHurt || gone * 3 >= mine.length) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
-      this.stats.finishReason = left <= this.p.finish ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';
+      this.stats.finishReason = left <= this.p.finish + stepTurns ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';
       this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
     }
@@ -706,13 +734,10 @@ export class GrindPolicy {
   private buildThreat() {
     const b = this.b;
     const n = b.width * b.height;
-    this.threat = Array.from({ length: n }, () => []);
-    this.tthreat = Array.from({ length: n }, () => []);
-    this.loose = Array.from({ length: n }, () => []);
     this.enemyTactics.clear();
     this.targetCount.clear();
-    const grid = new Uint8Array(n);
     const rain = WEATHER_TYPE[b.info.weather] === RAIN;
+    const parts: { i: number; r: { threat: number[]; tthreat: number[]; loose: number[] } }[] = [];
     for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
       const e = this.scene.units[i];
       if (e.status !== Status.Field || e.flags & UnitFlag.Confused || e.mode === AiMode.MoveNoAttack) continue;
@@ -723,62 +748,138 @@ export class GrindPolicy {
       this.enemyTactics.set(i, tacs);
       if (range === NONE && !tacs.length) continue;
       const mp = e.mode === AiMode.Hold ? 0 : movePoints(oe, b.s.items);
-      grid.fill(NONE);
-      floodMove(b.s, e, [e.x, e.y], grid, { flags: 0, maxCost: mp });
-      grid[e.y * b.width + e.x] = 0;
-      const seen = new Uint8Array(n);
-      const tseen = new Uint8Array(n);
       const area = tacs.length ? Math.max(...tacs.map((t) => TACTIC_POWER[t])) | 0x80 : NONE;
-      for (let c = 0; c < n; c++) {
-        if (grid[c] === NONE) continue;
-        const cx = c % b.width, cy = Math.trunc(c / b.width);
-        if (range !== NONE)
-          for (const [x, y] of rangeCells(b.s, cx, cy, range, false)) {
-            const k = y * b.width + x;
-            if (!seen[k]) {
-              seen[k] = 1;
-              this.threat[k].push(i);
-            }
-          }
-        if (area !== NONE)
-          for (const [x, y] of rangeCells(b.s, cx, cy, area, false)) {
-            const k = y * b.width + x;
-            if (!tseen[k]) {
-              tseen[k] = 1;
-              this.tthreat[k].push(i);
-            }
-          }
+      parts.push({ i, r: this.enemyReach(e, oe.cls, mp, range, area) });
+    }
+    // reinforcements a turn event brings in this turn or the next (거록: five units at turn 3, one
+    // of them cast a 421 fire on 유비 who stood where nothing threatened him): they enter at their
+    // deployment records and act in that enemy phase
+    this.incoming.clear();
+    const cur = b.info.turn + 1;
+    for (const ev of this.know.turns) {
+      if (ev.turn === null || (ev.turn !== cur && ev.turn !== cur + 1)) continue;
+      for (const off of ev.reinforce) {
+        const i = b.slotOfOfficer(off);
+        if (i === NONE || i < PLAYER_SLOTS || this.scene.units[i].status !== Status.Reserve) continue;
+        const rec = this.scene.ctx.vm.state.units.find((d) => d.officer === off);
+        if (!rec || rec.x >= b.width || rec.y >= b.height) continue;
+        const R = this.scene.units[i];
+        const e = Object.assign(Object.create(Object.getPrototypeOf(R)) as Unit, R, { x: rec.x, y: rec.y, status: Status.Field });
+        const oe = b.officerOf(e);
+        const range = CLASS_RANGE[oe.cls];
+        const tacs = castableTactics(oe, e.mp, b.learn).filter((t) => t <= 14 && !(rain && t < 5));
+        this.enemyTactics.set(i, tacs);
+        if (range === NONE && !tacs.length) continue;
+        const mp = e.mode === AiMode.Hold ? 0 : movePoints(oe, b.s.items);
+        const area = tacs.length ? Math.max(...tacs.map((t) => TACTIC_POWER[t])) | 0x80 : NONE;
+        this.incoming.add(i);
+        parts.push({ i, r: this.enemyReach(e, oe.cls, mp, range, area) });
       }
-      // the same reach without zones of control (our units die or move during the phase and
-      // open the way: 소패, a cavalry unit through two fallen units): the leader's worst case
-      if (range === NONE) continue;
-      // ... and through our own units too: the leader moves first, and the units that move after
-      // it can open the way (거록: a reinforcement reached 유비 through a cell 관우 left)
+    }
+    parts.sort((a, z) => a.i - z.i);
+    // nothing changed since the last build (same enemies, same cached reaches): keep the maps
+    const last = this.lastParts;
+    if (last && last.length === parts.length && last.every((q, j) => q.i === parts[j].i && q.r === parts[j].r) && this.threat.length === n) return;
+    this.lastParts = parts;
+    this.threat = Array.from({ length: n }, () => []);
+    this.tthreat = Array.from({ length: n }, () => []);
+    this.loose = Array.from({ length: n }, () => []);
+    for (const { i, r } of parts) {
+      for (const k of r.threat) this.threat[k].push(i);
+      for (const k of r.tthreat) this.tthreat[k].push(i);
+      for (const k of r.loose) this.loose[k].push(i);
+    }
+  }
+  private lastParts: { i: number; r: { threat: number[]; tthreat: number[]; loose: number[] } }[] | null = null;
+  /** Reserve enemy slots counted as threats (they arrive by a turn event before the next enemy phase ends). */
+  private incoming = new Set<number>();
+
+  /**
+   * One enemy's reach (cells it can attack / hit with a tactic / attack ignoring zones of control and
+   * our other units), cached: the floods only see the units within mp+1 cells of it, so the result
+   * is reused while none of those moved (most of our phase: one unit moves at a time).
+   */
+  private reachCache = new Map<number, { key: string; threat: number[]; tthreat: number[]; loose: number[] }>();
+  private enemyReach(e: Unit, cls: number, mp: number, range: number, area: number): { threat: number[]; tthreat: number[]; loose: number[] } {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const R = mp + 1;
+    const ls = b.slotOfOfficer(0);
+    const leaderAt = ls !== NONE && ls < PLAYER_SLOTS && this.scene.units[ls].status === Status.Field ? this.scene.units[ls].y * W + this.scene.units[ls].x : -1;
+    // two independent 32-bit hashes of the occupied cells around it
+    let h1 = 0x811c9dc5, h2 = 0x9747b28c;
+    for (let y = Math.max(0, e.y - R); y <= Math.min(H - 1, e.y + R); y++)
+      for (let x = Math.max(0, e.x - R); x <= Math.min(W - 1, e.x + R); x++) {
+        const c = y * W + x;
+        const v = b.s.unitAt[c];
+        if (v === NONE) continue;
+        const m = (c << 8) | v;
+        h1 = Math.imul(h1 ^ m, 0x01000193);
+        h2 = Math.imul(h2 ^ m, 0x5bd1e995) ^ (h2 >>> 13);
+      }
+    const key = `${e.x},${e.y},${mp},${range},${area},${cls},${e.flags & UnitFlag.Scripted},${leaderAt},${h1},${h2}`;
+    const hit = this.reachCache.get(e.slot);
+    if (hit && hit.key === key) return hit;
+    const n = W * H;
+    const grid = new Uint8Array(n);
+    floodMove(b.s, e, [e.x, e.y], grid, { flags: 0, maxCost: mp });
+    grid[e.y * W + e.x] = 0;
+    const seen = new Uint8Array(n);
+    const tseen = new Uint8Array(n);
+    const threat: number[] = [], tthreat: number[] = [], loose: number[] = [];
+    for (let c = 0; c < n; c++) {
+      if (grid[c] === NONE) continue;
+      const cx = c % W, cy = Math.trunc(c / W);
+      if (range !== NONE)
+        for (const [x, y] of rangeCells(b.s, cx, cy, range, false)) {
+          const k = y * W + x;
+          if (!seen[k]) {
+            seen[k] = 1;
+            threat.push(k);
+          }
+        }
+      if (area !== NONE)
+        for (const [x, y] of rangeCells(b.s, cx, cy, area, false)) {
+          const k = y * W + x;
+          if (!tseen[k]) {
+            tseen[k] = 1;
+            tthreat.push(k);
+          }
+        }
+    }
+    // the same reach without zones of control (our units die or move during the phase and
+    // open the way: 소패, a cavalry unit through two fallen units): the leader's worst case
+    // ... and through our own units too: the leader moves first, and the units that move after
+    // it can open the way (거록: a reinforcement reached 유비 through a cell 관우 left)
+    if (range !== NONE) {
       const lifted: number[] = [];
       for (let p = 0; p < PLAYER_SLOTS; p++) {
         const pu = this.scene.units[p];
         if (pu.status !== Status.Field || pu.officer === 0) continue;
-        const k = pu.y * b.width + pu.x;
+        const k = pu.y * W + pu.x;
         if (b.s.unitAt[k] === p) {
           b.s.unitAt[k] = NONE;
           lifted.push(p);
         }
       }
       floodMove(b.s, e, [e.x, e.y], grid, { flags: 1, maxCost: mp });
-      for (const p of lifted) b.s.unitAt[this.scene.units[p].y * b.width + this.scene.units[p].x] = p;
-      grid[e.y * b.width + e.x] = 0;
+      for (const p of lifted) b.s.unitAt[this.scene.units[p].y * W + this.scene.units[p].x] = p;
+      grid[e.y * W + e.x] = 0;
       const lseen = new Uint8Array(n);
       for (let c = 0; c < n; c++) {
         if (grid[c] === NONE) continue;
-        for (const [x, y] of rangeCells(b.s, c % b.width, Math.trunc(c / b.width), range, false)) {
-          const k = y * b.width + x;
+        for (const [x, y] of rangeCells(b.s, c % W, Math.trunc(c / W), range, false)) {
+          const k = y * W + x;
           if (!lseen[k]) {
             lseen[k] = 1;
-            this.loose[k].push(i);
+            loose.push(k);
           }
         }
       }
     }
+    const out = { key, threat, tthreat, loose };
+    this.reachCache.set(e.slot, out);
+    return out;
   }
   private loose: number[][] = [];
   private tthreat: number[][] = [];
@@ -837,14 +938,14 @@ export class GrindPolicy {
       const E = this.scene.units[e];
       if (!phys.includes(e) && !tac.includes(e)) {
         // reachable only through our lines: counts for the worst case alone
-        if (E.status === Status.Field && E.officer !== 0xffff) {
+        if ((E.status === Status.Field || this.incoming.has(e)) && E.officer !== 0xffff) {
           worst += this.hitOn(E, u, x, y);
           n++;
         }
         continue;
       }
       // the map is built at the start of the phase: units removed since then no longer threaten
-      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      if ((E.status !== Status.Field && !this.incoming.has(e)) || E.officer === 0xffff) continue;
       const d = Math.max(phys.includes(e) ? this.hitOn(E, u, x, y) : 0, tac.includes(e) ? this.tacticOn(E, u, x, y) : 0);
       worst += d;
       if (d > 0) n++;
@@ -870,18 +971,84 @@ export class GrindPolicy {
     return out;
   }
 
+  /** Steps from (x, y) to `goal` over cells this move type can enter (terrain only; cached). */
+  private distMaps = new Map<string, Uint16Array>();
+  private pathDist(goal: [number, number], mt: number, x: number, y: number): number {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const key = `${goal[0]},${goal[1]},${mt}`;
+    let m = this.distMaps.get(key);
+    if (!m) {
+      m = new Uint16Array(W * H).fill(0xffff);
+      const q: number[] = [goal[1] * W + goal[0]];
+      m[q[0]] = 0;
+      for (let h = 0; h < q.length; h++) {
+        const c = q[h], cx = c % W, cy = (c - cx) / W;
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = ny * W + nx;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          m[k] = m[c] + 1;
+          q.push(k);
+        }
+      }
+      this.distMaps.set(key, m);
+    }
+    const d = m[y * W + x];
+    return d === 0xffff ? Math.abs(goal[0] - x) + Math.abs(goal[1] - y) + 20 : d;
+  }
+
+  /** Group number of the script's current group (only its records can fire). */
+  private activeGroup(): number {
+    const st = this.scene.ctx.vm.state;
+    if (st.block !== this.know.block) return -1;
+    return this.know.stage?.blocks[st.block]?.records[st.group]?.group ?? -1;
+  }
+
+  /** The step the script waits for now (서주 2nd: defeat 89, then 유비 into the south area), or null. */
+  private step(): BattleKnowledge['steps'][number] | null {
+    if (!this.know.steps.length) return null;
+    const g = this.activeGroup();
+    return this.know.steps.find((s) => s.group === g) ?? null;
+  }
+
+  /** Win cells that can fire now: a pending arrival step stands in for them. */
+  private wcells(): BattleKnowledge['winCells'] {
+    const st = this.step();
+    if (!st) return this.know.winCells;
+    return st.trigger === 12 ? [] : [{ officer: st.officer, x0: st.x0, y0: st.y0, x1: st.x1, y1: st.y1 }];
+  }
+
+  private wadj(): BattleKnowledge['winAdj'] {
+    return this.step() ? [] : this.know.winAdj;
+  }
+
+  /** The officer whose defeat moves the battle on now: a pending defeat step, else the victory officer. */
+  private victoryNow(): number | null {
+    const st = this.step();
+    if (st) return st.trigger === 12 ? st.officer : null;
+    return this.know.victory;
+  }
+
+  /** Steps still to do (each needs time in the finish). */
+  private stepsLeft(): number {
+    if (!this.know.steps.length) return 0;
+    const g = this.activeGroup();
+    return this.know.steps.filter((s) => s.group >= g).length;
+  }
+
   private winCell(u: Unit, x: number, y: number): boolean {
-    for (const w of this.know.winCells)
+    for (const w of this.wcells())
       if ((w.officer === u.officer || w.officer === 0x400) && x >= w.x0 && x <= w.x1 && y >= w.y0 && y <= w.y1) return true;
     return false;
   }
 
   /** Where a unit heads in the finish: its winning cell, else the victory officer, else null (nearest enemy). */
   private goalFor(u: Unit): [number, number] | null {
-    const w = this.know.winCells.find((c) => c.officer === u.officer || c.officer === 0x400);
+    const w = this.wcells().find((c) => c.officer === u.officer || c.officer === 0x400);
     if (w) return [(w.x0 + w.x1) >> 1, (w.y0 + w.y1) >> 1];
-    const adj = this.know.winAdj.find((a) => a.actor === u.officer || a.actor === 0x400);
-    const target = adj ? adj.other : this.know.victory;
+    const adj = this.wadj().find((a) => a.actor === u.officer || a.actor === 0x400);
+    const target = adj ? adj.other : this.victoryNow();
     if (target !== null && target !== undefined) {
       const s = this.b.slotOfOfficer(target);
       if (s !== NONE && this.scene.units[s].status === Status.Field) return [this.scene.units[s].x, this.scene.units[s].y];
@@ -891,7 +1058,7 @@ export class GrindPolicy {
 
   /** An adjacency event that ends the battle fires when this unit acts next to its partner. */
   private winAdjacent(u: Unit, x: number, y: number): boolean {
-    for (const a of this.know.winAdj) {
+    for (const a of this.wadj()) {
       if (a.actor !== u.officer && !(a.actor === 0x400 && u.slot < PLAYER_SLOTS)) continue;
       const s = this.b.slotOfOfficer(a.other);
       if (s === NONE || this.scene.units[s].status !== Status.Field) continue;
@@ -916,12 +1083,20 @@ export class GrindPolicy {
     // what the unit is still worth in this battle: its exp to come (losing it ends that)
     const future = 10 + w * Math.min(turnsLeft, 10) * 4;
     // the leader heads only for a winning cell of its own (거록: 유비 reaching the gate wins)
-    const own = this.know.winCells.find((c) => c.officer === u.officer);
+    // ... unless the walk there is a long way round (하비: (0,2) lies past a river, the only way runs
+    // through the enemy's lines; the old win by defeating everyone is the safer one)
+    const own = this.wcells().find((c) => {
+      if (c.officer !== u.officer) return false;
+      if (!guarded) return true;
+      const cx = (c.x0 + c.x1) >> 1, cy = (c.y0 + c.y1) >> 1;
+      return this.pathDist([cx, cy], moveTypeOf(b.s, u), u.x, u.y) <= (Math.abs(cx - u.x) + Math.abs(cy - u.y)) * 1.5 + 6;
+    });
     // ... or an enemy it wins by acting next to (태산: 유비 persuading 이명)
-    const ownAdj = this.know.winAdj.find((a) => a.actor === u.officer);
+    const ownAdj = this.wadj().find((a) => a.actor === u.officer);
     const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
     const goal = !fin ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
-    const vslot = this.know.victory !== null ? b.slotOfOfficer(this.know.victory) : NONE;
+    const vNow = this.victoryNow();
+    const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
     const tactics = castableTactics(o, u.mp, b.learn).filter((t) => !(t < 5 && WEATHER_TYPE[b.info.weather] === RAIN));
@@ -994,7 +1169,9 @@ export class GrindPolicy {
           if (oe.hp * 10 < maxHp(oe) * 3) base -= this.p.conserve * 4;
         }
       let dist = 99;
-      if (goal) dist = Math.abs(goal[0] - x) + Math.abs(goal[1] - y);
+      // walking distance over passable terrain (a manhattan pull leaves units stuck behind walls
+      // and rivers: 서주 2nd, three units waited 20 turns in the corner north of 차주)
+      if (goal) dist = this.pathDist(goal, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);

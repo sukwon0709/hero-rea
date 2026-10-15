@@ -14,6 +14,29 @@
 
 import type { Stage } from '../../formats/scenario';
 import { recordCommands } from '../../native/battle/dev/setup';
+import { ScriptVM } from '../../engine/script';
+
+/**
+ * Byte order of the cells in trigger 6/11 records, as the engine's matcher reads them (probed, so
+ * the planner follows the engine: the original stores x in the high byte, the engine read x from
+ * the low byte until that was fixed).
+ */
+let cellXHigh: boolean | null = null;
+export function eventCellXHigh(): boolean {
+  if (cellXHigh === null) {
+    const m = (ScriptVM.prototype as unknown as { matches(r: unknown, t: unknown): boolean }).matches;
+    try {
+      cellXHigh = !m.call({}, { trigger: 6, p1: 0, p2: (2 << 8) | 1 }, { type: 'unitAt', officer: 0, x: 1, y: 2 });
+    } catch {
+      cellXHigh = true;
+    }
+  }
+  return cellXHigh;
+}
+/** A trigger 6/11 cell parameter as [x, y]. */
+export function cellOf(p: number): [number, number] {
+  return eventCellXHigh() ? [p >> 8, p & 0xff] : [p & 0xff, p >> 8];
+}
 
 export type GainKind = 'bonus' | 'duel' | 'persuade' | 'level' | 'recruit';
 
@@ -89,8 +112,9 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
     const automatic = r.trigger === 0 || r.trigger === 1 || r.trigger === 9 || r.trigger === 8;
     const kind: GainKind = bonus && !levels.length && !recruits.length ? 'bonus' : duel ? 'duel' : r.trigger === 4 && recruits.length ? 'persuade' : levels.length ? 'level' : recruits.length ? 'recruit' : 'bonus';
     let cell: ScriptGain['cell'] = null;
-    if (r.trigger === 6) cell = { x0: r.p2 & 0xff, y0: r.p2 >> 8, x1: r.p2 & 0xff, y1: r.p2 >> 8 };
-    if (r.trigger === 11) cell = { x0: Math.min(r.p2 & 0xff, r.p3 & 0xff), y0: Math.min(r.p2 >> 8, r.p3 >> 8), x1: Math.max(r.p2 & 0xff, r.p3 & 0xff), y1: Math.max(r.p2 >> 8, r.p3 >> 8) };
+    const [ax, ay] = cellOf(r.p2), [bx, by] = cellOf(r.p3);
+    if (r.trigger === 6) cell = { x0: ax, y0: ay, x1: ax, y1: ay };
+    if (r.trigger === 11) cell = { x0: Math.min(ax, bx), y0: Math.min(ay, by), x1: Math.max(ax, bx), y1: Math.max(ay, by) };
     out.push({
       record: r.index,
       trigger: r.trigger,
