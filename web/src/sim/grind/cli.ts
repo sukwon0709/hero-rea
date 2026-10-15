@@ -300,6 +300,15 @@ async function main() {
     // plans of removed emergency variants are not kept (Sukwon: no emergency means)
     const dropped = dropRushPlans(st);
     if (dropped.length) console.log(`dropped plans of removed emergency variants: ${dropped.join('; ')}`);
+    // rules 2: no charge at the enemy leader / escape cell before the last third (regroup instead);
+    // a best run made under older rules is not the reference any more (its plans stay as seeds)
+    const RULES = 2;
+    if ((st.rules ?? 1) < RULES) {
+      if (st.best) console.log(`rules ${RULES}: the best run (cleared ${st.best.campaign.cleared}) was played under older rules; dropped as the reference, its plans kept as seeds`);
+      st.best = null;
+      if (st.restart) st.restart.best = null;
+      st.rules = RULES;
+    }
     const gens = opt('gens', 3), maxPop = opt('pop', 6), variants = opt('variants', 3), workers = opt('workers', 2), limit = opt('limit', 0), rescue = opt('retries', opt('rescue', 10));
     for (let g = 0; g < gens; g++) {
       const t0 = performance.now();

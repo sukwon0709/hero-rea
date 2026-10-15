@@ -629,9 +629,11 @@ export class GrindPolicy {
   }
 
   private killOk(target: number): boolean {
-    if (this.finishing) return true;
     const off = this.scene.units[target].officer;
+    if (this.finishing) return this.charge() || !this.know.protect.has(off);
     if (this.know.protect.has(off)) return false;
+    // regrouping: kill what comes (the leader still spared)
+    if (this.regroupUntil >= this.b.info.turn + 1) return true;
     // bracing against a wave: thin it while it outnumbers us (the grinding resumes on what is left)
     if (this.bracing() && this.enemiesOnField() > this.oursOnField()) return true;
     return this.enemiesOnField() - 1 >= this.p.keep;
@@ -660,8 +662,10 @@ export class GrindPolicy {
   private waves: { turn: number; n: number; at: [number, number][] }[] | null = null;
   private braceUntil = 0;
   private braceAnchor: [number, number] | null = null;
+  private regroupUntil = 0;
   private bracing(): boolean {
-    return this.p.brace > 0.5 && this.braceUntil >= this.b.info.turn + 1 && this.braceAnchor !== null;
+    const t = this.b.info.turn + 1;
+    return this.braceAnchor !== null && ((this.p.brace > 0.5 && this.braceUntil >= t) || this.regroupUntil >= t);
   }
   private updateBrace() {
     if (!(this.p.brace > 0.5) || this.finishing) return;
@@ -869,12 +873,15 @@ export class GrindPolicy {
   private decideFinish() {
     if (this.finishing) return;
     const b = this.b;
-    // bracing: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
-    if (this.bracing()) return;
-    if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const left = this.deadline() - b.info.turn; // turns left including this one
+    // each pending step (defeat X, march into an area) needs about 12 turns of the finish
+    const stepTurns = this.stepsLeft() * 12;
+    const deadlineHit = left <= this.p.finish + stepTurns;
+    // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
+    if (this.bracing() && !deadlineHit) return;
+    if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
-    // going badly (the leader hurt, a third of the units gone): stop grinding and win now
+    // going badly (the leader hurt, a third of the units gone)
     // our own officers only: allied armies under the computer (거록: 공손월's men) fall without it meaning much
     const mine = this.scene.units
       .slice(0, PLAYER_SLOTS)
@@ -886,16 +893,46 @@ export class GrindPolicy {
     // safely until the event; the danger costs already pull a hurt leader back
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
     if (survive) return;
-    // each pending step (defeat X, march into an area) needs about 12 turns of the finish
-    const stepTurns = this.stepsLeft() * 12;
-    if (left <= this.p.finish + stepTurns || !needy || this.idleTurns >= 8 || leaderHurt || losses) {
+    // before the last third, going badly means defend and regroup (Sukwon: no fast win by the
+    // 총대장 alone, no emergency means): pull back around 유비 on good terrain, heal, kill what
+    // comes; never head for the enemy leader or the escape cell (연주: the defensive plan charged
+    // 곽도 at turn 7 from here)
+    if ((leaderHurt || losses) && !deadlineHit && !this.lateThird()) {
+      const turn = b.info.turn + 1;
+      if (this.regroupUntil < turn) {
+        this.braceAnchor = this.pickBraceAnchor();
+        this.log?.(`regroup: ${leaderHurt ? 'leader hurt' : 'losses'} at turn ${turn}${this.braceAnchor ? ` around ${this.braceAnchor[0]},${this.braceAnchor[1]}` : ''}`);
+      }
+      this.regroupUntil = turn + 1;
+      return;
+    }
+    if (deadlineHit || !needy || this.idleTurns >= 8 || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
-      this.stats.finishReason = left <= this.p.finish + stepTurns ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';
+      this.stats.finishReason = deadlineHit ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';
       this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
     }
   }
+
+  /** The last third of the battle (turn limit, or a losing turn event before it). */
+  private lateThird(): boolean {
+    const lim = Math.min(this.b.info.turnLimit, this.know.deadline ?? 999);
+    return (this.b.info.turn + 1) * 3 >= lim * 2;
+  }
+
+  /**
+   * The finish may go for the enemy leader / the escape cell / a battle-ending event only in the
+   * last third, once few enemies remain (a rout), or when the script's pending steps need the time
+   * (서주 2nd); otherwise the finish routs: nearest enemies, the leader spared (Sukwon).
+   */
+  private charge(): boolean {
+    if (!this.finishing) return false;
+    if (this.lateThird() || this.enemiesOnField() <= 3) return true;
+    const stepTurns = this.stepsLeft() * 12;
+    return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
+  }
+
 
   // ---- threat map: which enemies can attack each cell next phase
 
@@ -1279,7 +1316,8 @@ export class GrindPolicy {
     // ... or an enemy it wins by acting next to (태산: 유비 persuading 이명)
     const ownAdj = this.wadj().find((a) => a.actor === u.officer);
     const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
-    const goal = !fin ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    const chg = this.charge();
+    const goal = !fin || !chg ? null : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -1326,7 +1364,7 @@ export class GrindPolicy {
     const gg = !fin ? this.gainGoal(u) : null;
     const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
     for (const [x, y] of this.reachable(u)) {
-      if (!fin && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
+      if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       const dang = this.danger(u, x, y);
@@ -1377,7 +1415,7 @@ export class GrindPolicy {
       if (this.p.terrain) base += this.terrainValue(u, x, y, hp, max);
       if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
-      if (fin && this.winAdjacent(u, x, y)) base += 400;
+      if (chg && this.winAdjacent(u, x, y)) base += 400;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
       if (!fin && this.know.treasure.some((t) => t.x === x && t.y === y && (t.officer === u.officer || t.officer === 0x400) && !this.looted.has(y * b.width + x))) base += 40;
       if (base > best.value) best = { slot, x, y, kind: 'wait', target: NONE, tactic: NONE, value: base, exp: 0, lethal: false, danger: dang.worst };
@@ -1405,7 +1443,7 @@ export class GrindPolicy {
           const hit = combatExp(true, o.level, od.level, false, d);
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
-          if (fin) v += w * all + (d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
+          if (fin) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
           else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od));
           v += kg;
           // leave the leader a safe finishing blow: soften what it can kill from a guarded cell, and do not take it
@@ -1440,7 +1478,7 @@ export class GrindPolicy {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
         let v = base + a.value - this.p.mp * TACTIC_MP[tc];
-        if (fin && a.target === vslot && tc <= 14) v += 300;
+        if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value) best = { slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal };
       }
       // items (ab86): promotions, troop heals, bombs
@@ -1448,7 +1486,7 @@ export class GrindPolicy {
         const a = this.itemValue(u, it.id, x, y, w, guarded);
         if (!a) continue;
         let v = base + a.value;
-        if (fin && a.target === vslot) v += 300;
+        if (chg && a.target === vslot) v += 300;
         if (v > best.value) best = { slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal };
       }
     }

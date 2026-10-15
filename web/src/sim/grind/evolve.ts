@@ -63,6 +63,8 @@ export interface EvolveState {
   eliteAge?: Record<number, number>;
   /** The parameters the learning started from (defaults + hints.json defaults). */
   start?: GrindParams;
+  /** Rules the best run was played under (cli.ts RULES): a best made under older rules is dropped. */
+  rules?: number;
   /** A full restart in progress: its own lineage, kept for several generations (cli.ts). */
   restart?: RestartLineage;
 }
