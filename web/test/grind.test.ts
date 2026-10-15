@@ -46,4 +46,40 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     expect(duel).toBeDefined();
     expect(duel!.gives).toContain('Lv+1');
   }, 300_000);
+
+  it('회남 plan: on at 회남 with the defaults (holds north-east, 유비 never walks out on a hopeless way), off without the keys', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    let snap = null;
+    for (let n = 0; n < 20 && !snap; n++) {
+      const s = await scenarioSnapshot(files, 1, n, 4242);
+      if (s.stage === 2 && s.block === 12) snap = s;
+    }
+    expect(snap).not.toBeNull();
+    const lines: string[] = [];
+    const o = await runGrindBattle(files, snap!, defaultParams(), null, (l) => lines.push(l));
+    expect(lines.some((l) => l.startsWith('회남 plan: hold near 21,8'))).toBe(true);
+    // the escape starts only on a clear way, never as a last-turns walk through the enemy
+    for (const l of lines.filter((x) => x.startsWith('finish: escape'))) expect(l).toMatch(/finish: escape at turn \d+/);
+    expect(o.turns).toBeLessThanOrEqual(o.turnLimit);
+    const off = Object.fromEntries(Object.entries(defaultParams()).filter(([k]) => !k.startsWith('hn'))) as ReturnType<typeof defaultParams>;
+    const lines2: string[] = [];
+    await runGrindBattle(files, snap!, off, null, (l) => lines2.push(l));
+    expect(lines2.some((l) => l.startsWith('회남 plan'))).toBe(false);
+  }, 600_000);
+
+  it('회남 plan stays off elsewhere (사수관 plays the same with and without the keys)', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const off = Object.fromEntries(Object.entries(defaultParams()).filter(([k]) => !k.startsWith('hn'))) as ReturnType<typeof defaultParams>;
+    const a = await runGrindBattle(files, snap, defaultParams());
+    const b = await runGrindBattle(files, snap, off);
+    // (the outcome echoes the parameters: compare the play)
+    expect({ ...b, ms: 0, params: null }).toEqual({ ...a, ms: 0, params: null });
+  }, 300_000);
 });

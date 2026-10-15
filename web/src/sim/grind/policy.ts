@@ -128,6 +128,31 @@ export interface GrindParams {
   bonusExit: number;
   /** Above 0.5: an enemy 군악대 is not killed while grinding (it gives our neighbours MP too, 7cc8). Absent: off. */
   spareBand: number;
+  /**
+   * 회남 (ch1 stage 2 block 12) stage plan, above 0.5 (the default there; absent in older plans:
+   * off): hold a formation in the north-east around (hnX, hnY) against the turn-5 wave, then peel
+   * the waiting southern units one at a time at the bridge (only the nearest one's reach entered),
+   * then walk 유비 to (0,2) when the way is clear and the turns left just cover it.
+   */
+  hnPlan: number;
+  /** 회남 plan: the hold anchor's column. */
+  hnX: number;
+  /** 회남 plan: the hold anchor's row. */
+  hnY: number;
+  /** 회남 plan: the turn the peeling starts at the latest (earlier once the wave is down to hnWave units). */
+  hnPeel: number;
+  /** 회남 plan: wave units left that count as the wave being dead. */
+  hnWave: number;
+  /** 회남 plan: cells kept between us and the reach of the waiting units other than the one being peeled. */
+  hnReach: number;
+  /** 회남 plan: steps the peel anchor stays back from the furthest cell outside the others' reach. */
+  hnBack: number;
+  /** 회남 plan: share of the troops the formation heals back to (pulled back) before the next peel. */
+  hnRest: number;
+  /** 회남 plan: cells the front line (not the healers / band) stands out from the anchor towards the chasing enemies. */
+  hnFront: number;
+  /** 회남 plan: focus fire, the pull towards hitting the most hurt enemy and finishing it. */
+  hnFocus: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -212,7 +237,25 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'scrolls', min: 0, max: 4, def: 2, int: true },
   { key: 'bonusExit', min: 0, max: 1, def: 0.6 },
   { key: 'spareBand', min: 0, max: 1, def: 0.4 },
+  { key: 'hnPlan', min: 0, max: 1, def: 0.6 },
+  { key: 'hnX', min: 15, max: 23, def: 21, int: true },
+  { key: 'hnY', min: 3, max: 12, def: 8, int: true },
+  { key: 'hnPeel', min: 8, max: 26, def: 18, int: true },
+  { key: 'hnWave', min: 0, max: 5, def: 1, int: true },
+  { key: 'hnReach', min: 0, max: 3, def: 1, int: true },
+  { key: 'hnBack', min: 0, max: 3, def: 0, int: true },
+  { key: 'hnRest', min: 0.4, max: 1, def: 0.75 },
+  { key: 'hnFront', min: 0, max: 2, def: 1, int: true },
+  { key: 'hnFocus', min: 0, max: 2, def: 1 },
 ];
+
+/** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
+const HN_TRAP = [3, 10, 9, 13] as const;
+
+/** 회남: chapter 1 stage 2 block 12 (the map table calls it 하비). */
+export function isHuainan(k: Pick<BattleKnowledge, 'stage' | 'block'>): boolean {
+  return k.stage?.chapter === 1 && k.stage?.index === 2 && k.block === 12;
+}
 
 export function defaultParams(): GrindParams {
   const p = {} as GrindParams;
@@ -920,6 +963,7 @@ export class GrindPolicy {
     this.updateBrace();
     this.decideFinish();
     this.buildThreat();
+    this.updateHn();
     this.buildLeaderKills();
     // the leader moves last: the enemies' reach is then computed with the others where they ended up
     // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
@@ -955,6 +999,187 @@ export class GrindPolicy {
     }
   }
 
+  // ---- 회남 plan (GrindParams.hnPlan): hold north-east, peel the waiting south at the bridge, escape
+
+  /** The 회남 block (ch1 stage 2 block 12) with the plan on (absent in older plans: off). */
+  private hnMemo: boolean | undefined = undefined;
+  private hnOn(): boolean {
+    if (this.hnMemo === undefined) this.hnMemo = !!(this.p.hnPlan > 0.5) && isHuainan(this.know);
+    return this.hnMemo;
+  }
+  private hnPhase: 'hold' | 'peel' | 'escape' = 'hold';
+  /** The waiting unit being peeled (its officer), until it falls. */
+  private hnTarget: number | null = null;
+  /** Cells the plan keeps out of (the reach of waiting units it is not peeling, widened by hnReach). */
+  private hnBan: Uint8Array | null = null;
+  /** Anchors: the formation's, 유비's (behind it while peeling), and the front line's (towards the wave). */
+  private hnAnchor: [number, number] | null = null;
+  private hnLeaderAnchor: [number, number] | null = null;
+  private hnFrontAt: [number, number] | null = null;
+  /** The cell where one of ours wakes the target alone (inside its reach only). */
+  private hnBait: [number, number] | null = null;
+  private hnTrapFired = false;
+  private hnWaveOffs: number[] | null = null;
+
+  /** An enemy that sits until we come in reach (대기), or walks to a cell (the turn-6 order): not chasing us. */
+  private sleeping(e: Unit): boolean {
+    return e.status === Status.Field && e.officer !== 0xffff && (e.mode === AiMode.Wait || e.mode === AiMode.MoveTo);
+  }
+
+  private hnEsc(): boolean {
+    return this.hnOn() && this.finishing && this.stats.finishReason === 'escape' && !!this.exitPlan;
+  }
+
+  /** Healers and the band stay inside the formation; the others form its front. */
+  private hnInner(u: Unit): boolean {
+    const o = this.b.officerOf(u);
+    if (o.cls === 12) return true;
+    return castableTactics(o, 999, this.b.learn).some((t) => t >= 21 && t <= 35);
+  }
+
+  /** Steps from `from` to `to` over the terrain (our leader's move type), as a cell list. */
+  private hnPath(from: [number, number], to: [number, number], mt: number): [number, number][] {
+    const b = this.b;
+    const W = b.width;
+    const out: [number, number][] = [];
+    let [x, y] = from;
+    out.push([x, y]);
+    for (let guard = 0; guard < W * b.height && (x !== to[0] || y !== to[1]); guard++) {
+      const d = this.pathDist(to, mt, x, y);
+      let nx = x, ny = y;
+      for (const [cx, cy] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
+        if (cx < 0 || cy < 0 || cx >= W || cy >= b.height || moveCost(mt, b.s.terrain[cy * W + cx]) === 0xff) continue;
+        if (this.pathDist(to, mt, cx, cy) < d) [nx, ny] = [cx, cy];
+      }
+      if (nx === x && ny === y) break;
+      [x, y] = [nx, ny];
+      out.push([x, y]);
+    }
+    return out;
+  }
+
+  /** At each player phase: the phase (hold -> peel), the target, the banned cells and the anchors. */
+  private updateHn() {
+    if (!this.hnOn() || this.finishing || !this.exitPlan) return;
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const turn = b.info.turn + 1;
+    const units = this.scene.units;
+    const ls = b.slotOfOfficer(0);
+    const L = ls !== NONE ? units[ls] : null;
+    if (!L || L.status !== Status.Field) return;
+    const mt = moveTypeOf(b.s, L);
+    if (L.x >= HN_TRAP[0] && L.x <= HN_TRAP[2] && L.y >= HN_TRAP[1] && L.y <= HN_TRAP[3]) this.hnTrapFired = true;
+    if (this.hnWaveOffs === null) {
+      this.hnWaveOffs = [];
+      for (const e of this.know.turns) if (e.turn !== null && e.reinforce.length >= 4) this.hnWaveOffs.push(...e.reinforce);
+    }
+    const waveIn = this.know.turns.some((e) => e.turn !== null && e.reinforce.length >= 4 && e.turn <= turn);
+    const waveLeft = this.hnWaveOffs.filter((off) => {
+      const i = b.slotOfOfficer(off);
+      return i !== NONE && i >= PLAYER_SLOTS && units[i].status === Status.Field;
+    }).length;
+    const hold = this.exitPlan.anchor;
+    if (this.hnPhase === 'hold' && ((waveIn && waveLeft <= this.p.hnWave) || turn >= this.p.hnPeel)) {
+      this.hnPhase = 'peel';
+      this.log?.(`회남: peel from turn ${turn} (wave left ${waveLeft})`);
+    }
+    // the target: the waiting unit nearest the hold anchor by walking, kept until it falls
+    if (this.hnPhase === 'peel') {
+      const ts = this.hnTarget !== null ? b.slotOfOfficer(this.hnTarget) : NONE;
+      if (ts === NONE || units[ts].status !== Status.Field) {
+        this.hnTarget = null;
+        let bd = 1e9;
+        for (const e of units.slice(PLAYER_SLOTS)) {
+          if (!this.sleeping(e)) continue;
+          const d = this.pathDist(hold, mt, e.x, e.y);
+          if (d < bd) [bd, this.hnTarget] = [d, e.officer];
+        }
+        if (this.hnTarget !== null) this.log?.(`회남: peel target ${this.hnTarget} at turn ${turn}`);
+      }
+    }
+    const ts = this.hnTarget !== null ? b.slotOfOfficer(this.hnTarget) : NONE;
+    const T = ts !== NONE && units[ts].status === Status.Field ? units[ts] : null;
+    // healing up between peels: the target's reach is banned too while it still waits
+    const mine = units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff);
+    let hp = 0, max = 0;
+    for (const u of mine) {
+      hp += b.officerOf(u).hp;
+      max += maxHp(b.officerOf(u));
+    }
+    const resting = this.hnPhase === 'peel' && hp < max * this.p.hnRest && !!T && this.sleeping(T);
+    // the banned cells: where a waiting unit (not the target, unless resting) would see one of ours
+    const ban = new Uint8Array(W * H);
+    for (let k = 0; k < W * H; k++) {
+      for (const i of [...(this.threat[k] ?? []), ...(this.tthreat[k] ?? [])]) {
+        const e = units[i];
+        if (!this.sleeping(e) || (e === T && !resting)) continue;
+        ban[k] = 1;
+        break;
+      }
+    }
+    for (let r = 0; r < this.p.hnReach; r++) {
+      const prev = ban.slice();
+      for (let k = 0; k < W * H; k++) {
+        if (!prev[k]) continue;
+        const x = k % W, y = (k - x) / W;
+        for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) if (nx >= 0 && ny >= 0 && nx < W && ny < H) ban[ny * W + nx] = 1;
+      }
+    }
+    this.hnBan = ban;
+    this.hnBait = null;
+    if (this.hnPhase === 'hold' || !T) {
+      this.hnAnchor = hold;
+      this.hnLeaderAnchor = hold;
+    } else {
+      // along the way from the hold anchor to the target: the furthest cell before the first banned one, hnBack back
+      const path = this.hnPath(hold, [T.x, T.y], mt);
+      let safe = path.length - 2;
+      for (let i = 0; i < path.length - 1; i++)
+        if (ban[path[i][1] * W + path[i][0]]) {
+          safe = i - 1;
+          break;
+        }
+      safe = Math.max(0, safe);
+      const at = Math.max(0, safe - this.p.hnBack - (resting ? 3 : 0));
+      this.hnAnchor = path[at];
+      // the bait: the furthest safe cell, when the target (still waiting) sees it
+      const bk = path[safe][1] * W + path[safe][0];
+      if (!resting && this.sleeping(T) && [...(this.threat[bk] ?? []), ...(this.tthreat[bk] ?? [])].includes(T.slot)) this.hnBait = path[safe];
+      this.hnLeaderAnchor = path[Math.max(0, at - 3)];
+    }
+    // the front: hnFront cells from the anchor towards the chasing enemies' middle (two cells out, the
+    // wave overran it: 4 of 4 seeds lost by turn 16; one cell: 16 of 20 seeds to turn 30, none 14)
+    const awake = units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && e.officer !== 0xffff && !this.sleeping(e));
+    this.hnFrontAt = this.hnAnchor;
+    if (awake.length && this.hnAnchor) {
+      const cx = awake.reduce((a, e) => a + e.x, 0) / awake.length - this.hnAnchor[0];
+      const cy = awake.reduce((a, e) => a + e.y, 0) / awake.length - this.hnAnchor[1];
+      const n = Math.hypot(cx, cy);
+      const f = this.p.hnFront;
+      if (n > 0 && f > 0) this.hnFrontAt = [Math.round(this.hnAnchor[0] + (f * cx) / n), Math.round(this.hnAnchor[1] + (f * cy) / n)];
+    }
+    this.braceAnchor = this.hnAnchor;
+    if (this.hnPhase === 'peel') this.log?.(`회남: T${turn} anchor ${this.hnAnchor?.join(',')} leader ${this.hnLeaderAnchor?.join(',')}${resting ? ' (healing)' : ''}${T ? ` target ${T.officer}@${T.x},${T.y} m${T.mode}` : ''}`);
+  }
+
+  /** 유비 may enter the trap strip (all enemies turn on him) only when he reaches (0,2) before any of them. */
+  private hnTrapOk(u: Unit, x: number, y: number): boolean {
+    if (this.hnTrapFired || x < HN_TRAP[0] || x > HN_TRAP[2] || y < HN_TRAP[1] || y > HN_TRAP[3] || !this.exitPlan) return true;
+    const b = this.b;
+    const cell = this.exitPlan.cell;
+    const mp = Math.max(1, movePoints(b.officerOf(u), b.s.items));
+    const lt = Math.ceil(this.pathDist(cell, moveTypeOf(b.s, u), x, y) / mp);
+    if (lt > this.deadline() - b.info.turn - 1) return false;
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
+      if (e.status !== Status.Field || e.officer === 0xffff) continue;
+      const emp = Math.max(1, movePoints(b.officerOf(e), b.s.items));
+      const ct = Math.ceil(Math.max(0, this.pathDist(cell, moveTypeOf(b.s, e), e.x, e.y) - 2) / emp);
+      if (ct < lt) return false;
+    }
+    return true;
+  }
+
   // ---- exit plan (하비): outnumbered 2:1 with an escape cell for 유비 -> hold near it, escape last
 
   /** undefined: not decided yet; null: no exit plan in this battle. */
@@ -964,12 +1189,29 @@ export class GrindPolicy {
     if (this.exitPlan !== undefined) return;
     this.exitPlan = null;
     const pv = (k: 'exit' | 'exitMargin' | 'exitNear') => (Number.isFinite(this.p[k]) ? this.p[k] : PARAM_SPECS.find((sp) => sp.key === k)!.def);
-    if (!(pv('exit') > 0.5)) return;
     const b = this.b;
     const ls = b.slotOfOfficer(0);
     const L = ls !== NONE ? this.scene.units[ls] : null;
     if (!L || L.status !== Status.Field) return;
     const w = this.know.winCells.find((c) => c.officer === 0 || c.officer === 0x400);
+    if (this.hnOn() && w) {
+      // 회남: the hold anchor is learned (hnX, hnY), snapped to the nearest cell 유비 can walk to
+      const mt0 = moveTypeOf(b.s, L);
+      let best: [number, number] | null = null, bd = 1e9;
+      for (let y = 0; y < b.height; y++)
+        for (let x = 0; x < b.width; x++) {
+          if (moveCost(mt0, b.s.terrain[y * b.width + x]) === 0xff || !this.reaches([L.x, L.y], mt0, x, y)) continue;
+          const d = Math.abs(x - this.p.hnX) + Math.abs(y - this.p.hnY);
+          if (d < bd) [bd, best] = [d, [x, y]];
+        }
+      if (best) {
+        this.exitPlan = { cell: [w.x0, w.y0], anchor: best };
+        this.braceAnchor = best;
+        this.log?.(`회남 plan: hold near ${best[0]},${best[1]}, peel the waiting units at the bridge, escape to ${w.x0},${w.y0}`);
+        return;
+      }
+    }
+    if (!(pv('exit') > 0.5)) return;
     // only where the arrival (or a wipe-out) is the way to win: no officer to defeat, no script steps
     if (!w || this.know.steps.length || this.know.victory !== null) return;
     const ours = this.oursOnField();
@@ -1036,7 +1278,7 @@ export class GrindPolicy {
    * Turns 유비 needs to reach the exit cell now: move costs over the terrain, enemy units block,
    * a cell next to an enemy (zone of control) ends the move (costs a whole turn).
    */
-  private exitTurns(cell: [number, number] | undefined = this.exitPlan?.cell): number {
+  private exitTurns(cell: [number, number] | undefined = this.exitPlan?.cell, free = false): number {
     const plan = cell ? { cell } : null;
     const b = this.b;
     const ls = b.slotOfOfficer(0);
@@ -1048,7 +1290,7 @@ export class GrindPolicy {
     const zoc = new Uint8Array(W * H);
     const blocked = new Uint8Array(W * H);
     for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
-      if (e.status !== Status.Field) continue;
+      if (e.status !== Status.Field || free) continue;
       blocked[e.y * W + e.x] = 1;
       for (const [nx, ny] of [[e.x, e.y - 1], [e.x + 1, e.y], [e.x, e.y + 1], [e.x - 1, e.y]]) if (nx >= 0 && ny >= 0 && nx < W && ny < H) zoc[ny * W + nx] = 1;
     }
@@ -1144,7 +1386,10 @@ export class GrindPolicy {
       const need = this.exitTurns();
       const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
       // a way longer than the turns left (enemies in it) is not taken yet: hold on, it may clear
-      if ((left <= need + margin && need <= left) || left <= 3) {
+      // (회남: never a hopeless walk out at the end; 유비 stays covered and the turns are used)
+      // 회남: only once peeling and the way is clear (enemies on it would cost 유비 more than a turn)
+      const clear = !this.hnOn() || (this.hnPhase === 'peel' && need <= this.exitTurns(this.exitPlan.cell, true) + 1);
+      if ((left <= need + margin && need <= left && clear) || (left <= 3 && !this.hnOn())) {
         this.finishing = true;
         this.stats.finishTurn = b.info.turn + 1;
         this.stats.finishReason = 'escape';
@@ -1671,7 +1916,7 @@ export class GrindPolicy {
     const walkIn = guarded && u.officer === 0 && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
     // ... and the others clear the way there (the guards of the cell), leaving the spared leader be
     const walkAll = !walkIn && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
-    const goal = !fin || !chg ? null : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    const goal = !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -1722,15 +1967,25 @@ export class GrindPolicy {
     const vic = this.know.victory;
     const vs = vic !== null && this.spared(vic) && this.ownDuel(u, vic) ? b.slotOfOfficer(vic) : NONE;
     const avoid = vs !== NONE && this.scene.units[vs].status === Status.Field ? this.scene.units[vs] : null;
+    // 회남 plan: banned cells and the unit's own anchor (유비 behind, healers / band inside, the rest in front)
+    const hnEsc = this.hnEsc();
+    const hnLive = this.hnOn() && !fin && !!this.exitPlan;
+    const hnBan = hnLive ? this.hnBan : null;
+    const hnAnc = !hnLive ? null : guarded ? this.hnLeaderAnchor : this.hnInner(u) ? this.hnAnchor : this.hnFrontAt;
     for (const [x, y] of this.reachable(u)) {
       if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
+      if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
       // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
       const dang = chg && (this.winAdjacent(u, x, y) || this.winCell(u, x, y)) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y);
       let base = -deathCost(dang, 1);
+      // 회남: keep out of the reach of the waiting units not being peeled
+      if (hnBan && hnBan[y * b.width + x]) base -= 300;
+      // ... and wake the target alone: someone sturdy stands where only it can reach
+      if (hnLive && !guarded && this.hnBait && this.hnBait[0] === x && this.hnBait[1] === y) base += 30 * (hp / Math.max(1, max));
       const t = terrainAt(b.s, x, y);
       if (hp < max * this.p.retreat && (t === 8 || t === 13 || t === 14)) base += 6;
       // stand next to allies: fewer sides open to the enemy
@@ -1760,11 +2015,13 @@ export class GrindPolicy {
       else if (this.p.walk > 0.5) dist = this.foeDist(enemies, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
-      const anc = !fin && this.holding() ? this.anchorNow() : null;
+      const anc = !fin && this.holding() ? (hnAnc ?? this.anchorNow()) : null;
       if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
         const da = this.bracing() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
-        base -= 4 * Math.max(0, da - (guarded ? 1 : 2));
+        // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east
+        // corner away from the wave and was cut off there, 3 of 10 seeds lost at turn 14)
+        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else {
@@ -1815,6 +2072,8 @@ export class GrindPolicy {
           let v = base;
           if (fin) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
           else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od));
+          // 회남: focus fire (the hurt enemy first: the wave thins faster, fewer hit back)
+          if (hnLive) v += this.p.hnFocus * (20 * (1 - od.hp / Math.max(1, maxHp(od))) + (lethal ? 15 : 0));
           v += kg;
           // leave the leader a safe finishing blow: soften what it can kill from a guarded cell, and do not take it
           if (feeding && this.leaderKills.has(d)) {

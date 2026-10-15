@@ -66,6 +66,27 @@ describe('grind params: the namu.wiki techniques', () => {
   });
 });
 
+describe('grind params: the 회남 plan', () => {
+  it('on by default for new plans, off (NaN) for plans made before it; only 회남 (ch1 stage 2 block 12) takes it', async () => {
+    const { defaultParams, clampParams, isHuainan, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(d.hnPlan).toBeGreaterThan(0.5);
+    expect([d.hnX, d.hnY]).toEqual([21, 8]);
+    const keys = PARAM_SPECS.map((s) => s.key).filter((k) => k.startsWith('hn'));
+    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus']);
+    const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('hn'))) as unknown as typeof d);
+    for (const k of keys) expect(Number.isNaN(old[k])).toBe(true);
+    // NaN never turns the plan on
+    expect(old.hnPlan > 0.5).toBe(false);
+    const st = (chapter: number, index: number) => ({ chapter, index }) as never;
+    expect(isHuainan({ stage: st(1, 2), block: 12 })).toBe(true);
+    expect(isHuainan({ stage: st(1, 2), block: 5 })).toBe(false);
+    expect(isHuainan({ stage: st(1, 3), block: 12 })).toBe(false);
+    expect(isHuainan({ stage: st(2, 2), block: 12 })).toBe(false);
+    expect(isHuainan({ block: 12 })).toBe(false);
+  });
+});
+
 describe('grind battle names', () => {
   it('story names for the battles whose map name differs (회남, 하비, 서주공방전)', async () => {
     const { storyName, applyStoryNames } = await import('../src/sim/grind/names');
