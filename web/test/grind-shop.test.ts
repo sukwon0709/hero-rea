@@ -73,7 +73,7 @@ describe('grind params: the 회남 plan', () => {
     expect(d.hnPlan).toBeGreaterThan(0.5);
     expect([d.hnX, d.hnY]).toEqual([21, 8]);
     const keys = PARAM_SPECS.map((s) => s.key).filter((k) => k.startsWith('hn'));
-    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak']);
+    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak', 'hnMaxLv']);
     const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('hn'))) as unknown as typeof d);
     for (const k of keys) expect(Number.isNaN(old[k])).toBe(true);
     // NaN never turns the plan on
@@ -105,6 +105,19 @@ describe('grind: the best losing try and the frontier bonus', () => {
     expect(frontierBonus({ won: false, turns: 30, lostExp: 1000 })).toBe(340);
     expect(frontierBonus({ won: false, turns: 30, lostExp: 1000 })).toBeGreaterThan(frontierBonus({ won: false, turns: 13, lostExp: 300 }));
     expect(frontierBonus({ won: false, turns: 50, lostExp: 5000 })).toBeLessThan(CLEARED_WEIGHT / 1000);
+  });
+});
+
+describe('grind: 회남 plan only for a weaker party (hnMaxLv)', () => {
+  it('top-9 average of our faction below hnMaxLv; absent: always', async () => {
+    const { hnWeakParty, defaultParams } = await import('../src/sim/grind/policy');
+    const mk = (levels: number[]) => ({ officers: Array.from({ length: 0x100 }, (_, i) => ({ dyn: { level: levels[i] ?? 1, flags: i < levels.length ? 0x81 : 0 } })) }) as never;
+    const p = { ...defaultParams(), hnMaxLv: 19 };
+    expect(hnWeakParty(mk([15, 15, 15, 15, 15, 15, 15, 15, 15, 30]), p)).toBe(true); // (30 + 8 x 15) / 9 = 16.7
+    expect(hnWeakParty(mk([20, 20, 20, 20, 20, 20, 20, 20, 20, 5]), p)).toBe(false);
+    const old = { ...p } as Record<string, unknown>;
+    delete old.hnMaxLv;
+    expect(hnWeakParty(mk([40, 40, 40]), old as never)).toBe(true);
   });
 });
 

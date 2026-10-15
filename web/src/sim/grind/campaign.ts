@@ -34,6 +34,9 @@ export interface CampaignBattle {
   ms: number;
   /** For a battle nothing won: how many tries ended for each reason. */
   lossReasons?: Record<string, number>;
+  /** Sim-only replays of this won battle (GrindParams.farmRuns; not the game) and the exp they added. */
+  replays?: number;
+  replayExp?: number;
   /** For a battle nothing won: the exp of the best losing try (the longest held, then the most exp; not carried on). */
   lostExp?: number;
   /** Bought at the merchants before this battle. */
@@ -325,6 +328,26 @@ export async function runCampaign(
       lastMoney = carry?.money ?? snap.state.progress.money;
       carry = { officers: carry?.officers ?? null, formation: carry?.formation };
     }
+    // sim-only farming (GrindParams.farmRuns, Sukwon: "앞 전투 다시해도 되"; the game itself keeps
+    // nothing on 총퇴각): a won battle among the three before the wall is played again from the
+    // levels it left, with its winning plan, until the top-9 average at the wall reaches farmLv
+    let replays = 0, replayExp = 0;
+    const wall = o.levelGate?.battle ?? o.extra?.battle;
+    if (b.won && wall !== undefined && wall < list.length && k < wall && k >= wall - 3 && params.farmRuns > 0 && Number.isFinite(params.farmLv)) {
+      const lv0 = topLevel(list[wall], lastOfficers, 9);
+      while (replays < params.farmRuns && topLevel(list[wall], lastOfficers, 9) < params.farmLv) {
+        const rc: CarryState = { officers: lastOfficers, money: lastMoney, formation: b.formationOut ?? carry?.formation };
+        const r = await searchBattle(files, snap, b.params, rc, 1, rng, undefined, 0);
+        battlesRun += r.tried.length;
+        if (!r.best.won) break;
+        replays++;
+        replayExp += r.best.expTotal;
+        lastOfficers = r.best.officersAfter;
+        lastMoney = r.best.moneyAfter;
+        for (const g of r.best.gains) if (g.levelAfter >= 99 && !reached.has(g.officer)) reached.set(g.officer, k);
+      }
+      if (replays) o.log?.(`  [${k}] ${snap.name}: replayed ${replays}x (sim-only, not the game), +${replayExp} exp, top-9 at [${wall}] Lv${lv0.toFixed(1)} -> Lv${topLevel(list[wall], lastOfficers, 9).toFixed(1)}`);
+    }
     for (const g of b.gains) if (b.won && g.levelAfter >= 99 && !reached.has(g.officer)) reached.set(g.officer, k);
     out.push({
       index: k,
@@ -349,6 +372,8 @@ export async function runCampaign(
       attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
       script: b.script,
       lostExp: !b.won ? b.expTotal : undefined,
+      replays: replays || undefined,
+      replayExp: replays ? replayExp : undefined,
       lossReasons: !b.won ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
     o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
@@ -394,7 +419,7 @@ export async function runCampaign(
     n99,
     top15,
     // the team's exp (/25) and 유비's level (x50) count too (Sukwon: raise him with the team; more exp beats a rushed clear)
-    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal, 0) / 25) + 50 * (lastOfficers[0]?.level ?? 0)) + frontierBonus(out[out.length - 1]),
+    objective: progressObjective(out.filter((b) => b.won).length, n99, top15, Math.round(out.reduce((a, b) => a + b.expTotal + (b.replayExp ?? 0), 0) / 25) + 50 * (lastOfficers[0]?.level ?? 0)) + frontierBonus(out[out.length - 1]),
     cleared: out.filter((b) => b.won).length,
     frontier,
     wins: out.filter((b) => b.won).length,
