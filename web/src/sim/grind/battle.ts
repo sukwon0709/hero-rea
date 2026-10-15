@@ -9,7 +9,7 @@ import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
-import { GrindPolicy, analyseBattle, clampParams, hnWeakParty, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
+import { GrindPolicy, analyseBattle, clampParams, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
   officer: number;
@@ -124,7 +124,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       const recs = fi.hexFormation ? fi.records : fi.records.filter((r) => !(script.units[r].flags & 1));
       const free = recs.length;
       // 회남 plan (with hnWeak): close-combat units and the strongest go out, weak archers stay behind
-      const hn = params.hnPlan > 0.5 && Number.isFinite(params.hnWeak) && isHuainanAt(snap.chapter, snap.stage, snap.block) && hnWeakParty(state, params);
+      const hn = params.hnPlan > 0.5 && Number.isFinite(params.hnWeak) && isHuainanAt(snap.chapter, snap.stage, snap.block);
       const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0, params.healers, learn);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];

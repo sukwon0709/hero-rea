@@ -158,21 +158,6 @@ export interface GrindParams {
    * and keep out of reach (the sortie also takes the strongest officers there, not the lowest).
    */
   hnWeak: number;
-  /**
-   * Sim-only, NOT the game (Sukwon allowed it: "앞 전투 다시해도 되"): each of the three battles
-   * before the wall is played again up to this many times from the levels it left, keeping the exp
-   * (in MAIN.EXE 총퇴각 reloads the officer records saved at the battle start, 0cf5:a9e7 -> adb4,
-   * so nothing is kept there). Absent (older plans): off.
-   */
-  farmRuns: number;
-  /**
-   * 회남 plan only for a weaker party: our top-9 average level at or above this plays the battle the
-   * usual way (exit plan, push through: arriving at Lv19.4 that won 5 of 10 seeds, the hold 0 of 10;
-   * at Lv15.3 the usual way lost all 10, the hold held all 10 to turn 30). Absent: no gate.
-   */
-  hnMaxLv: number;
-  /** Sim-only replays stop once the top-9 average level at the wall reaches this. */
-  farmLv: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -268,9 +253,6 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnFront', min: 0, max: 2, def: 1, int: true },
   { key: 'hnFocus', min: 0, max: 2, def: 1 },
   { key: 'hnWeak', min: 1, max: 8, def: 3, int: true },
-  { key: 'farmRuns', min: 0, max: 8, def: 8, int: true },
-  { key: 'farmLv', min: 12, max: 30, def: 22, int: true },
-  { key: 'hnMaxLv', min: 12, max: 30, def: 19, int: true },
 ];
 
 /** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
@@ -279,17 +261,6 @@ const HN_TRAP = [3, 10, 9, 13] as const;
 /** 회남: chapter 1 stage 2 block 12 (the map table calls it 하비). */
 export function isHuainan(k: Pick<BattleKnowledge, 'stage' | 'block'>): boolean {
   return !!k.stage && isHuainanAt(k.stage.chapter, k.stage.index, k.block);
-}
-/** The party is weak enough for the 회남 plan: top-9 average of our faction below hnMaxLv (absent: always). */
-export function hnWeakParty(state: GameState, p: GrindParams): boolean {
-  if (!Number.isFinite(p.hnMaxLv)) return true;
-  const faction = state.officers[0].dyn.flags & 0x1f;
-  const lv = state.officers
-    .filter((o, i) => i < 0x100 && (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction)
-    .map((o) => Math.min(99, o.dyn.level))
-    .sort((a, b) => b - a)
-    .slice(0, 9);
-  return !lv.length || lv.reduce((a, b) => a + b, 0) / lv.length < p.hnMaxLv;
 }
 export function isHuainanAt(chapter: number, stage: number, block: number | undefined): boolean {
   return chapter === 1 && stage === 2 && block === 12;
@@ -1075,7 +1046,7 @@ export class GrindPolicy {
   /** The 회남 block (ch1 stage 2 block 12) with the plan on (absent in older plans: off). */
   private hnMemo: boolean | undefined = undefined;
   private hnOn(): boolean {
-    if (this.hnMemo === undefined) this.hnMemo = !!(this.p.hnPlan > 0.5) && isHuainan(this.know) && hnWeakParty(this.scene.ctx.state, this.p);
+    if (this.hnMemo === undefined) this.hnMemo = !!(this.p.hnPlan > 0.5) && isHuainan(this.know);
     return this.hnMemo;
   }
   private hnPhase: 'hold' | 'peel' | 'escape' = 'hold';
