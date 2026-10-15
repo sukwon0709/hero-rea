@@ -8,6 +8,10 @@
 //      within 3 levels of it), highest level first; they are used in the next battle (ab86);
 //   2. troop heals (콩/보리/쌀 0x1e..0x20, 상약/한방약/차 0x34..0x36): two for 유비, one for each
 //      of the party's strongest officers, the best one the gold allows;
+//   (2a. with opts.areaHeals, before the single heals: area heals (ab86 -> baf6, the user's 3x3 or
+//      larger, no caster bonus): one troop scroll (원대서/원부서/원군서 0x2e..0x30) each for 유비 and
+//      the next three, one morale scroll (평기서/활기서/용기서 0x31..0x33) for 유비, the strongest
+//      that leaves 200 gold;)
 //   3. bombs (scrolls 0x22..0x2a, which hit through e91a and give hit exp) with what is left above
 //      a reserve, one each for the party's officers with the highest intelligence.
 // Weapons, armour and horses are never sold in this game (story items only).
@@ -49,7 +53,7 @@ export function party(state: GameState): number[] {
 }
 
 /** One visit: buys by the rules above from `shop` (item ids). Returns what was bought. */
-export function shopVisit(state: GameState, shop: number[], opts: { reserve?: number; bombs?: boolean } = {}): Purchase[] {
+export function shopVisit(state: GameState, shop: number[], opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean } = {}): Purchase[] {
   const out: Purchase[] = [];
   const has = (o: number, id: number) => state.officers[o].dyn.items.includes(id);
   const free = (o: number) => state.officers[o].dyn.items.filter((v) => v === 0xff).length;
@@ -69,6 +73,21 @@ export function shopVisit(state: GameState, shop: number[], opts: { reserve?: nu
       const id = 0x13 + k;
       if (!shop.includes(id) || d.cls !== PROMOTE_FROM[k] || d.level < PROMOTE_LEVEL[k] - 3 || has(o, id)) continue;
       buy(o, id);
+    }
+  }
+  // 2a. area heals first when asked (GrindParams.area): the gold goes to them before the single heals
+  if (opts.areaHeals) {
+    const pickArea = (lo: number, hi: number) =>
+      shop.filter((id) => id >= lo && id <= hi).sort((a, b) => b - a).find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= 200);
+    for (const o of team.slice(0, 4)) {
+      if (free(o) <= 2 || state.officers[o].dyn.items.some((v) => v >= 0x2e && v <= 0x30)) continue;
+      const id = pickArea(0x2e, 0x30);
+      if (id === undefined) break;
+      buy(o, id);
+    }
+    if (team.includes(0) && free(0) > 2 && !state.officers[0].dyn.items.some((v) => v >= 0x31 && v <= 0x33)) {
+      const id = pickArea(0x31, 0x33);
+      if (id !== undefined) buy(0, id);
     }
   }
   // 2. troop heals, the strongest the shop has that the gold allows

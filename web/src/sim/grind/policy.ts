@@ -99,6 +99,8 @@ export interface GrindParams {
   strong: number;
   /** Formation: officers who know a heal tactic, fielded right after 유비 and the band (lowest level first). */
   healers: number;
+  /** Above 0.5: the merchants' gold goes to area heal scrolls (0x2e..0x33) first. */
+  area: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -176,6 +178,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'brace', min: 0, max: 3, def: 0.6 },
   { key: 'walk', min: 0, max: 1, def: 0.4 },
   { key: 'healers', min: 0, max: 4, def: 0, int: true },
+  { key: 'area', min: 0, max: 1, def: 0.4 },
 ];
 
 export function defaultParams(): GrindParams {
@@ -1358,6 +1361,30 @@ export class GrindPolicy {
     return false;
   }
 
+  /** (x, y) is next to an ending adjacency target whose actor (another unit, within 6 cells) has not reached it. */
+  private blocksActor(u: Unit, x: number, y: number): boolean {
+    for (const a of this.wadj()) {
+      if (a.actor === u.officer || a.actor === 0x400) continue;
+      const s = this.b.slotOfOfficer(a.other);
+      const as = this.b.slotOfOfficer(a.actor);
+      if (s === NONE || as === NONE || as >= PLAYER_SLOTS) continue;
+      const T = this.scene.units[s], A = this.scene.units[as];
+      if (T.status !== Status.Field || A.status !== Status.Field) continue;
+      const da = Math.abs(A.x - T.x) + Math.abs(A.y - T.y);
+      if (da <= 1 || da > 6) continue;
+      if (Math.abs(T.x - x) + Math.abs(T.y - y) === 1) return true;
+    }
+    return false;
+  }
+
+  /** u is the actor of an unfired duel / persuasion (ending or not) with enemy officer `off`: acting next to it fires the event, killing it would waste it. */
+  private ownDuel(u: Unit, off: number): boolean {
+    for (const a of this.wadj()) if (a.actor === u.officer && a.other === off) return true;
+    for (const g of this.know.gains)
+      if ((g.kind === 'duel' || g.kind === 'persuade') && g.actor === u.officer && g.other === off && !this.fired.has(g.record)) return true;
+    return false;
+  }
+
   private bestAction(u: Unit): Action {
     const b = this.b;
     const fin = this.finishing;
@@ -1435,7 +1462,9 @@ export class GrindPolicy {
       if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
-      const dang = this.danger(u, x, y);
+      // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
+      // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
+      const dang = chg && (this.winAdjacent(u, x, y) || this.winCell(u, x, y)) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y);
       let base = -deathCost(dang, 1);
       const t = terrainAt(b.s, x, y);
       if (hp < max * this.p.retreat && (t === 8 || t === 13 || t === 14)) base += 6;
@@ -1485,6 +1514,8 @@ export class GrindPolicy {
       if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       if (chg && this.winAdjacent(u, x, y)) base += 400;
+      // leave the cells next to an ending duel / persuasion target to its actor once it is close
+      if (chg && this.blocksActor(u, x, y)) base -= 15;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
       if (!fin && this.know.treasure.some((t) => t.x === x && t.y === y && (t.officer === u.officer || t.officer === 0x400) && !this.looted.has(y * b.width + x))) base += 40;
       if (base > best.value) best = { slot, x, y, kind: 'wait', target: NONE, tactic: NONE, value: base, exp: 0, lethal: false, danger: dang.worst };
@@ -1508,7 +1539,9 @@ export class GrindPolicy {
           // the leader may always take a kill (except a protected enemy): a kill is its safest exp
           // (the target cannot hit back) and a low-level leader is the usual reason battles are lost
           const kg = lethal ? this.killGain(D.officer) : 0;
-          if (lethal && !kg && !this.killOk(d) && !(guarded && !this.know.protect.has(D.officer))) continue;
+          if (lethal && !kg && !this.killOk(d) && !(guarded && !this.know.protect.has(D.officer) && !this.duelPending(D.officer))) continue;
+          // 태산: 유비 next to 이명 killed him on the last turn instead of persuading him
+          if (lethal && this.ownDuel(u, D.officer)) continue;
           const hit = combatExp(true, o.level, od.level, false, d);
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
@@ -1550,7 +1583,7 @@ export class GrindPolicy {
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value) best = { slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal };
       }
-      // items (ab86): promotions, troop heals, bombs
+      // items (ab86): promotions, troop heals (single and area), morale area heals, bombs
       for (const it of held) {
         const a = this.itemValue(u, it.id, x, y, w, guarded);
         if (!a) continue;
@@ -1590,6 +1623,26 @@ export class GrindPolicy {
         if (!best || v > best.value) best = { value: v, target: s, exp: 0, lethal: false };
       }
       return best;
+    }
+    if (id >= 0x2e && id <= 0x33) {
+      // area heals (ab86 -> baf6): troops (0x2e..0x30) or morale (0x31..0x33) of every ally in the
+      // area around the user; worth it when several are hurt or the leader is
+      const sub = (id - 0x2e) % 3;
+      const morale = id >= 0x31;
+      let v = 0;
+      for (const s of unitsInRange(b.s, u, sub | 0x80, x, y, true)) {
+        const T = this.scene.units[s];
+        const ot = b.officerOf(T);
+        const lead = this.know.guarded.has(T.officer);
+        if (morale) {
+          const conf = (T.flags & UnitFlag.Confused) !== 0;
+          if (T.morale < 60 || conf) v += (100 - T.morale) * (lead ? 3 : 0.8) + (conf ? 40 : 0);
+        } else {
+          const f = ot.hp / Math.max(1, maxHp(ot));
+          if (f < (lead ? 0.75 : 0.6)) v += (1 - f) * (lead ? 400 : 60);
+        }
+      }
+      return v > 0 ? { value: v - 12, target: NONE, exp: 0, lethal: false } : null;
     }
     if (id >= 0x22 && id <= 0x2a) {
       const element = 2 - Math.trunc((id - 0x22) / 3);

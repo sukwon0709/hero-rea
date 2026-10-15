@@ -252,6 +252,24 @@ export function castTactic(s: CombatState, caster: number, t: number, target: nu
   return res;
 }
 
+/**
+ * Area heal items 0x2e..0x33 (1cb6:ab86 -> baf6 with no caster): every ally in the area `sub|0x80`
+ * around the user, its own cell included, gets b8c0 at power `sub` without a caster bonus; kind 1
+ * (troops) for 0x2e..0x30, 2 (morale) for 0x31..0x33. No usefulness check and no exp. ok is false
+ * (the item is kept) when no ally is in the area. The caller consumes the item and marks the user.
+ */
+export function areaHealItem(s: CombatState, user: number, id: number): CastResult {
+  const res: CastResult = { ok: false, hits: [], confused: [], healed: [], left: [] };
+  const u = s.units[user];
+  const sub = (id - 0x2e) % 3;
+  const kind = id >= 0x31 ? 2 : 1;
+  const list = unitsInRange(s, u, sub | 0x80, u.x, u.y, true);
+  if (list.length === 0) return res;
+  for (const v of list) applyHeal(s, v, sub, kind, null, res);
+  res.ok = true;
+  return res;
+}
+
 /** Whether a heal of `kind` would do anything (1cb6:a200). */
 export function healUseful(kind: number, o: Officer, morale: number, confused: boolean): boolean {
   const full = maxHp(o) === o.hp;

@@ -7,7 +7,7 @@
 import type { GameContext, RunBattle } from '../context';
 import type { Trigger } from '../../engine/script';
 import { Rng, castableTactics, healAmounts, maxHp, maxMp, movePoints, tacticsLearnedAt, tryCure, regenerate, setMorale, tacticTerrainOk } from '../../engine/battle/rules';
-import { attack, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
+import { areaHealItem, attack, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
 import { actionOrder, applyMove, attackTargetAfterMove, planUnit, type Plan } from '../../engine/battle/ai';
 import { floodMove, rangeCells, rebuildUnitMap, terrainAt, unitAt, unitsInRange, walkPath, neighbour, sideOf } from '../../engine/battle/hex';
 import { battleNameLines } from '../../engine/battle/map';
@@ -1111,6 +1111,20 @@ export class BattleScene {
       await this.say(S.usedItem, name);
       healItem(this, t, power, kind);
       consume();
+      return true;
+    }
+    if (id >= 0x2e && id <= 0x33) {
+      // area heals (ab86 -> baf6, no caster): troops for 0x2e..0x30, morale for 0x31..0x33, area and
+      // power (id-0x2e)%3 around the user; kept when no ally is in the area
+      const watch = [slot, ...unitsInRange(b.s, u, ((id - 0x2e) % 3) | 0x80, u.x, u.y, true)];
+      const before = this.snapshotHp(watch);
+      const res = areaHealItem(b.s, slot, id);
+      if (!res.ok) {
+        await this.say(S.noAllyInRange);
+        return false;
+      }
+      consume();
+      await this.showCast(slot, 30, res, before);
       return true;
     }
     if (id >= 0x2b && id <= 0x2d) {

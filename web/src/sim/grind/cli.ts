@@ -5,7 +5,7 @@
 //   HERO_GAME_DIR=... npx vite-node src/sim/grind/cli.ts real               whole game for real with the best plan
 //   HERO_GAME_DIR=... npx vite-node src/sim/grind/cli.ts battle --index 3   one battle, traced
 //
-// Options: --out DIR (default /mnt/project-files/grind), --pop N (candidates per generation, 6),
+// Options: --out DIR (default $GRIND_OUT or /mnt/project-files/grind; $TMPDIR/hero-grind when that is down), --pop N (candidates per generation, 6),
 // --variants N (plans tried per battle, 3), --workers N (parallel campaigns, 2), --limit N (first N
 // battles only), --seed N, --reset (start the learning over).
 // Output (outside the repository; it is generated from the player's game files): cache/captures.v8,
@@ -39,7 +39,10 @@ const sopt = (name: string, def: string): string => {
 };
 const flag = (name: string) => argv.includes(`--${name}`);
 
-const OUT = sopt('out', '/mnt/project-files/grind');
+// --out, else $GRIND_OUT, else the shared mount; when the mount is down (EIO, ENOENT, EACCES) and no
+// --out was given, main() falls back to a local directory instead of crashing
+const OUT_GIVEN = argv.includes('--out') || !!process.env.GRIND_OUT;
+let OUT = sopt('out', process.env.GRIND_OUT || '/mnt/project-files/grind');
 // local working directory (job / result files, the captures and state copies): OUT may be a network
 // mount (rclone), where many small file writes failed with EIO and crashed a run
 const WORK = sopt('work', join(tmpdir(), 'hero-grind-work'));
@@ -248,7 +251,15 @@ function campaignInChild(j: Job, onBattle?: (k: number) => void): Promise<Campai
 }
 
 async function main() {
-  mkdirSync(join(OUT, 'cache'), { recursive: true });
+  try {
+    mkdirSync(join(OUT, 'cache'), { recursive: true });
+  } catch (e) {
+    if (OUT_GIVEN) throw e;
+    const local = join(tmpdir(), 'hero-grind');
+    console.error(`grind: ${OUT} is not writable (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); using ${local} (pass --out to choose)`);
+    OUT = local;
+    mkdirSync(join(OUT, 'cache'), { recursive: true });
+  }
   if (cmd === 'capture') {
     const files = loadFiles();
     const r = await captureStory(files, opt('seed', 12345), (l) => {
