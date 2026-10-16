@@ -9,7 +9,8 @@ import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
-import { GrindPolicy, analyseBattle, clampParams, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
+import { HuainanStrike } from './huainan';
+import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
   officer: number;
@@ -115,7 +116,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       });
     if (carry?.money !== undefined) state.progress.money = carry.money;
     // the merchants passed since the previous battle
-    if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list, { areaHeals: params.area > 0.5, scrolls: params.scrolls }));
+    if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list, { areaHeals: params.area > 0.5, scrolls: params.scrolls, bombItems: paramOr(params, 'bombBuy'), confuseItems: paramOr(params, 'confuseBuy'), healKeep: paramOr(params, 'healKeep') }));
     const fi = snap.formationInfo;
     if (fi) {
       // a record that held a placeholder at FORMATION time but now holds an enemy (the setup's
@@ -159,6 +160,15 @@ export async function runGrindBattle(
       const stage = scene.ctx.vm.stage;
       policy = new GrindPolicy(scene, p, analyseBattle(stage, scene.ctx.vm.state));
       policy.install();
+      if (paramOr(p, 'hnStrike') > 0.5 && isHuainan(policy.know)) {
+        const strike = new HuainanStrike(scene, policy, {
+          stage: [paramOr(p, 'hnStageX'), paramOr(p, 'hnStageY')],
+          maxExtra: paramOr(p, 'hnExtra'),
+          waveRisk: paramOr(p, 'hnWaveRisk'),
+        });
+        strike.install();
+        if (trace) strike.log = trace;
+      }
       if (rerolls > 0) {
         rerolls--;
         policy.retreatNow = true;

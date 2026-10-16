@@ -49,6 +49,7 @@ import {
   CLASS_ATTACK_TYPE,
   CLASS_COUNT,
   CLASS_RANGE,
+  CONFUSE_ITEM_RANGE,
   NONE,
   PLAYER_SLOTS,
   RAIN,
@@ -158,6 +159,31 @@ export interface GrindParams {
    * and keep out of reach (the sortie also takes the strongest officers there, not the lowest).
    */
   hnWeak: number;
+  /**
+   * 폭탄 (0x21, 1350..1650 troops, no exp): weight of throwing one at an enemy that can hit us this
+   * phase (0 = never). Absent (older plans): 1.
+   */
+  bomb: number;
+  /** Confusion items 농무서/기상서/호우서 (0x2b..0x2d, sure, no exp): weight like `bomb`. Absent: 1. */
+  confuse: number;
+  /** Merchants: 폭탄 (0x21, 500 gold, sold at 서주) held in the party, bought up to this many. Absent: 4. */
+  bombBuy: number;
+  /** Merchants: confusion items (0x2b..0x2d, from 50 gold, 농무서 at 북해) bought up to this many. Absent: 4. */
+  confuseBuy: number;
+  /**
+   * 회남 strike plan (huainan.ts, over hnPlan): stand next to the turn-6 wave's entry, strike it
+   * first with 폭탄, then peel the waiting south with baits. Absent: on.
+   */
+  hnStrike: number;
+  /** Merchants: gold kept when buying the single troop heals and the cheap scrolls (saving for 서주's 폭탄). Absent: 0. */
+  healKeep: number;
+  /** Strike plan: the cell to stand at the turn before the wave. Absent: (12,4). */
+  hnStageX: number;
+  hnStageY: number;
+  /** Strike plan: waiting units a bait cell may wake besides its target. Absent: 1. */
+  hnExtra: number;
+  /** Strike plan: risk weight of our non-leader units while the wave is up. Absent: 1. */
+  hnWaveRisk: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -253,7 +279,23 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnFront', min: 0, max: 2, def: 1, int: true },
   { key: 'hnFocus', min: 0, max: 2, def: 1 },
   { key: 'hnWeak', min: 1, max: 8, def: 3, int: true },
+  { key: 'bomb', min: 0, max: 3, def: 1 },
+  { key: 'confuse', min: 0, max: 3, def: 1 },
+  { key: 'bombBuy', min: 0, max: 8, def: 4, int: true },
+  { key: 'confuseBuy', min: 0, max: 12, def: 4, int: true },
+  { key: 'hnStrike', min: 0, max: 1, def: 0.6 },
+  { key: 'healKeep', min: 0, max: 1500, def: 0, int: true },
+  { key: 'hnStageX', min: 9, max: 16, def: 12, int: true },
+  { key: 'hnStageY', min: 2, max: 7, def: 4, int: true },
+  { key: 'hnExtra', min: 0, max: 3, def: 1, int: true },
+  { key: 'hnWaveRisk', min: 0.2, max: 1.5, def: 1 },
 ];
+
+/** A parameter's value, or its default when the plan predates it (absent / NaN). */
+export function paramOr(p: GrindParams, k: ParamKey): number {
+  const v = p[k];
+  return typeof v === 'number' && Number.isFinite(v) ? v : PARAM_SPECS.find((sp) => sp.key === k)!.def;
+}
 
 /** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
 const HN_TRAP = [3, 10, 9, 13] as const;
@@ -2228,6 +2270,44 @@ export class GrindPolicy {
       }
       return v > 0 ? { value: v - 12, target: NONE, exp: 0, lethal: false } : null;
     }
+    if (id === 0x21 || (id >= 0x2b && id <= 0x2d)) {
+      // 폭탄 (1cb6:b029): (rand(21)+90)*15 = 1350..1650 troops at range 0x81, no roll, no counter, no
+      // exp. 농무서/기상서/호우서 (ab86 at add9): the target is confused for sure (no a2aa roll), range
+      // [0,1,0]|0x80 (0x2d also its enemy neighbours). Neither gives exp, so they are for battles
+      // that are about surviving: worth what the target would hit us for this enemy phase (its
+      // best blow on a unit it can reach, the leader counted double), and only on units that can
+      // reach one of ours (a waiting unit out of reach is left asleep)
+      const bomb = id === 0x21;
+      const k = paramOr(this.p, bomb ? 'bomb' : 'confuse');
+      if (k <= 0) return null;
+      // kept for the hard battles (회남, the outnumbered escape battles); elsewhere only to save the leader
+      // (폭탄 are sold only at 서주 before 회남: outside 회남 only on a near-lethal threat to the leader)
+      const hard = this.hnOn() || (!bomb && !!this.exitPlan);
+      let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
+      for (const d of unitsInRange(b.s, u, bomb ? 0x81 : CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80, x, y, false)) {
+        const D = this.scene.units[d];
+        if (!(D.flags & UnitFlag.Visible) || D.status !== Status.Field) continue;
+        if (!bomb && D.flags & UnitFlag.Confused) continue;
+        const od = b.officerOf(D);
+        if (this.spared(D.officer) || this.know.protect.has(D.officer)) continue;
+        const th = this.foeThreat(d);
+        if (th <= 0) continue;
+        if (!hard && !this.threatensLeader(d, bomb ? 0.8 : 0.4)) continue;
+        let v: number;
+        if (bomb) {
+          const lethal = od.hp <= 1350;
+          if (!lethal && od.hp > 1350 * 1.6) continue;
+          v = k * (lethal ? 30 + th / 10 : (th / 20) * (1350 / od.hp)) - 40;
+          if (!best || v > best.value) best = { value: v, target: d, exp: 0, lethal };
+        } else {
+          // the cure roll at the start of its phase (1cb6:8130): rand(100) < (lead+morale)/3
+          const stay = 1 - Math.min(1, (od.lead + D.morale) / 300);
+          v = k * stay * (th / 8) - 8;
+          if (!best || v > best.value) best = { value: v, target: d, exp: 0, lethal: false };
+        }
+      }
+      return best;
+    }
     if (id >= 0x22 && id <= 0x2a) {
       const element = 2 - Math.trunc((id - 0x22) / 3);
       const power = (id - 0x22) % 3;
@@ -2251,6 +2331,36 @@ export class GrindPolicy {
       return best;
     }
     return null;
+  }
+
+  /** The most enemy `e` can do to one of ours this enemy phase (a unit in its reach; the leader counted double). */
+  private foeThreat(e: number): number {
+    const b = this.b;
+    const E = this.scene.units[e];
+    let best = 0;
+    for (let i = 0; i < PLAYER_SLOTS; i++) {
+      const u = this.scene.units[i];
+      if (u.status !== Status.Field || u.officer === 0xffff) continue;
+      const k = u.y * b.width + u.x;
+      const ph = (this.threat[k] ?? []).includes(e), tc = (this.tthreat[k] ?? []).includes(e);
+      if (!ph && !tc) continue;
+      const d = Math.max(ph ? this.hitOn(E, u, u.x, u.y) : 0, tc ? this.tacticOn(E, u, u.x, u.y) : 0);
+      best = Math.max(best, d * (this.know.guarded.has(u.officer) ? 2 : 1));
+    }
+    return best;
+  }
+
+  /** Enemy `e` can hit the guarded leader this phase for at least `share` of its troops. */
+  private threatensLeader(e: number, share: number): boolean {
+    const b = this.b;
+    const ls = b.slotOfOfficer(0);
+    if (ls === NONE) return false;
+    const L = this.scene.units[ls];
+    if (L.status !== Status.Field) return false;
+    const k = L.y * b.width + L.x;
+    const E = this.scene.units[e];
+    const d = Math.max((this.threat[k] ?? []).includes(e) ? this.hitOn(E, L, L.x, L.y) : 0, (this.tthreat[k] ?? []).includes(e) ? this.tacticOn(E, L, L.x, L.y) : 0);
+    return d >= b.officerOf(L).hp * share;
   }
 
   /** Physical damage enemy E would do to u standing at (x, y). */

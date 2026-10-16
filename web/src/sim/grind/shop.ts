@@ -12,6 +12,9 @@
 //      larger, no caster bonus): one troop scroll (원대서/원부서/원군서 0x2e..0x30) each for 유비 and
 //      the next three, one morale scroll (평기서/활기서/용기서 0x31..0x33) for 유비, the strongest
 //      that leaves 200 gold;)
+//   (2b. before the single heals: 폭탄 (0x21) and the confusion items (농무서/기상서/호우서
+//      0x2b..0x2d) up to opts.bombItems / opts.confuseItems held in the party (see below);)
+//   (the single heals and the cheap scrolls (3s) keep opts.healKeep gold: saving for 서주's 폭탄;)
 //   3. bombs (scrolls 0x22..0x2a, which hit through e91a and give hit exp) with what is left above
 //      a reserve, one each for the party's officers with the highest intelligence;
 //   (3s. with opts.scrolls = N instead: the namu.wiki 병법서 grind. Every party officer, lowest level
@@ -58,7 +61,11 @@ export function party(state: GameState): number[] {
 }
 
 /** One visit: buys by the rules above from `shop` (item ids). Returns what was bought. */
-export function shopVisit(state: GameState, shop: number[], opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number } = {}): Purchase[] {
+export function shopVisit(
+  state: GameState,
+  shop: number[],
+  opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number; bombItems?: number; confuseItems?: number; healKeep?: number } = {},
+): Purchase[] {
   const out: Purchase[] = [];
   const has = (o: number, id: number) => state.officers[o].dyn.items.includes(id);
   const free = (o: number) => state.officers[o].dyn.items.filter((v) => v === 0xff).length;
@@ -95,6 +102,27 @@ export function shopVisit(state: GameState, shop: number[], opts: { reserve?: nu
       if (id !== undefined) buy(0, id);
     }
   }
+  // 2b. 폭탄 (0x21, 1350..1650 troops for sure, 1cb6:b029) and the confusion items (0x2b..0x2d, a
+  // sure confusion), before the heals (the gold is the scarce part): sold early (서주, 북해) and
+  // nowhere again before 회남, whose turn-6 wave the party cannot hold at the levels it arrives
+  // with. Up to opts.bombItems / opts.confuseItems held in the party, carried by the strongest
+  // (they are deployed), 200 gold kept. The policy keeps them for hard battles.
+  const stock = (lo: number, hi: number) => team.reduce((n, o) => n + state.officers[o].dyn.items.filter((v) => v >= lo && v <= hi).length, 0);
+  const fill = (lo: number, hi: number, want: number, cheapest: boolean) => {
+    const ids = shop.filter((id) => id >= lo && id <= hi).sort((a, b) => (cheapest ? a - b : b - a));
+    if (!ids.length || want <= 0) return;
+    let n = stock(lo, hi);
+    for (let pass = 0; pass < 8 && n < want; pass++)
+      for (const o of team.slice(0, 6)) {
+        if (n >= want) break;
+        if (free(o) <= 1) continue;
+        const id = ids.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= 200);
+        if (id === undefined || !buy(o, id)) return;
+        n++;
+      }
+  };
+  fill(0x21, 0x21, Math.round(opts.bombItems ?? 0), false);
+  fill(0x2b, 0x2d, Math.round(opts.confuseItems ?? 0), true);
   // 2. troop heals, the strongest the shop has that the gold allows
   const want = opts.scrolls === undefined || !Number.isFinite(opts.scrolls) ? -1 : Math.round(opts.scrolls);
   const heals = shop.filter((id) => TROOP_HEALS.includes(id)).sort((a, b) => healPower(b) - healPower(a) || b - a);
@@ -104,7 +132,7 @@ export function shopVisit(state: GameState, shop: number[], opts: { reserve?: nu
     for (const o of who) {
       let n = state.officers[o].dyn.items.filter((v) => TROOP_HEALS.includes(v)).length;
       while (n < need(o) && free(o) > 2) {
-        const id = heals.find((h) => (state.items[h]?.price ?? 0xff) * 10 <= state.progress.money);
+        const id = heals.find((h) => (state.items[h]?.price ?? 0xff) * 10 <= state.progress.money - (opts.healKeep ?? 0));
         if (id === undefined || !buy(o, id)) break;
         n++;
       }
@@ -112,6 +140,7 @@ export function shopVisit(state: GameState, shop: number[], opts: { reserve?: nu
   };
   const healed = team.slice(0, 12);
   buyHeals(healed);
+
   // 3s. cheap scrolls for everyone, lowest level first (GrindParams.scrolls; NaN/undefined = rule 3)
   if (want >= 0 && opts.bombs !== false) {
     const cheap = [0x28, 0x25, 0x22].filter((id) => shop.includes(id));
@@ -119,7 +148,7 @@ export function shopVisit(state: GameState, shop: number[], opts: { reserve?: nu
     for (const o of low) {
       let n = state.officers[o].dyn.items.filter((v) => v >= 0x22 && v <= 0x2a).length;
       while (n < want && free(o) > 1) {
-        const id = cheap.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= 100);
+        const id = cheap.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= Math.max(100, opts.healKeep ?? 0));
         if (id === undefined || !buy(o, id)) break;
         n++;
       }

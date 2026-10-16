@@ -59,8 +59,9 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     }
     expect(snap).not.toBeNull();
     const lines: string[] = [];
-    const o = await runGrindBattle(files, snap!, defaultParams(), null, (l) => lines.push(l));
+    const o = await runGrindBattle(files, snap!, { ...defaultParams(), hnStrike: 0 }, null, (l) => lines.push(l));
     expect(lines.some((l) => l.startsWith('회남 plan: hold near 21,8'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('회남 strike'))).toBe(false);
     // the escape starts only on a clear way, never as a last-turns walk through the enemy
     for (const l of lines.filter((x) => x.startsWith('finish: escape'))) expect(l).toMatch(/finish: escape at turn \d+/);
     expect(o.turns).toBeLessThanOrEqual(o.turnLimit);
@@ -69,6 +70,27 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     await runGrindBattle(files, snap!, off, null, (l) => lines2.push(l));
     expect(lines2.some((l) => l.startsWith('회남 plan'))).toBe(false);
   }, 600_000);
+
+  it('회남 strike plan: on by default (also for plans made before it), stands at the stage cell by the wave turn', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    let snap = null;
+    for (let n = 0; n < 20 && !snap; n++) {
+      const s = await scenarioSnapshot(files, 1, n, 4242);
+      if (s.stage === 2 && s.block === 12) snap = s;
+    }
+    const lines: string[] = [];
+    const o = await runGrindBattle(files, snap!, defaultParams(), null, (l) => lines.push(l));
+    expect(lines.some((l) => l.startsWith('회남 strike: stage 12,4 before the wave of 10'))).toBe(true);
+    expect(o.turns).toBeLessThanOrEqual(o.turnLimit);
+    const old = Object.fromEntries(Object.entries(defaultParams()).filter(([k]) => !k.startsWith('hnS'))) as ReturnType<typeof defaultParams>;
+    const lines2: string[] = [];
+    await runGrindBattle(files, snap!, old, null, (l) => lines2.push(l));
+    expect(lines2.some((l) => l.startsWith('회남 strike'))).toBe(true);
+  }, 600_000);
+
 
   it('회남 plan stays off elsewhere (사수관 plays the same with and without the keys)', async () => {
     const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');

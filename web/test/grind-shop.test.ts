@@ -73,7 +73,7 @@ describe('grind params: the 회남 plan', () => {
     expect(d.hnPlan).toBeGreaterThan(0.5);
     expect([d.hnX, d.hnY]).toEqual([21, 8]);
     const keys = PARAM_SPECS.map((s) => s.key).filter((k) => k.startsWith('hn'));
-    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak']);
+    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak', 'hnStrike', 'hnStageX', 'hnStageY', 'hnExtra', 'hnWaveRisk']);
     const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('hn'))) as unknown as typeof d);
     for (const k of keys) expect(Number.isNaN(old[k])).toBe(true);
     // NaN never turns the plan on
@@ -146,5 +146,58 @@ describe('grind battle names', () => {
     expect(storyName(1, 1, 5, '서주')).toBe('서주');
     const s = applyStoryNames([{ chapter: 1, stage: 2, block: 12, name: '하비' }]);
     expect(s[0].name).toBe('회남');
+  });
+});
+
+describe('grind: 폭탄 / confusion items, the strike plan defaults, battle treasures', () => {
+  it('buys 폭탄 (500 gold) before the heals, then the cheapest confusion item, 200 gold kept', () => {
+    const s = fakeState([14, 18, 14], 1700);
+    (s.items[0x21] as { price: number }).price = 50; // 폭탄 500
+    (s.items[0x2b] as { price: number }).price = 5; // 농무서 50
+    (s.items[0x2c] as { price: number }).price = 10;
+    (s.items[0x1e] as { price: number }).price = 5; // 콩 50
+    const got = shopVisit(s, [0x1e, 0x21, 0x2b, 0x2c], { bombItems: 2, confuseItems: 2, scrolls: 0 });
+    expect(got.slice(0, 4).map((p) => [p.officer, p.item])).toEqual([[0, 0x21], [1, 0x21], [0, 0x2b], [1, 0x2b]]);
+    // 1700 - 1000 - 100 = 600 left for the heals
+    expect(got.slice(4).every((p) => p.item === 0x1e)).toBe(true);
+    // a party already holding them buys no more
+    const again = shopVisit(s, [0x21, 0x2b], { bombItems: 2, confuseItems: 2 });
+    expect(again).toEqual([]);
+    // healKeep: the single heals leave that much
+    const h = fakeState([14, 18], 400);
+    (h.items[0x1e] as { price: number }).price = 5;
+    expect(shopVisit(h, [0x1e], { healKeep: 300, scrolls: 0 }).length).toBe(2);
+    expect(h.progress.money).toBe(300);
+    // nothing below 200 gold
+    const t = fakeState([14], 650);
+    (t.items[0x21] as { price: number }).price = 50;
+    expect(shopVisit(t, [0x21], { bombItems: 4 }).length).toBe(0);
+  });
+
+  it('paramOr: plans made before a key get its default (strike on at 12,4)', async () => {
+    const { defaultParams, clampParams, paramOr } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !['bomb', 'confuse', 'bombBuy', 'confuseBuy', 'hnStrike', 'healKeep', 'hnStageX', 'hnStageY', 'hnExtra', 'hnWaveRisk'].includes(k))) as unknown as typeof d);
+    expect(Number.isNaN(old.hnStrike)).toBe(true);
+    expect(paramOr(old, 'hnStrike')).toBeGreaterThan(0.5);
+    expect([paramOr(old, 'hnStageX'), paramOr(old, 'hnStageY')]).toEqual([12, 4]);
+    expect(paramOr(old, 'bombBuy')).toBe(4);
+    expect(paramOr({ ...d, bombBuy: 0 }, 'bombBuy')).toBe(0);
+    expect(paramOr(old, 'healKeep')).toBe(0);
+  });
+
+  it('confusion item reach (1cb6:add9): 농무서 and 호우서 the adjacent cells only, 기상서 range 1', async () => {
+    const { CONFUSE_ITEM_RANGE } = await import('../src/engine/battle/types');
+    expect(CONFUSE_ITEM_RANGE).toEqual([0, 1, 0]);
+  });
+
+  it('ADD_ITEM in the sandbox (battle treasures) lands in the first free slot of the first roster officer', async () => {
+    const { sandboxHost } = await import('../src/sim/grind/sandbox');
+    const s = fakeState([14, 18], 0);
+    s.officers[0].dyn.items.fill(0x1e);
+    const host = sandboxHost(s, () => 1);
+    await host.addItem?.(0x2a);
+    expect(s.officers[1].dyn.items[0]).toBe(0x2a);
+    expect(s.officers[0].dyn.items.includes(0x2a)).toBe(false);
   });
 });
