@@ -306,3 +306,45 @@ describe.skipIf(!hasGame)('grind: wake phase in the sandbox', () => {
     expect(off.wakeTurns ?? 0).toBe(0);
   }, 300_000);
 });
+
+describe('grind: look-ahead search params', () => {
+  it('the search keys are learnable within bounds and plans made before them read the defaults', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    const keys = ['search', 'srK', 'srSamples', 'srDepth', 'srHp', 'srLeader', 'srFoe', 'srGap', 'srMargin', 'srProg', 'srVerify'] as const;
+    const old = { ...d } as Record<string, number>;
+    for (const k of keys) delete old[k];
+    const p = old as unknown as typeof d;
+    for (const k of keys) {
+      expect(paramOr(p, k)).toBe(d[k]);
+      const s = PARAM_SPECS.find((x) => x.key === k)!;
+      expect(clampParams({ ...d, [k]: s.max + 500 })[k]).toBe(s.max);
+      expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
+    }
+    // appended after the wake keys: learned plans store the CEM mean by index
+    const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
+    for (const k of keys) expect(idx(k)).toBeGreaterThan(idx('wakeRatio'));
+  });
+});
+
+describe.skipIf(!hasGame)('grind: look-ahead search in the sandbox', () => {
+  it('rollouts leave no trace (one candidate plays as the greedy policy), and the search wins 사수관', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const d = defaultParams();
+    const strip = (o: { ms: number }) => ({ ...o, ms: 0, params: null, search: null });
+    const off = await runGrindBattle(files, snap, { ...d, search: 0 });
+    // every phase is saved, played out (our phase, the enemy's reply, one more turn) and restored
+    const one = await runGrindBattle(files, snap, { ...d, search: 1, srK: 1, srDepth: 2 });
+    expect(one.search!.phases).toBeGreaterThan(0);
+    expect(one.search!.rollouts).toBeGreaterThan(0);
+    expect(strip(one)).toEqual(strip(off));
+    const on = await runGrindBattle(files, snap, { ...d, search: 1 });
+    expect(on.won).toBe(true);
+    expect(on.search!.phases).toBeGreaterThan(0);
+    expect(on.turns).toBeLessThanOrEqual(on.turnLimit);
+  }, 300_000);
+});

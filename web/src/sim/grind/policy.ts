@@ -44,6 +44,7 @@ import {
   healKind,
 } from '../../engine/battle/rules';
 import { healUseful } from '../../engine/battle/combat';
+import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import {
   AiMode,
   CLASS_ATTACK_TYPE,
@@ -278,6 +279,18 @@ export interface GrindParams {
   brace: number;
   /** Above 0.5: units walk towards the nearest enemy by walking distance (a flood over passable terrain), not a straight line (팽성: 미방 waited 23 turns behind a river). */
   walk: number;
+  /** Look-ahead search of the player phase (above 0.5: on) and its settings (searchPhase). */
+  search: number;
+  srK: number;
+  srSamples: number;
+  srDepth: number;
+  srHp: number;
+  srLeader: number;
+  srFoe: number;
+  srGap: number;
+  srMargin: number;
+  srProg: number;
+  srVerify: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -377,6 +390,20 @@ export const PARAM_SPECS: ParamSpec[] = [
   // (appended: learned plans store the CEM mean by index)
   { key: 'wake', min: 0, max: 1, def: 0.6 },
   { key: 'wakeRatio', min: 0.4, max: 2.5, def: 1.4 },
+  // look-ahead search of the player phase (searchPhase): candidates, RNG samples, depth (1 = our
+  // phase and the enemy's reply, 2 = one more turn), weights of the troops kept, of the leader's
+  // troops and of the enemy troops removed, and how far below the best an alternative action may be
+  { key: 'search', min: 0, max: 1, def: 0 },
+  { key: 'srK', min: 1, max: 24, def: 10, int: true },
+  { key: 'srSamples', min: 1, max: 4, def: 2, int: true },
+  { key: 'srDepth', min: 1, max: 2, def: 1, int: true },
+  { key: 'srHp', min: 0, max: 3, def: 1 },
+  { key: 'srLeader', min: 0, max: 3, def: 1 },
+  { key: 'srFoe', min: 0, max: 3, def: 0.5 },
+  { key: 'srGap', min: 0, max: 200, def: 40 },
+  { key: 'srMargin', min: 0, max: 200, def: 30 },
+  { key: 'srProg', min: 0, max: 3, def: 1 },
+  { key: 'srVerify', min: 0, max: 6, def: 3, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -597,6 +624,8 @@ export interface GrindStats {
   gainsFired?: number[];
   /** The victory bonus set when the battle ended (given to every unit on the field on a win). */
   bonus?: number;
+  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases where a candidate beat the greedy one, time. */
+  search?: { phases: number; rollouts: number; changed: number; ms: number };
 }
 
 interface Action {
@@ -612,6 +641,21 @@ interface Action {
   exp: number;
   lethal: boolean;
   danger?: number;
+}
+
+/** One candidate of the search phase (searchPhase): other weights, or one command changed. */
+interface PhasePlan {
+  label: string;
+  over?: Partial<GrindParams>;
+  /** The command (in phase order) that takes the best action of another kind. */
+  dev?: number;
+  /** Filled with the commands played (to skip candidates that come out the same). */
+  trace?: string[];
+}
+
+/** Kind of an action for the search's alternatives (waits by 2x2 block of cells). */
+function actionKey(a: Action): string {
+  return a.kind === 'wait' ? `w${a.x >> 1},${a.y >> 1}` : `${a.kind}${a.target},${a.tactic},${a.item?.id ?? ''}`;
 }
 
 // ---------------------------------------------------------------- the policy
@@ -1154,39 +1198,306 @@ export class GrindPolicy {
     this.updateHn();
     this.buildPrice();
     this.buildLeaderKills();
-    // the leader moves last: the enemies' reach is then computed with the others where they ended up
-    // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
-    const feedLast = this.p.feed > 0 && !this.finishing;
-    let gained = 0;
-    const done = new Set<number>();
-    for (let guard = 0; guard < PLAYER_SLOTS * 2 && b.info.result === 0; guard++) {
-      const order = sc.units
-        .slice(0, PLAYER_SLOTS)
-        .filter((u) => this.controllable(u) && !(u.flags & (UnitFlag.Acted | UnitFlag.Confused)) && !done.has(u.slot))
-        .sort((x, y) => (feedLast ? (x.officer === 0 ? 1 : 0) - (y.officer === 0 ? 1 : 0) : 0) || this.weight(y.slot) - this.weight(x.slot) || x.slot - y.slot);
-      const u = order[0];
-      if (!u) break;
-      done.add(u.slot);
-      // the enemies' reach as it is now (earlier units moved or fell), with this unit lifted off
-      // its cell: the cell it leaves no longer blocks them
-      const at = u.y * b.width + u.x;
-      b.s.unitAt[at] = NONE;
-      this.buildThreat();
-      b.s.unitAt[at] = u.slot;
-      const act = this.bestAction(u);
-      if (u.officer === 0) {
-        this.leaderActed = true;
-        this.leaderSeen = { hp: b.officerOf(u).hp, dw: act.danger ?? 0 };
-      }
-      gained += await this.execute(act);
-      if (b.info.result) return;
-      await sc.victoryCheck();
-    }
+    const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 ? await this.searchPhase() : await this.actLoop(null);
+    if (b.info.result) return;
     // counted in the finish too: frozen there, a finish begun right after a kill kept the weak pull
     // towards the enemy for good (태산: three units waited 12 turns out of reach of the last two)
     if (gained === 0 && b.info.turn >= 2) this.idleTurns++;
     else this.idleTurns = 0;
   }
+
+  // ---- one pass of commands over the controllable units (the greedy phase, or a search candidate)
+
+  private async actLoop(plan: PhasePlan | null): Promise<number> {
+    const sc = this.scene;
+    const b = this.b;
+    const p0 = this.p;
+    if (plan?.over) (this as { p: GrindParams }).p = { ...p0, ...plan.over };
+    let decision = 0;
+    try {
+      // the leader moves last: the enemies' reach is then computed with the others where they ended up
+      // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
+      const feedLast = this.p.feed > 0 && !this.finishing;
+      let gained = 0;
+      const done = new Set<number>();
+      for (let guard = 0; guard < PLAYER_SLOTS * 2 && b.info.result === 0; guard++) {
+        const order = sc.units
+          .slice(0, PLAYER_SLOTS)
+          .filter((u) => this.controllable(u) && !(u.flags & (UnitFlag.Acted | UnitFlag.Confused)) && !done.has(u.slot))
+          .sort((x, y) => (feedLast ? (x.officer === 0 ? 1 : 0) - (y.officer === 0 ? 1 : 0) : 0) || this.weight(y.slot) - this.weight(x.slot) || x.slot - y.slot);
+        const u = order[0];
+        if (!u) break;
+        done.add(u.slot);
+        // the enemies' reach as it is now (earlier units moved or fell), with this unit lifted off
+        // its cell: the cell it leaves no longer blocks them
+        const at = u.y * b.width + u.x;
+        b.s.unitAt[at] = NONE;
+        this.buildThreat();
+        b.s.unitAt[at] = u.slot;
+        this.altK = plan && plan.dev === decision ? 1 : 0;
+        let act = this.bestAction(u);
+        if (this.altK) {
+          // the candidate's deviation: the best action of another kind (within srGap of the best)
+          const k0 = actionKey(act);
+          const alt = this.lastAlts.find((a) => actionKey(a) !== k0);
+          if (alt && alt.value >= act.value - paramOr(this.p, 'srGap')) act = alt;
+          this.altK = 0;
+        }
+        decision++;
+        plan?.trace?.push(`${act.slot}:${act.kind}:${act.x},${act.y}:${act.target}:${act.tactic}:${act.item?.id ?? ''}`);
+        if (u.officer === 0) {
+          this.leaderActed = true;
+          this.leaderSeen = { hp: b.officerOf(u).hp, dw: act.danger ?? 0 };
+        }
+        gained += await this.execute(act);
+        if (b.info.result) break;
+        await sc.victoryCheck();
+      }
+      this.decisions = decision;
+      return gained;
+    } finally {
+      (this as { p: GrindParams }).p = p0;
+      this.altK = 0;
+    }
+  }
+
+  // ---- look-ahead search (GrindParams.search): candidate phases played out against the enemy's reply
+
+  /** Set inside a rollout: the phase plays greedy (no search of its own) and nothing is logged. */
+  private inRollout = false;
+  /** bestAction collects the best action of each kind when set (lastAlts). */
+  private altK = 0;
+  private lastAlts: Action[] = [];
+  /** Commands of the last actLoop. */
+  private decisions = 0;
+  /** Search counters (the report and the bench read them through stats.search). */
+  private searchStats = { phases: 0, rollouts: 0, changed: 0, ms: 0 };
+
+  /**
+   * The candidates of one phase: the greedy phase, phases under other weights (bolder, more careful,
+   * holding back, pressing, killing, sparing), and the greedy phase with one command changed to the
+   * best action of another kind. Each candidate is a rule, not a fixed list of commands: replayed
+   * on the real battle it adapts to the dice the rollouts did not see.
+   */
+  private searchCandidates(n: number): PhasePlan[] {
+    const p = this.p;
+    const out: PhasePlan[] = [{ label: 'greedy' }];
+    const K = Math.max(1, paramOr(p, 'srK'));
+    const vars: PhasePlan[] = [
+      { label: 'careful', over: { risk: Math.min(4, p.risk * 2.5 + 0.5), guard: Math.max(0.3, p.guard * 0.8) } },
+      { label: 'hold', over: { approach: 0, lead: 0, escort: Math.min(3, p.escort * 2 + 0.5) } },
+      { label: 'bold', over: { risk: p.risk * 0.4 } },
+      { label: 'press', over: { approach: Math.min(3, p.approach * 3 + 0.6), lead: Math.min(4, p.lead + 1) } },
+      { label: 'kill', over: { kill: 2, conserve: 0 } },
+      { label: 'spare', over: { kill: 0, conserve: Math.min(3, p.conserve * 2 + 0.5) } },
+      // in trouble: everyone well clear of the enemy's reach, or closed up around the leader
+      { label: 'flee', over: { risk: 4, guard: 0.3, approach: 0, lead: 0, kill: 2, conserve: 0 } },
+      { label: 'huddle', over: { escort: 3, approach: 0, lead: 0, risk: Math.min(4, p.risk * 1.5 + 0.3) } },
+      // the finish stuck short of its goal (the leader kept back by the danger): go in
+      { label: 'charge', over: { risk: p.risk * 0.3, guard: 1.3, approach: 3, lead: 4, safe: 0 } },
+    ];
+    // in the finish the charge comes first (the weights that hold back matter less there)
+    if (this.finishing) vars.unshift(vars.pop()!);
+    const devs: PhasePlan[] = [];
+    for (let j = 0; j < n; j++) devs.push({ label: `dev${j}`, dev: j });
+    // interleave: weights first (they move every unit), then single changes
+    for (let i = 0; out.length < K && (i < vars.length || i < devs.length); i++) {
+      if (i < vars.length) out.push(vars[i]);
+      if (out.length < K && i < devs.length) out.push(devs[i]);
+    }
+    return out.slice(0, K);
+  }
+
+  /**
+   * Value of the battle now against the save taken at the start of the phase: exp gained (by need,
+   * the leader's twice), the troops kept by every unit (a fallen unit loses its exp to come), the
+   * leader's troops (gone = the battle lost), the enemy troops removed, and a win only when the
+   * policy is finishing (an early end throws the turns left away).
+   */
+  private evaluate(sv: SceneSave): number {
+    const b = this.b;
+    const sc = this.scene;
+    if (b.info.result === 3 || b.info.result === 1) return -1e6;
+    const turnsLeft = Math.max(0, this.deadline() - b.info.turn - 1);
+    const hpW = paramOr(this.p, 'srHp'), ldW = paramOr(this.p, 'srLeader'), foeW = paramOr(this.p, 'srFoe');
+    let v = 0;
+    let alive = 0;
+    for (let i = 0; i < PLAYER_SLOTS; i++) {
+      const u = sc.units[i];
+      if (u.status === Status.Empty || u.officer === 0xffff) continue;
+      const o = b.officerOf(u);
+      const guarded = this.know.guarded.has(u.officer);
+      const was = sv.units[i];
+      if (u.status !== Status.Field) {
+        // a guarded officer gone loses the battle (the defeat event may not have run in the rollout)
+        if (guarded && was.status === Status.Field) return -1e6;
+        if (was.status !== Status.Field) continue;
+      }
+      const w = u.officer < 0x100 ? this.weight(i) * (guarded ? 2 : 1) : 0.5;
+      if (u.officer < 0x100) {
+        const d0 = sv.officers[u.officer].dyn;
+        v += (o.level * 100 + o.exp - (d0.level * 100 + d0.exp)) * w;
+      }
+      if (u.status !== Status.Field) continue;
+      alive++;
+      const f = Math.min(1, o.hp / Math.max(1, maxHp(o)));
+      // alive: its exp to come over the turns left (a fallen unit loses it all, however hurt it
+      // was), plus its troops (a hurt unit is closer to falling)
+      v += hpW * Math.max(0.5, w) * (5 * Math.min(turnsLeft, 20) + 40 * f);
+      if (guarded) v -= ldW * 400 * (1 - f) ** 2;
+    }
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const e = sc.units[i];
+      const was = sv.units[i];
+      if (e.officer === 0xffff || e.status === Status.Empty) continue;
+      if (e.status === Status.Field) {
+        const oe = b.officerOf(e);
+        v += foeW * 10 * (1 - Math.min(1, oe.hp / Math.max(1, maxHp(oe))));
+      } else if (was.status === Status.Field) v += foeW * 10;
+    }
+    // the finish: progress to the win (the goal's distance, the victory officer's troops, or the
+    // enemy's troops when every enemy must fall), more pressing as the turns run out
+    if (this.finishing && b.info.result === 0) {
+      const urg = paramOr(this.p, 'srProg') * (1 + 8 / (turnsLeft + 1));
+      let minD = 99;
+      for (let i = 0; i < PLAYER_SLOTS; i++) {
+        const u = sc.units[i];
+        if (!this.controllable(u)) continue;
+        const g = this.goalFor(u);
+        if (g) minD = Math.min(minD, this.pathDist(g, moveTypeOf(b.s, u), u.x, u.y));
+      }
+      if (minD < 99) v -= urg * 6 * Math.min(minD, 40);
+      const vo = this.victoryNow();
+      const vs = vo !== null ? b.slotOfOfficer(vo) : NONE;
+      if (vs !== NONE && sc.units[vs].status === Status.Field) {
+        const ov = b.officerOf(sc.units[vs]);
+        v -= urg * 150 * Math.min(1, ov.hp / Math.max(1, maxHp(ov)));
+      } else if (vo === null && !this.wcells().length) {
+        for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+          const e = sc.units[i];
+          if (e.status !== Status.Field || e.officer === 0xffff) continue;
+          const oe = b.officerOf(e);
+          v -= urg * 40 * Math.min(1, oe.hp / Math.max(1, maxHp(oe)));
+        }
+      }
+    }
+    if (b.info.result === 2) v += this.finishing ? 3000 : -turnsLeft * 12 * alive;
+    // the turns ran out without a win: lost
+    else if (b.info.turn >= b.info.turnLimit - 1 && this.know.endsAt === null) return -5e5 + v;
+    return v;
+  }
+
+  /** After our phase in a rollout: the enemy's reply, and with srDepth 2 one more full turn (greedy). */
+  private async rolloutRest(depth: number) {
+    const sc = this.scene as unknown as { computerPhases: () => Promise<void>; turn: () => Promise<void>; playerPhase: () => Promise<void> };
+    const b = this.b;
+    if (b.info.result === 0) await sc.computerPhases();
+    for (let d = 1; d < depth && b.info.result === 0; d++) {
+      b.info.turn++;
+      if (b.info.turn >= b.info.turnLimit) break;
+      b.stepWeather();
+      await this.scene.eventLoop({ type: 'turn', turn: b.info.turn + 1 });
+      if (b.info.result !== 0) break;
+      const pp = sc.playerPhase;
+      sc.playerPhase = () => this.playerPhase();
+      try {
+        await sc.turn();
+      } finally {
+        sc.playerPhase = pp;
+      }
+    }
+  }
+
+  /**
+   * The search phase: every candidate is played on the live battle (from a save) with the enemy's
+   * reply, under srSamples RNG seeds of its own (the same seeds for every candidate; never the
+   * game's own coming draws, which no player knows), and scored by evaluate(); the best is then
+   * played for real. Candidates whose commands come out the same as one already tried are skipped.
+   */
+  private async searchPhase(): Promise<number> {
+    const sc = this.scene;
+    const b = this.b;
+    const t0 = performance.now();
+    const ns = Math.max(1, paramOr(this.p, 'srSamples'));
+    const depth = Math.max(1, paramOr(this.p, 'srDepth'));
+    const log = this.log;
+    const save = saveScene(sc, [this]);
+    this.log = null;
+    this.inRollout = true;
+    let cands: PhasePlan[] = [{ label: 'greedy' }];
+    const values: number[] = [];
+    const seen = new Map<string, number>();
+    let best = 0;
+    // one candidate on one rollout seed
+    const roll = async (plan: PhasePlan, s: number): Promise<number> => {
+      restoreScene(sc, save);
+      b.rng.seed = mixSeed(b.info.turn * 977 + s * 131 + 7, this.searchSeed);
+      await this.actLoop(plan);
+      await this.rolloutRest(depth);
+      this.searchStats.rollouts++;
+      return this.evaluate(save);
+    };
+    let verified = '';
+    try {
+      for (let ci = 0; ci < cands.length; ci++) {
+        let v = 0;
+        let dup = -1;
+        for (let s = 0; s < ns; s++) {
+          restoreScene(sc, save);
+          b.rng.seed = mixSeed(b.info.turn * 977 + s * 131 + 7, this.searchSeed);
+          const plan: PhasePlan = { ...cands[ci], trace: [] };
+          await this.actLoop(plan);
+          if (ci === 0 && s === 0) cands = this.searchCandidates(this.decisions);
+          if (s === 0) {
+            const sig = plan.trace!.join('|');
+            const k = seen.get(sig);
+            if (k !== undefined) {
+              dup = k;
+              break;
+            }
+            seen.set(sig, ci);
+          }
+          await this.rolloutRest(depth);
+          this.searchStats.rollouts++;
+          v += this.evaluate(save);
+        }
+        values.push(dup >= 0 ? values[dup] : v / ns);
+        if (values[ci] > values[best] + 1e-6) best = ci;
+      }
+      // the greedy phase carries the long-term rules (formation, goals, the finish): another
+      // candidate replaces it only when clearly better; in the finish only to save the leader
+      const margin = paramOr(this.p, 'srMargin');
+      // (or to win: a candidate that ends the battle while the greedy one does not)
+      if (best !== 0 && (this.finishing ? values[0] > -1e5 && values[best] < values[0] + margin * 3 : values[best] < values[0] + margin)) best = 0;
+      // the best of many noisy estimates is flattered (winner's curse): it is checked against the
+      // greedy phase again on fresh seeds before it replaces it
+      const nv = paramOr(this.p, 'srVerify');
+      if (best !== 0 && nv > 0) {
+        let vg = 0, vb = 0;
+        for (let s = ns; s < ns + nv; s++) {
+          vg += await roll({ label: 'greedy' }, s);
+          vb += await roll(cands[best], s);
+        }
+        vg /= nv;
+        vb /= nv;
+        verified = ` verify ${vb.toFixed(0)} vs ${vg.toFixed(0)}`;
+        if (this.finishing ? vg > -1e5 && vb < vg + margin * 3 : vb < vg + margin) best = 0;
+      }
+    } finally {
+      restoreScene(sc, save);
+      this.inRollout = false;
+      this.log = log;
+    }
+    this.searchStats.phases++;
+    if (best !== 0) this.searchStats.changed++;
+    this.searchStats.ms += performance.now() - t0;
+    this.stats.search = { ...this.searchStats };
+    this.log?.(`T${b.info.turn + 1} search: ${cands[best].label} ${values[best].toFixed(0)}${verified} (greedy ${values[0].toFixed(0)}; ${cands.map((c, i) => `${c.label} ${values[i]?.toFixed(0)}`).join(', ')})`);
+    return this.actLoop(cands[best]);
+  }
+
+  /** Seed of this battle's rollout RNG (set by battle.ts from the snapshot seed; any fixed value works). */
+  searchSeed = 0x5eed;
 
   // ---- 회남 plan (GrindParams.hnPlan): hold north-east, peel the waiting south at the bridge, escape
 
@@ -2557,6 +2868,16 @@ export class GrindPolicy {
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
+    // the search asks for the best action of each kind too (alternatives for its candidates)
+    const alts = this.altK > 0 ? new Map<string, Action>() : null;
+    const offer = (a: Action) => {
+      if (a.value > best.value) best = a;
+      if (alts) {
+        const key = actionKey(a);
+        const q = alts.get(key);
+        if (!q || a.value > q.value) alts.set(key, a);
+      }
+    };
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
     const tactics = castableTactics(o, u.mp, b.learn).filter((t) => !(t < 5 && WEATHER_TYPE[b.info.weather] === RAIN));
     const held = u.officer < 0x100 ? b.stateOfficer(u).dyn.items.map((id, index) => ({ id, index })).filter((e) => e.id !== 0xff) : [];
@@ -2699,7 +3020,7 @@ export class GrindPolicy {
       if (chg && this.blocksActor(u, x, y)) base -= 15;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
       if (!fin && this.know.treasure.some((t) => t.x === x && t.y === y && (t.officer === u.officer || t.officer === 0x400) && !this.looted.has(y * b.width + x))) base += 40;
-      if (base > best.value) best = { slot, x, y, kind: 'wait', target: NONE, tactic: NONE, value: base, exp: 0, lethal: false, danger: dang.worst };
+      if (base > best.value || alts) offer({ slot, x, y, kind: 'wait', target: NONE, tactic: NONE, value: base, exp: 0, lethal: false, danger: dang.worst });
       // physical attacks
       const range = CLASS_RANGE[o.cls];
       if (range !== NONE)
@@ -2759,7 +3080,7 @@ export class GrindPolicy {
             const pc = Math.min(1, od.force / 150);
             v -= deathCost(plus(dang, cd), pc) - deathCost(dang, pc);
           }
-          if (v > best.value) best = { slot, x, y, kind: 'attack', target: d, tactic: NONE, value: v, exp: all, lethal };
+          if (v > best.value || alts) offer({ slot, x, y, kind: 'attack', target: d, tactic: NONE, value: v, exp: all, lethal, danger: dang.worst });
         }
       // tactics
       for (const tc of tactics) {
@@ -2768,7 +3089,7 @@ export class GrindPolicy {
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
         let v = farming && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
         if (chg && a.target === vslot && tc <= 14) v += 300;
-        if (v > best.value) best = { slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal };
+        if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
       // items (ab86): promotions, troop heals (single and area), morale area heals, bombs
       for (const it of held) {
@@ -2776,10 +3097,11 @@ export class GrindPolicy {
         if (!a) continue;
         let v = base + a.value;
         if (chg && a.target === vslot) v += 300;
-        if (v > best.value) best = { slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal };
+        if (v > best.value || alts) offer({ slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
     }
     b.place(slot, null, home[0], home[1]);
+    if (alts) this.lastAlts = [...alts.values()].sort((p, q) => q.value - p.value);
     return best;
   }
 

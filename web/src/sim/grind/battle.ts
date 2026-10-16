@@ -11,6 +11,7 @@ import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
 import { HuainanStrike } from './huainan';
 import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
+import { mixSeed } from './search';
 import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
@@ -37,6 +38,8 @@ export interface BattleOutcome {
   finishReason?: string;
   /** Turns the wake phase held off an early finish (GrindParams.wake). */
   wakeTurns?: number;
+  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases changed, ms. */
+  search?: { phases: number; rollouts: number; changed: number; ms: number };
   params: GrindParams;
   gains: OfficerGain[];
   /** Total exp gained by deployed officers below 99, weighted by need (the search objective). */
@@ -212,6 +215,7 @@ export async function runGrindBattle(
       start = battleStart(scene);
       const stage = scene.ctx.vm.stage;
       policy = new GrindPolicy(scene, p, analyseBattle(stage, scene.ctx.vm.state));
+      policy.searchSeed = mixSeed(snap.index + 1, snap.rngSeed);
       policy.install();
       if (paramOr(p, 'hnStrike') > 0.5 && isHuainan(policy.know)) {
         const strike = new HuainanStrike(scene, policy, {
@@ -306,6 +310,7 @@ export async function runGrindBattle(
     finishTurn: stats?.finishTurn ?? null,
     finishReason: stats?.finishReason,
     wakeTurns: stats?.wakeTurns,
+    search: stats?.search,
     params: p,
     gains,
     score: won ? score : -1,
