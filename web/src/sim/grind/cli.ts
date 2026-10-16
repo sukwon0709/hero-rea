@@ -218,6 +218,7 @@ interface Job {
   rescue: number;
   extra?: { battle: number; variants: number; rescue: number };
   backtrack?: number;
+  backJump?: number;
   replan?: number;
   levelGate?: { battle: number; level: number; passes: number };
 }
@@ -275,7 +276,7 @@ async function main() {
     const job = JSON.parse(readFileSync(sopt('job', ''), 'utf8')) as Job;
     const files = loadFiles();
     const snaps = loadCaptures();
-    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, replan: job.replan, levelGate: job.levelGate, log: (l) => process.stderr.write(`${l}\n`) });
+    const res = await runCampaign(files, snaps, job.params, { variants: job.variants, seed: job.seed, limit: job.limit || undefined, elites: job.elites, frozen: new Set(job.frozen), hints: job.hints, rescue: job.rescue, extra: job.extra, backtrack: job.backtrack, backJump: job.backJump, replan: job.replan, levelGate: job.levelGate, log: (l) => process.stderr.write(`${l}\n`) });
     const outFile = sopt('job', '') + '.out';
     writeFileSync(outFile, JSON.stringify(res));
     console.log(`@@RESULT@@${outFile}`);
@@ -427,7 +428,7 @@ async function main() {
         while (next < cands.length) {
           const i = next++;
           if (doneIdx.has(i)) continue;
-          const job: Job = { params: cands[i], variants: runVariants, seed, limit, elites: lineElites, frozen: lineFrozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate };
+          const job: Job = { params: cands[i], variants: runVariants, seed, limit, elites: lineElites, frozen: lineFrozen, hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), backJump: opt('backjump', 0), replan: opt('replan', 2), levelGate };
           // a worker that dies (I/O error, crash) is tried again, then the candidate is dropped
           let c: CampaignResult | null = null;
           for (let attempt = 1; attempt <= 2 && !c && workers > 1; attempt++)
@@ -445,7 +446,7 @@ async function main() {
             live.done++;
             continue;
           }
-          if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: lineElites, frozen: new Set(lineFrozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), replan: opt('replan', 2), levelGate });
+          if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: lineElites, frozen: new Set(lineFrozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), backJump: opt('backjump', 0), replan: opt('replan', 2), levelGate });
           take(i, cands[i], c);
           savePending({ i, params: cands[i], campaign: c });
           writeProgress(st, live);
