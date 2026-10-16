@@ -291,6 +291,7 @@ export interface GrindParams {
   srMargin: number;
   srProg: number;
   srVerify: number;
+  srLure: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -393,10 +394,10 @@ export const PARAM_SPECS: ParamSpec[] = [
   // look-ahead search of the player phase (searchPhase): candidates, RNG samples, depth (1 = our
   // phase and the enemy's reply, 2 = one more turn), weights of the troops kept, of the leader's
   // troops and of the enemy troops removed, and how far below the best an alternative action may be
-  { key: 'search', min: 0, max: 1, def: 0 },
-  { key: 'srK', min: 1, max: 24, def: 10, int: true },
+  { key: 'search', min: 0, max: 1, def: 0.6 },
+  { key: 'srK', min: 1, max: 24, def: 14, int: true },
   { key: 'srSamples', min: 1, max: 4, def: 2, int: true },
-  { key: 'srDepth', min: 1, max: 2, def: 1, int: true },
+  { key: 'srDepth', min: 1, max: 2, def: 2, int: true },
   { key: 'srHp', min: 0, max: 3, def: 1 },
   { key: 'srLeader', min: 0, max: 3, def: 1 },
   { key: 'srFoe', min: 0, max: 3, def: 0.5 },
@@ -404,6 +405,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'srMargin', min: 0, max: 200, def: 30 },
   { key: 'srProg', min: 0, max: 3, def: 1 },
   { key: 'srVerify', min: 0, max: 6, def: 3, int: true },
+  // the lure plan (거록, 계교) under the search: off by default (the search alone won more there)
+  { key: 'srLure', min: 0, max: 1, def: 0 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -624,8 +627,8 @@ export interface GrindStats {
   gainsFired?: number[];
   /** The victory bonus set when the battle ended (given to every unit on the field on a win). */
   bonus?: number;
-  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases where a candidate beat the greedy one, time. */
-  search?: { phases: number; rollouts: number; changed: number; ms: number };
+  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases where a candidate beat the greedy one. */
+  search?: { phases: number; rollouts: number; changed: number };
 }
 
 interface Action {
@@ -1198,7 +1201,7 @@ export class GrindPolicy {
     this.updateHn();
     this.buildPrice();
     this.buildLeaderKills();
-    const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 ? await this.searchPhase() : await this.actLoop(null);
+    const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 && !this.quietField() ? await this.searchPhase() : await this.actLoop(null);
     if (b.info.result) return;
     // counted in the finish too: frozen there, a finish begun right after a kill kept the weak pull
     // towards the enemy for good (태산: three units waited 12 turns out of reach of the last two)
@@ -1271,7 +1274,7 @@ export class GrindPolicy {
   /** Commands of the last actLoop. */
   private decisions = 0;
   /** Search counters (the report and the bench read them through stats.search). */
-  private searchStats = { phases: 0, rollouts: 0, changed: 0, ms: 0 };
+  private searchStats = { phases: 0, rollouts: 0, changed: 0 };
 
   /**
    * The candidates of one phase: the greedy phase, phases under other weights (bolder, more careful,
@@ -1417,7 +1420,6 @@ export class GrindPolicy {
   private async searchPhase(): Promise<number> {
     const sc = this.scene;
     const b = this.b;
-    const t0 = performance.now();
     const ns = Math.max(1, paramOr(this.p, 'srSamples'));
     const depth = Math.max(1, paramOr(this.p, 'srDepth'));
     const log = this.log;
@@ -1490,10 +1492,35 @@ export class GrindPolicy {
     }
     this.searchStats.phases++;
     if (best !== 0) this.searchStats.changed++;
-    this.searchStats.ms += performance.now() - t0;
     this.stats.search = { ...this.searchStats };
     this.log?.(`T${b.info.turn + 1} search: ${cands[best].label} ${values[best].toFixed(0)}${verified} (greedy ${values[0].toFixed(0)}; ${cands.map((c, i) => `${c.label} ${values[i]?.toFixed(0)}`).join(', ')})`);
     return this.actLoop(cands[best]);
+  }
+
+  /**
+   * No enemy can come to blows with any of our units within the look-ahead (each side's moves and
+   * ranges over srDepth turns, and a script wave not due): the rollouts would all score the same,
+   * so the greedy phase is played without them. Not in the finish (its progress term differs).
+   */
+  private quietField(): boolean {
+    if (this.finishing) return false;
+    const b = this.b;
+    const depth = Math.max(1, paramOr(this.p, 'srDepth'));
+    const turn = b.info.turn + 1;
+    if (this.know.turns.some((e) => e.turn !== null && e.turn > turn && e.turn <= turn + depth + 1 && e.reinforce.length > 0)) return false;
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff);
+    if (!ours.length) return true;
+    let ourMove = 0;
+    for (const u of ours) ourMove = Math.max(ourMove, movePoints(b.officerOf(u), b.s.items) + Math.max(1, CLASS_RANGE[b.officerOf(u).cls] === NONE ? 1 : CLASS_RANGE[b.officerOf(u).cls]));
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const e = this.scene.units[i];
+      if (e.status !== Status.Field || e.officer === 0xffff) continue;
+      const oe = b.officerOf(e);
+      const r = CLASS_RANGE[oe.cls] === NONE ? 4 : Math.max(CLASS_RANGE[oe.cls], 3);
+      const reach = depth * (movePoints(oe, b.s.items) + r + ourMove) + 2;
+      for (const u of ours) if (Math.abs(u.x - e.x) + Math.abs(u.y - e.y) <= reach) return false;
+    }
+    return true;
   }
 
   /** Seed of this battle's rollout RNG (set by battle.ts from the snapshot seed; any fixed value works). */

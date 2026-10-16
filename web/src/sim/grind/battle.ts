@@ -38,8 +38,8 @@ export interface BattleOutcome {
   finishReason?: string;
   /** Turns the wake phase held off an early finish (GrindParams.wake). */
   wakeTurns?: number;
-  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases changed, ms. */
-  search?: { phases: number; rollouts: number; changed: number; ms: number };
+  /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases changed. */
+  search?: { phases: number; rollouts: number; changed: number };
   params: GrindParams;
   gains: OfficerGain[];
   /** Total exp gained by deployed officers below 99, weighted by need (the search objective). */
@@ -226,7 +226,9 @@ export async function runGrindBattle(
         strike.install();
         if (trace) strike.log = trace;
       }
-      const lo = paramOr(p, 'lure') > 0.5 && policy.know.stage ? lureOptionsFor(policy.know.stage.chapter, policy.know.stage.index, policy.know.block) : null;
+      // (with the look-ahead search on, the lure plan only with srLure: the search won more at 거록 and 계교)
+      const lureOn = paramOr(p, 'lure') > 0.5 && (paramOr(p, 'search') <= 0.5 || paramOr(p, 'srLure') > 0.5);
+      const lo = lureOn && policy.know.stage ? lureOptionsFor(policy.know.stage.chapter, policy.know.stage.index, policy.know.block) : null;
       if (lo && policy.know.stage && policy.know.block !== undefined) {
         // the general risk weight scales the plan's (the search's mutations vary the play)
         const mul = Math.min(2, Math.max(0.5, p.risk / 1.2));
@@ -445,6 +447,7 @@ export async function searchBattle(
       out.luMargin = Math.max(0, Math.min(4, paramOr(src, 'luMargin') + Math.round(rng.normal())));
     }
     if (rng.next() < 0.2) out.lure = paramOr(src, 'lure') > 0.5 ? 0.3 : 0.7;
+    if (rng.next() < 0.1) out.srLure = paramOr(src, 'srLure') > 0.5 ? 0.3 : 0.7;
     // the troop price (combat exp per enemy troop): stronger or weaker, now and then off
     if (rng.next() < 0.4) out.cbPrice = Math.max(0, Math.min(1.5, (paramOr(src, 'cbPrice') || 0.6) * Math.exp(rng.normal() * 0.4)));
     if (rng.next() < 0.1) out.cbPrice = 0;

@@ -182,7 +182,7 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     expect(kp.winAdj.some((a) => a.actor === 0 && a.other === 223)).toBe(true);
   }, 300_000);
 
-  it('lure plan: on by default at 거록 and 계교, off with lure 0; the script traps (유비 / any unit into an area wakes a group) are read from the records', async () => {
+  it('lure plan: on at 거록 and 계교 without the search (and with srLure), off with lure 0 or under the search by default; the script traps (유비 / any unit into an area wakes a group) are read from the records', async () => {
     const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
     const { runGrindBattle } = await import('../src/sim/grind/battle');
     const { defaultParams } = await import('../src/sim/grind/policy');
@@ -205,12 +205,19 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
       }
       expect(snap).not.toBeNull();
       const lines: string[] = [];
-      const o = await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0 }, null, (l) => lines.push(l));
+      const o = await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, search: 0 }, null, (l) => lines.push(l));
       expect(lines.some((l) => l.startsWith(`${label} lure:`))).toBe(true);
       expect(o.turns).toBeLessThanOrEqual(o.turnLimit);
       const off: string[] = [];
-      await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, lure: 0 }, null, (l) => off.push(l));
+      await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, search: 0, lure: 0 }, null, (l) => off.push(l));
       expect(off.some((l) => l.includes(' lure:'))).toBe(false);
+      // under the search (the default) the plan only with srLure; srK 1 keeps the run short
+      const s0: string[] = [];
+      await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, srK: 1, srDepth: 1 }, null, (l) => s0.push(l));
+      expect(s0.some((l) => l.includes(' lure:'))).toBe(false);
+      const s1: string[] = [];
+      await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, srK: 1, srDepth: 1, srLure: 1 }, null, (l) => s1.push(l));
+      expect(s1.some((l) => l.startsWith(`${label} lure:`))).toBe(true);
     }
   }, 600_000);
 
@@ -311,7 +318,11 @@ describe('grind: look-ahead search params', () => {
   it('the search keys are learnable within bounds and plans made before them read the defaults', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    const keys = ['search', 'srK', 'srSamples', 'srDepth', 'srHp', 'srLeader', 'srFoe', 'srGap', 'srMargin', 'srProg', 'srVerify'] as const;
+    const keys = ['search', 'srK', 'srSamples', 'srDepth', 'srHp', 'srLeader', 'srFoe', 'srGap', 'srMargin', 'srProg', 'srVerify', 'srLure'] as const;
+    // on by default (it beat the greedy policy on the bench), looking a turn past the enemy's reply
+    expect(d.search).toBeGreaterThan(0.5);
+    expect(d.srDepth).toBe(2);
+    expect(d.srLure).toBeLessThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
     const p = old as unknown as typeof d;

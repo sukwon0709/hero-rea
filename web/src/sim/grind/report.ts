@@ -106,6 +106,7 @@ const PARAM_KO: Record<ParamKey, string> = {
   srMargin: '탐색: 기본 수 대신 고를 때 필요한 평가 차이',
   srProg: '탐색: 마무리 때 승리 조건 진척 가중치',
   srVerify: '탐색: 고른 후보를 새 표본으로 다시 확인하는 횟수',
+  srLure: '탐색 중에도 거록·계교 유인 작전 쓰기',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -259,6 +260,7 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   srMargin: ['조금만 나아도 바꾸는 게 낫다고 배움', '확실히 나을 때만 바꾸는 게 낫다고 배움'],
   srProg: ['마무리를 서두르지 않는 게 낫다고 배움', '마무리 때 승리 조건을 서두르는 게 낫다고 배움'],
   srVerify: ['다시 확인하지 않는 게 낫다고 배움', '새 표본으로 다시 확인하는 게 낫다고 배움'],
+  srLure: ['탐색만으로 싸우는 게 낫다고 배움', '탐색 중에도 유인 작전을 쓰는 게 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {
