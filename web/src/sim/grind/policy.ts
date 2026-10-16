@@ -222,7 +222,10 @@ export interface GrindParams {
    * spent from. Each enemy's troops get a price: the best exp per troop point any of our units near
    * it would earn on it (a weak, low-level attacker hitting a higher-level enemy: 16 exp for a small
    * hit). A hit costs that price times its damage, times this weight: big hits from officers who
-   * out-level the target (4 exp) leave the enemy to the small hitters. 0 = off.
+   * out-level the target (4 exp) leave the enemy to the small hitters. 0 = off (the default:
+   * measured over 4 carries x 6 seeds per battle it lost 신도 7 times in 24 and gained nothing
+   * elsewhere; the battles are won by kills, which are what keep our units alive). Learnable: the
+   * per-battle search tries it.
    */
   cbPrice: number;
   /** Combat exp: share of the damage not charged on an enemy standing on a village / fortress (it heals 150..250 a turn, 1cb6:7cc8), and the weight of keeping it alive. */
@@ -237,6 +240,8 @@ export interface GrindParams {
   cbCap: number;
   /** Troops share under which a unit walks to the nearest healing cell (village, fortress, barracks) to recover and fight on (0 = off). */
   cbMend: number;
+  /** Combat exp: how far the price waits for our side to be the stronger one (1: only then; 0: always, the cap keeps it from idling units). */
+  cbGate: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -352,13 +357,14 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'luKill', min: 3, max: 10, def: 6, int: true },
   { key: 'luEngaged', min: 0, max: 2, def: 0, int: true },
   { key: 'luHold', min: -3, max: 3, def: 0, int: true },
-  { key: 'cbPrice', min: 0, max: 1.5, def: 0.6 },
+  { key: 'cbPrice', min: 0, max: 1.5, def: 0 },
   { key: 'cbHeal', min: 0, max: 1, def: 0.6 },
   { key: 'cbCounter', min: 0, max: 3, def: 0 },
   { key: 'cbReach', min: 0, max: 8, def: 3, int: true },
   { key: 'cbBase', min: 0, max: 1, def: 0 },
   { key: 'cbCap', min: 0, max: 2, def: 0.8 },
   { key: 'cbMend', min: 0, max: 0.8, def: 0.35 },
+  { key: 'cbGate', min: 0, max: 1, def: 1 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -2270,7 +2276,8 @@ export class GrindPolicy {
     const reach = paramOr(this.p, 'cbReach');
     // only while we have the upper hand: against a stronger side every kill is safety first
     const se = this.sideStrength(false), so = this.sideStrength(true);
-    this.priceScale = Math.min(1, Math.max(0, 2 * (1 - se / Math.max(1, so))));
+    const gate = paramOr(this.p, 'cbGate');
+    this.priceScale = 1 - gate + gate * Math.min(1, Math.max(0, 2 * (1 - se / Math.max(1, so))));
     // a blow that does not kill takes nothing off the enemy's attack (1cb6:df14 does not read the
     // attacker's troops): it may be charged cbBase of the price even while outnumbered
     this.priceFloor = paramOr(this.p, 'cbBase');

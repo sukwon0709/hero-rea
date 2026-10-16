@@ -228,10 +228,10 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
 });
 
 describe('grind: combat exp params', () => {
-  it('troop price and mending are on by default (also for plans made before them), counters off, learnable within bounds', async () => {
+  it('mending is on by default (also for plans made before it), the troop price and counters off, all learnable within bounds', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(d.cbPrice).toBeGreaterThan(0);
+    expect(d.cbPrice).toBe(0);
     expect(d.cbMend).toBeGreaterThan(0);
     expect(d.cbCap).toBeLessThan(1);
     expect(d.cbCounter).toBe(0);
@@ -247,7 +247,7 @@ describe('grind: combat exp params', () => {
 });
 
 describe.skipIf(!hasGame)('grind: combat exp in the sandbox', () => {
-  it('a plan without the combat keys plays as the defaults; turning them off changes nothing it must not (사수관 still won)', async () => {
+  it('a plan without the combat keys plays as the defaults; 사수관 is won with mending off and the troop price on too', async () => {
     const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
     const { runGrindBattle } = await import('../src/sim/grind/battle');
     const { defaultParams } = await import('../src/sim/grind/policy');
@@ -260,7 +260,7 @@ describe.skipIf(!hasGame)('grind: combat exp in the sandbox', () => {
     const a = await runGrindBattle(files, snap, d);
     const b = await runGrindBattle(files, snap, old as unknown as typeof d);
     expect(strip(b)).toEqual(strip(a));
-    const off = await runGrindBattle(files, snap, { ...d, cbPrice: 0, cbMend: 0 });
+    const off = await runGrindBattle(files, snap, { ...d, cbPrice: 0.6, cbMend: 0 });
     expect(a.won).toBe(true);
     expect(off.won).toBe(true);
   }, 300_000);
