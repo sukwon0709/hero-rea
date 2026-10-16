@@ -25,7 +25,7 @@ import type { GameState } from '../../engine/state';
 import type { ScriptState } from '../../engine/script';
 import type { Stage } from '../../formats/scenario';
 import { recordCommands } from '../../native/battle/dev/setup';
-import { scriptGains, recordIndexOf, turnEvents, cellOf, type ScriptGain, type TurnEvent } from './events';
+import { scriptGains, recordIndexOf, turnEvents, cellOf, leaveWins, type ScriptGain, type TurnEvent } from './events';
 import { S } from '../../native/battle/strings';
 import { floodMove, rangeCells, terrainAt, unitAt, unitsInRange, sideOf, moveTypeOf } from '../../engine/battle/hex';
 import {
@@ -124,7 +124,8 @@ export interface GrindParams {
   /**
    * Above 0.5: where 유비 reaching a cell wins with a victory bonus for every unit (거록, 계교, 서주:
    * 전원 경험치 +50), the enemy leader is spared and 유비 walks in timed to arrive near the turn
-   * limit (exitMargin spare turns). Absent (older plans): off.
+   * limit (exitMargin spare turns). No longer read: the walk-in is always weighed, now that it waits
+   * for an open way and is given up when it stalls (신도); kept so older plans still load.
    */
   bonusExit: number;
   /** Above 0.5: an enemy 군악대 is not killed while grinding (it gives our neighbours MP too, 7cc8). Absent: off. */
@@ -385,12 +386,7 @@ function winning(stage: Stage, code: number, victory: number | null, block?: num
   // LEAVE_GROUP into a group whose auto record ends the battle in a win (태산: persuading 이명 moves
   // the block to group 4, whose first record is the victory)
   if (block !== undefined && group !== undefined && cmds.some((c) => c.name === 'LEAVE_GROUP') && !cmds.some((c) => c.name === 'GAME_OVER' || c.name === 'BATTLE_END')) {
-    const next = stage.blocks[block].records.find((r) => r.group === group + 1 && r.trigger === 0);
-    if (next) {
-      const nc = recordCommands(stage, next.code);
-      const i = nc.findIndex((c) => c.name === 'BATTLE_END');
-      if (i >= 0 && nc[i + 1]?.name !== 'GAME_OVER') return true;
-    }
+    if (leaveWins(stage, block, group)) return true;
   }
   // the victory officer taken off the field (a duel: REMOVE) wins through its defeat event
   if (victory !== null && cmds.some((c) => c.name === 'REMOVE' && (c as unknown as { officer: number }).officer === victory)) return true;
@@ -853,7 +849,7 @@ export class GrindPolicy {
     return o.hp < maxHp(o) * 0.7;
   }
 
-  /** The victory officer kept alive for the bonus walk-in (GrindParams.bonusExit). */
+  /** The victory officer kept alive for the bonus walk-in. */
   private spared(off: number): boolean {
     return off === this.know.victory && this.bonusCell() !== null && this.bonusOn();
   }
@@ -1443,12 +1439,12 @@ export class GrindPolicy {
     return d === Infinity ? 99 : Math.ceil(d / mp);
   }
 
-  /** The arrival cell that wins with a bonus for every unit (전원 경험치 +50), when bonusExit is on. */
+  /** The arrival cell that wins with a bonus for every unit (전원 경험치 +50). */
   private bonusCellMemo: [number, number] | null | undefined = undefined;
   private bonusCell(): [number, number] | null {
     if (this.bonusCellMemo !== undefined) return this.bonusCellMemo;
     this.bonusCellMemo = null;
-    if (!(this.p.bonusExit > 0.5) || this.know.steps.length) return null;
+    if (this.know.steps.length || this.walk.off) return null;
     for (const g of this.know.gains) {
       // (계교: the +50 record does not end the battle itself, a win cell on the same square does)
       if (g.bonus <= 0 || !g.cell || (g.trigger !== 6 && g.trigger !== 11) || g.actor !== 0 || g.needsFlags.length) continue;
@@ -1469,16 +1465,47 @@ export class GrindPolicy {
     // only once the field is nearly clear (the leader and at most one more, the expert way: grind the
     // rest down, then walk in) or the walk-in has begun; a guarded cell (거록: six fresh units by the
     // gate) turns the walk-in into a loss on time
-    return this.stats.finishReason === 'escape' || this.enemiesOnField() <= 2;
+    if (this.stats.finishReason === 'escape') return true;
+    // (and its way open: 신도's 순우경 at the narrows kept 유비 out for good, the leader spared to the end)
+    if (this.enemiesOnField() <= 2) return this.walkClear(this.exitTurns(c));
+    return false;
+  }
+
+  /** The bonus walk-in: the fewest turns the leader's way has needed since it began, and the turns without getting closer. */
+  private walk = { best: 99, stuck: 0, off: false };
+
+  /**
+   * A walk-in that gets no closer for three turns (신도: 유비 held back at the narrows by 순우경, the
+   * spared leader) is given up: the finish goes back to winning the usual way, while there is time.
+   */
+  private walkCheck() {
+    if (this.walk.off || this.stats.finishReason !== 'escape' || !this.bonusCell() || this.exitPlan) return;
+    const need = this.exitTurns(this.bonusCell()!);
+    if (need < this.walk.best) {
+      this.walk.best = need;
+      this.walk.stuck = 0;
+      return;
+    }
+    if (++this.walk.stuck < 3) return;
+    this.walk.off = true;
+    this.bonusCellMemo = null;
+    this.stats.finishReason = 'deadline';
+    this.log?.(`finish: walk-in given up at turn ${this.b.info.turn + 1} (${need} turns away)`);
+  }
+
+  /** The walk-in's way is open: enemies on it cost the leader at most a turn more than the bare way. */
+  private walkClear(need: number): boolean {
+    return need <= this.exitTurns(this.bonusCell()!, true) + 1;
   }
 
   private decideFinish() {
+    this.walkCheck();
     if (this.finishing && this.stats.finishReason !== 'escape' && this.bonusCell() && this.bonusOn()) {
       // a finish already running (routing, the leader spared) turns into the walk-in when it is time
       const left = this.deadline() - this.b.info.turn;
       const need = this.exitTurns(this.bonusCell()!);
       const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
-      if (left <= need + margin || this.victoryWorn()) {
+      if ((left <= need + margin || this.victoryWorn()) && this.walkClear(need)) {
         this.stats.finishReason = 'escape';
         this.log?.(`finish: walk-in for the bonus at turn ${this.b.info.turn + 1}, ${need} turns to ${this.bonusCell()!.join(',')}`);
       }
@@ -1494,7 +1521,7 @@ export class GrindPolicy {
       const margin = Number.isFinite(this.p.exitMargin) ? this.p.exitMargin : 1;
       // (or the leader worn down: it may fall to a counter or an allied army in
       // the enemy phase and end the battle without the bonus, 계교's 원소)
-      if (left <= need + margin || this.victoryWorn()) {
+      if ((left <= need + margin || this.victoryWorn()) && this.walkClear(need)) {
         this.finishing = true;
         this.stats.finishTurn = b.info.turn + 1;
         this.stats.finishReason = 'escape';
@@ -2144,6 +2171,21 @@ export class GrindPolicy {
     return false;
   }
 
+  /**
+   * u is the named actor of an ending duel / persuasion that gives levels, and it is time: the finish,
+   * the last two turns, or the actor about to fall (below 40% troops, a lethal blow where it stands)
+   * once only the partner is left or in the last third (earlier, the others keep grinding: 신도's
+   * 장비-순우경 at turn 13 cut the battle short).
+   */
+  private duelNow(u: Unit, hp: number, max: number): boolean {
+    if (this.bonusOn()) return false;
+    const mine = this.wadj().filter((a) => a.actor === u.officer && this.know.gains.some((g) => g.trigger === 4 && g.actor === u.officer && g.other === a.other && g.levels.length && !this.fired.has(g.record)));
+    if (!mine.length) return false;
+    if (this.finishing || this.deadline() - this.b.info.turn <= 2) return true;
+    if (hp < max * 0.4 && (this.enemiesOnField() <= 1 || this.lateThird()) && this.danger(u, u.x, u.y).worst >= hp) return true;
+    return false;
+  }
+
   /** u is the actor of an unfired duel / persuasion (ending or not) with enemy officer `off`: acting next to it fires the event, killing it would waste it. */
   private ownDuel(u: Unit, off: number): boolean {
     for (const a of this.wadj()) if (a.actor === u.officer && a.other === off) return true;
@@ -2180,7 +2222,7 @@ export class GrindPolicy {
     const ownAdj = this.wadj().find((a) => a.actor === u.officer);
     const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
     const chg = this.charge();
-    // the bonus walk-in (GrindParams.bonusExit) heads for its cell whatever the way round: the turns were counted for it
+    // the bonus walk-in heads for its cell whatever the way round: the turns were counted for it
     const walkIn = guarded && u.officer === 0 && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
     // ... and the others clear the way there (the guards of the cell), leaving the spared leader be
     const walkAll = !walkIn && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
@@ -2241,15 +2283,18 @@ export class GrindPolicy {
     const hnBan = hnLive ? this.hnBan : null;
     const hnWeak = hnLive && !guarded && this.hnWeakUnit(u);
     const hnAnc = !hnLive ? null : guarded ? this.hnLeaderAnchor : this.hnInner(u) ? this.hnAnchor : this.hnFrontAt;
+    // an ending duel / persuasion of this unit's own is taken once nothing is left to grind (or the
+    // actor is about to fall): the battle ends on a level instead of a kill (호로관: 장비-여포)
+    const dn = this.duelNow(u, hp, max);
     for (const [x, y] of this.reachable(u)) {
-      if (!chg && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
+      if (!chg && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
       if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
       // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
-      const dang = chg && (this.winAdjacent(u, x, y) || this.winCell(u, x, y)) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y);
+      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y);
       let base = -deathCost(dang, 1);
       // 회남: keep out of the reach of the waiting units not being peeled
       if (hnBan && hnBan[y * b.width + x]) base -= 300;
@@ -2306,7 +2351,7 @@ export class GrindPolicy {
       if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
       else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
-      if (chg && this.winAdjacent(u, x, y)) base += 400;
+      if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
       // leave the cells next to an ending duel / persuasion target to its actor once it is close
       if (chg && this.blocksActor(u, x, y)) base -= 15;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
@@ -2594,7 +2639,9 @@ export class GrindPolicy {
           const [lo, hi] = this.tacticDamageRange(o, oh, e, p, terrainAt(b.s, H.x, H.y));
           if (this.spared(H.officer) && oh.hp - hi * 1.5 < maxHp(oh) * 0.5) ok = false;
           if (hi >= oh.hp) {
-            if (this.finishing || (!this.know.protect.has(H.officer) && left - 1 >= this.p.keep)) {
+            // a duel / persuasion partner is never killed by a tactic either (팽성: 경무's fire took 조하 from 유비)
+            if (this.duelPending(H.officer)) ok = false;
+            else if (this.finishing || (!this.know.protect.has(H.officer) && left - 1 >= this.p.keep)) {
               left--;
               lethal = true;
               if (lo >= oh.hp) exp += combatExp(true, o.level, oh.level, true, h) - combatExp(true, o.level, oh.level, false, h);

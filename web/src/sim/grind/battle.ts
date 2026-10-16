@@ -411,6 +411,8 @@ export async function searchBattle(
   for (let i = 0; i < Math.max(variants, queue.length); i++) {
     const c = i < queue.length ? queue[i] : mutate((best as BattleOutcome | null)?.won ? (best as unknown as BattleOutcome).params : queue[Math.floor(rng.next() * queue.length)]);
     consider(await safeGrindBattle(files, snap, c, carry));
+    // GRIND_FIRST_WIN: stop at the first win, as a player retrying a lost battle would (no best-of-N pick)
+    if (process.env.GRIND_FIRST_WIN && (best as BattleOutcome | null)?.won) break;
   }
   for (let r = 1; r <= rescue && !(best as BattleOutcome | null)?.won; r++) {
     // more tries that still play the battle out (Sukwon: no emergency means, walls are passed by

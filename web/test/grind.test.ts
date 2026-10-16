@@ -148,4 +148,37 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     expect(recs.some((r) => r.trigger === 7 && recordCommands(stage, r.code).some((c) => c.name === 'BATTLE_END'))).toBe(true);
     expect(k.winCells.some((w) => w.officer === 0 && w.x0 === 0 && w.y0 === 2)).toBe(true);
   }, 300_000);
+  it('arrivals and duels that win through LEAVE_GROUP: 신도 (1,3) +50 is a win cell, 호로관 장비-여포 and 팽성 유비-조하 end the battle', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle } = await import('../src/sim/grind/policy');
+    const { scriptGains } = await import('../src/sim/grind/events');
+    const files = loadFiles();
+    const find = async (ch: number, stage: number, block: number) => {
+      for (let n = 0; n < 20; n++) {
+        const s = await scenarioSnapshot(files, ch, n, 1);
+        if (s.stage === stage && s.block === block) return s;
+      }
+      return null;
+    };
+    // 신도: 유비 at (1,3) sets the +50 bonus and leaves the block's last group; the next block starts with BATTLE_END
+    const sd = await find(1, 0, 6);
+    expect(sd).not.toBeNull();
+    const st = new DevAssets(files).chapter(1).stages[0];
+    const k = analyseBattle(st, sd!.script);
+    expect(k.winCells.some((w) => w.officer === 0 && w.x0 === 1 && w.y0 === 3)).toBe(true);
+    const bonus = scriptGains(st, 6).find((g) => g.kind === 'bonus');
+    expect(bonus?.bonus).toBe(50);
+    expect(bonus?.ends).toBe(true);
+    // 호로관: the duel removes the victory officer 여포 (4) and moves to the victory group
+    const hl = await find(0, 0, 7);
+    expect(hl).not.toBeNull();
+    const kh = analyseBattle(new DevAssets(files).chapter(0).stages[0], hl!.script);
+    expect(kh.winAdj.some((a) => a.actor === 2 && a.other === 4)).toBe(true);
+    // 팽성: persuading 조하 (223) leaves for the group whose first record is the victory
+    const pc = await find(1, 2, 4);
+    expect(pc).not.toBeNull();
+    const kp = analyseBattle(new DevAssets(files).chapter(1).stages[2], pc!.script);
+    expect(kp.winAdj.some((a) => a.actor === 0 && a.other === 223)).toBe(true);
+  }, 300_000);
 });

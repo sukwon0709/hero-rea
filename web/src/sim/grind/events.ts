@@ -84,6 +84,22 @@ export function recordIndexOf(stage: Stage, block: number, bytes: Uint8Array): n
   return null;
 }
 
+/**
+ * LEAVE_GROUP from `group` of `block` wins the battle: the next group's battle-start record (or, past
+ * the block's last group, the next block's first record: 신도's arrival at (1,3)) ends it without a
+ * game over (호로관's duel moves to group 4, whose record is the victory).
+ */
+export function leaveWins(stage: Stage, block: number, group: number): boolean {
+  const recs = stage.blocks[block]?.records ?? [];
+  const later = recs.filter((r) => r.group > group);
+  let next = later.length ? recs.find((r) => r.group === Math.min(...later.map((x) => x.group)) && r.trigger === 0) : undefined;
+  if (!later.length) next = stage.blocks[block + 1]?.records.find((r) => r.group === 0 && r.trigger === 0);
+  if (!next) return false;
+  const nc = recordCommands(stage, next.code);
+  const i = nc.findIndex((c) => c.name === 'BATTLE_END');
+  return i >= 0 && nc[i + 1]?.name !== 'GAME_OVER' && !nc.slice(0, i).some((c) => c.name === 'GAME_OVER');
+}
+
 export function scriptGains(stage: Stage, block: number): ScriptGain[] {
   const out: ScriptGain[] = [];
   for (const r of stage.blocks[block]?.records ?? []) {
@@ -95,6 +111,7 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
     let needsFlags: number[] = [];
     let gated = false;
     let ends = false;
+    let leaves = false;
     for (const c of cmds) {
       const a = c as unknown as Record<string, number> & { set?: number[] };
       if (c.name === 'IF' && a.set && a.set.length) {
@@ -106,8 +123,11 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
       else if ((c.name === 'UNIT_FORCE' || c.name === 'SET_FORCE') && a.force === 0 && a.officer !== 0) recruits.push(a.officer);
       else if (c.name === 'DUEL') duel = true;
       else if (c.name === 'BATTLE_END') ends = true;
+      else if (c.name === 'LEAVE_GROUP' && !gated && leaveWins(stage, block, r.group)) leaves = true;
     }
     if (!bonus && !levels.length && !recruits.length) continue;
+    // a bonus record that wins through its LEAVE_GROUP (계교, 신도) ends the battle like BATTLE_END
+    if (leaves && bonus && !levels.length && !recruits.length) ends = true;
     // a battle-start record that only levels up officers for the story
     const automatic = r.trigger === 0 || r.trigger === 1 || r.trigger === 9 || r.trigger === 8;
     const kind: GainKind = bonus && !levels.length && !recruits.length ? 'bonus' : duel ? 'duel' : r.trigger === 4 && recruits.length ? 'persuade' : levels.length ? 'level' : recruits.length ? 'recruit' : 'bonus';
