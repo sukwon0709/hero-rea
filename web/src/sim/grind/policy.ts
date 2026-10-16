@@ -201,6 +201,15 @@ export interface GrindParams {
   /** Farm phase: multiplier on the flat-rate tactics' value (confusion, morale, heals). */
   farmTac: number;
   /**
+   * Wake phase, above 0.5 (absent: on): when every enemy left waits (대기 / 부동: 태산's groups far
+   * in the west) and the turns left cover more than the finish needs, the early finishes (idle,
+   * losses, the leader hurt) and the regroup wait: the hurt mend, the rest march on and wake the
+   * groups one at a time, and the finish starts when its turns just remain (Sukwon: use the turns).
+   */
+  wake: number;
+  /** Wake phase: the enemies' strength (level+5 times troops share, summed) at most this share of ours. */
+  wakeRatio: number;
+  /**
    * Lure plan (lure.ts) at 거록 and 계교, above 0.5 (absent: on): hold near the start while the
    * mobile enemies come, peel the waiting groups one or two at a time with a bait, keep the victory
    * officer for last, walk 유비 to the +50 cell when his way is clear and the turns just cover it.
@@ -365,6 +374,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'cbCap', min: 0, max: 2, def: 0.8 },
   { key: 'cbMend', min: 0, max: 0.8, def: 0.35 },
   { key: 'cbGate', min: 0, max: 1, def: 1 },
+  // (appended: learned plans store the CEM mean by index)
+  { key: 'wake', min: 0, max: 1, def: 0.6 },
+  { key: 'wakeRatio', min: 0.4, max: 2.5, def: 1.4 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -572,6 +584,8 @@ export interface GrindStats {
   finishReason?: string;
   /** Turns played in the farm phase (GrindParams.farm). */
   farmTurns?: number;
+  /** Turns the wake phase held off an early finish (every enemy left waiting, turns to spare). */
+  wakeTurns?: number;
   actions: { attack: number; kill: number; tactic: number; heal: number; wait: number; item?: number; promoted?: number };
   /** Officer -> exp gained per kind. */
   byOfficer: Map<number, { hits: number; kills: number; tactics: number; heals: number }>;
@@ -872,6 +886,20 @@ export class GrindPolicy {
     return u.status === Status.Field && u.mode === AiMode.Player && !(u.flags & UnitFlag.Scripted);
   }
 
+  /**
+   * The leader is all that is left to win with: no other unit of ours under our control on the
+   * field with a quarter of its troops, and no turn event that ends the battle in our favour.
+   */
+  private leaderAlone(L: Unit): boolean {
+    if (this.know.endsAt !== null) return false;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (u.slot === L.slot || !this.controllable(u)) continue;
+      const o = this.b.officerOf(u);
+      if (o.hp * 4 >= maxHp(o)) return false;
+    }
+    return true;
+  }
+
   private enemiesOnField(): number {
     let n = 0;
     for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) if (this.scene.units[i].status === Status.Field) n++;
@@ -1154,10 +1182,10 @@ export class GrindPolicy {
       if (b.info.result) return;
       await sc.victoryCheck();
     }
-    if (!this.finishing) {
-      if (gained === 0 && b.info.turn >= 2) this.idleTurns++;
-      else this.idleTurns = 0;
-    }
+    // counted in the finish too: frozen there, a finish begun right after a kill kept the weak pull
+    // towards the enemy for good (태산: three units waited 12 turns out of reach of the last two)
+    if (gained === 0 && b.info.turn >= 2) this.idleTurns++;
+    else this.idleTurns = 0;
   }
 
   // ---- 회남 plan (GrindParams.hnPlan): hold north-east, peel the waiting south at the bridge, escape
@@ -1499,9 +1527,14 @@ export class GrindPolicy {
   /** The arrival cell that wins with a bonus for every unit (전원 경험치 +50). */
   private bonusCellMemo: [number, number] | null | undefined = undefined;
   private bonusCell(): [number, number] | null {
+    return this.walk.off ? null : this.bonusCellRaw();
+  }
+
+  /** The bonus arrival cell, whether or not the walk-in is given up for now. */
+  private bonusCellRaw(): [number, number] | null {
     if (this.bonusCellMemo !== undefined) return this.bonusCellMemo;
     this.bonusCellMemo = null;
-    if (this.know.steps.length || this.walk.off) return null;
+    if (this.know.steps.length) return null;
     for (const g of this.know.gains) {
       // (계교: the +50 record does not end the battle itself, a win cell on the same square does)
       if (g.bonus <= 0 || !g.cell || (g.trigger !== 6 && g.trigger !== 11) || g.actor !== 0 || g.needsFlags.length) continue;
@@ -1529,13 +1562,32 @@ export class GrindPolicy {
   }
 
   /** The bonus walk-in: the fewest turns the leader's way has needed since it began, and the turns without getting closer. */
-  private walk = { best: 99, stuck: 0, off: false };
+  private walk = { best: 99, stuck: 0, off: false, offNeed: 99, offTurn: 0 };
 
   /**
    * A walk-in that gets no closer for three turns (신도: 유비 held back at the narrows by 순우경, the
    * spared leader) is given up: the finish goes back to winning the usual way, while there is time.
+   * Given up is not for good: once the way opens again (순우경 off to a village to mend, the narrows
+   * free) and the turns left still cover it, the walk-in resumes (a lone 유비 used to wait to the limit).
    */
   private walkCheck() {
+    if (this.walk.off && this.finishing && !this.exitPlan) {
+      const c = this.bonusCellRaw();
+      const ls = this.b.slotOfOfficer(0);
+      if (!c || ls === NONE || this.scene.units[ls].status !== Status.Field) return;
+      const need = this.exitTurns(c);
+      const left = this.deadline() - this.b.info.turn;
+      const turn = this.b.info.turn + 1;
+      // (not while the victory officer is worn down: finishing it off is the surer win, 신도's 순우경
+      // at 68 troops limping to a village)
+      if (this.victoryWorn()) return;
+      if ((need < this.walk.offNeed || turn >= this.walk.offTurn + 2) && need <= left && need <= this.exitTurns(c, true) + 1) {
+        this.walk = { best: need, stuck: 0, off: false, offNeed: 99, offTurn: 0 };
+        this.stats.finishReason = 'escape';
+        this.log?.(`finish: walk-in resumed at turn ${this.b.info.turn + 1}, ${need} turns to ${c.join(',')}`);
+      }
+      return;
+    }
     if (this.walk.off || this.stats.finishReason !== 'escape' || !this.bonusCell() || this.exitPlan) return;
     const need = this.exitTurns(this.bonusCell()!);
     if (need < this.walk.best) {
@@ -1545,7 +1597,8 @@ export class GrindPolicy {
     }
     if (++this.walk.stuck < 3) return;
     this.walk.off = true;
-    this.bonusCellMemo = null;
+    this.walk.offNeed = need;
+    this.walk.offTurn = this.b.info.turn + 1;
     this.stats.finishReason = 'deadline';
     this.log?.(`finish: walk-in given up at turn ${this.b.info.turn + 1} (${need} turns away)`);
   }
@@ -1556,6 +1609,7 @@ export class GrindPolicy {
   }
 
   private decideFinish() {
+    this.quiet = !this.finishing && this.quietCheck();
     this.walkCheck();
     if (this.finishing && this.stats.finishReason !== 'escape' && this.bonusCell() && this.bonusOn()) {
       // a finish already running (routing, the leader spared) turns into the walk-in when it is time
@@ -1642,6 +1696,19 @@ export class GrindPolicy {
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
       return;
     }
+    // wake phase: every enemy left waits where it stands (태산: the groups far in the west) and the
+    // turns cover more than the finish: no regroup against nobody, no early finish; mend and go
+    // wake them (the finish still starts once its turns just remain)
+    if (needy && this.stepsLeft() === 0 && !deadlineHit && this.wakeOn()) {
+      const need = this.farmNeed();
+      if (left > need) {
+        if (this.idleTurns >= 8 || leaderHurt || losses) {
+          this.stats.wakeTurns = (this.stats.wakeTurns ?? 0) + 1;
+          this.log?.(`wake: turn ${b.info.turn + 1}, ${left} turns left, finish needs ${need}`);
+        }
+        return;
+      }
+    }
     // before the last third, going badly means defend and regroup (Sukwon: no fast win by the
     // 총대장 alone, no emergency means): pull back around 유비 on good terrain, heal, kill what
     // comes; never head for the enemy leader or the escape cell (연주: the defensive plan charged
@@ -1721,6 +1788,71 @@ export class GrindPolicy {
       if (this.danger(u, u.x, u.y).worst >= o.hp * 0.5) return false;
     }
     return true;
+  }
+
+  /** The wake phase is running (it holds through the fights it starts). */
+  private wakeActive = false;
+  /** The field is quiet this turn: every enemy waits (대기 / 부동) and none can hit a unit of ours. */
+  private quiet = false;
+  private quietCheck(): boolean {
+    const b = this.b;
+    let n = 0;
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
+      if (e.status !== Status.Field || e.officer === 0xffff) continue;
+      if (e.mode !== AiMode.Wait && e.mode !== AiMode.Hold) return false;
+      n++;
+    }
+    if (!n) return false;
+    this.buildThreat();
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (u.status !== Status.Field) continue;
+      const k = u.y * b.width + u.x;
+      if ((this.threat[k]?.length ?? 0) > 0 || (this.tthreat[k]?.length ?? 0) > 0) return false;
+    }
+    return true;
+  }
+  private wakeOn(): boolean {
+    const on = this.wakeCheck();
+    if (on !== this.wakeActive) this.log?.(`wake: ${on ? 'on' : 'off'} at turn ${this.b.info.turn + 1}`);
+    this.wakeActive = on;
+    return on;
+  }
+
+  /**
+   * The wake phase applies: every enemy on the field waits (대기 / 부동), none far above us, no
+   * enemy wave due in the next 3 turns, a fit party, and (to begin) none of them engaged. Battles
+   * with their own end plans are left alone.
+   */
+  private wakeCheck(): boolean {
+    if (paramOr(this.p, 'wake') <= 0.5 || this.finishing || this.p.native) return false;
+    if (this.exitPlan || this.hnOn() || (this.bonusCell() && this.bonusOn())) return false;
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    // a party to wake them with: three of ours with a quarter of their troops, 유비 above 60%
+    // (계교: two fit units and one at 10 troops went back and forth between waking and regrouping)
+    let fit = 0;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (!this.controllable(u)) continue;
+      const o = b.officerOf(u);
+      if (this.know.guarded.has(u.officer) && o.hp < maxHp(o) * 0.6) return false;
+      if (o.hp * 4 >= maxHp(o)) fit++;
+    }
+    if (fit < 3) return false;
+    // ... and the enemies left within our strength: none more than 2 levels above our best, their
+    // side at most wakeRatio of ours (호로관: 여포 on his gate is never woken by three Lv3 officers)
+    let top = 0;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) if (this.controllable(u)) top = Math.max(top, b.officerOf(u).level);
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) if (e.status === Status.Field && e.officer !== 0xffff && b.officerOf(e).level > top + 2) return false;
+    if (this.sideStrength(false) > this.sideStrength(true) * paramOr(this.p, 'wakeRatio')) return false;
+    for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
+      if (e.status === Status.Field && e.officer !== 0xffff && e.mode !== AiMode.Wait && e.mode !== AiMode.Hold) return false;
+    }
+    if (!this.enemiesOnField()) return false;
+    for (const e of this.know.turns) if (e.turn !== null && e.turn >= turn && e.turn <= turn + 3 && e.reinforce.length > 0) return false;
+    // ... and, to begin, none of them engaged: no unit of ours stands where one can hit it (a 대기
+    // unit fighting next to us stays in its mode; that fight is the usual grind and finish); once
+    // begun, the phase holds through the fights it starts
+    return this.wakeActive || this.quiet;
   }
 
   /** Turns the finish needs from here, doubled for safety half again, plus farmEnd. */
@@ -2434,14 +2566,19 @@ export class GrindPolicy {
     // loses the battle, so for it the worst case counts
     // level-aware: a leader weaker than the enemies around keeps a wider margin (worst case at most
     // half its troops at half their level), the full `guard` once it has caught up
-    const guardEff = guarded ? this.p.guard * Math.min(1, Math.max(0.5, o.level / Math.max(1, this.enemyLevel()))) : this.p.guard;
+    let guardEff = guarded ? this.p.guard * Math.min(1, Math.max(0.5, o.level / Math.max(1, this.enemyLevel()))) : this.p.guard;
+    // the leader left alone in the finish (신도: everyone else fallen, 순우경 holding the narrows):
+    // waiting loses on time for sure, so only a blow that could end it is refused
+    // (not on the bonus walk-in itself: it waits for its way to open, and is given up when it stalls)
+    const alone = guarded && fin && this.stats.finishReason !== 'escape' && this.leaderAlone(u);
+    if (alone) guardEff = Math.max(guardEff, 1);
     const deathCost = (d: { worst: number; expected: number; n?: number }, p: number) => {
       const r = d.expected / hp;
       const lethal = Math.min(1.5, Math.max(0, r - 0.6));
       let c = this.p.risk * (future * (fin ? 0.3 : 1) * lethal + (w + 0.5) * 4 * Math.min(r, 1) ** 2);
       if (guarded) {
         const rw = d.worst / hp;
-        c += 10000 * Math.min(1, Math.max(0, rw - guardEff) * 3) + 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0);
+        c += 10000 * Math.min(1, Math.max(0, rw - guardEff) * 3) + (alone ? 0 : 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0));
       }
       return p * c;
     };
@@ -2483,7 +2620,9 @@ export class GrindPolicy {
     const dn = this.duelNow(u, hp, max);
     // badly hurt: walk to a healing cell instead of waiting at the front (not in the small early
     // battles: three units, one gone to heal, left the others to 여포 at 호로관)
-    const mend = !fin && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5 ? this.mendGoal(u) : null;
+    // (any party size while regrouping on a quiet field: 태산, 유비 sat at 164 troops for 15 turns)
+    const quietMend = this.quiet && this.regroupUntil >= b.info.turn + 1;
+    const mend = !fin && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if (!chg && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
@@ -2528,7 +2667,9 @@ export class GrindPolicy {
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       const anc = !fin && this.holding() ? (hnAnc ?? this.anchorNow()) : null;
-      if (anc) {
+      if (mend && quietMend) {
+        base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
+      } else if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
         const da = this.bracing() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east

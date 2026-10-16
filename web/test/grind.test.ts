@@ -265,3 +265,44 @@ describe.skipIf(!hasGame)('grind: combat exp in the sandbox', () => {
     expect(off.won).toBe(true);
   }, 300_000);
 });
+
+describe('grind: wake phase params', () => {
+  it('the wake phase is on by default (also for plans made before it) and learnable within bounds', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(d.wake).toBeGreaterThan(0.5);
+    expect(d.wakeRatio).toBeGreaterThan(1);
+    const old = { ...d } as Record<string, number>;
+    delete old.wake;
+    delete old.wakeRatio;
+    const p = old as unknown as typeof d;
+    for (const k of ['wake', 'wakeRatio'] as const) {
+      expect(paramOr(p, k)).toBe(d[k]);
+      const s = PARAM_SPECS.find((x) => x.key === k)!;
+      expect(clampParams({ ...d, [k]: s.max + 5 })[k]).toBe(s.max);
+      expect(clampParams({ ...d, [k]: s.min - 5 })[k]).toBe(s.min);
+    }
+  });
+});
+
+describe.skipIf(!hasGame)('grind: wake phase in the sandbox', () => {
+  it('a plan without the wake keys plays as the defaults; 사수관 is won with the wake phase off too', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const d = defaultParams();
+    const old = { ...d } as Record<string, number>;
+    delete old.wake;
+    delete old.wakeRatio;
+    const strip = (o: { ms: number }) => ({ ...o, ms: 0, params: null });
+    const a = await runGrindBattle(files, snap, d);
+    const b = await runGrindBattle(files, snap, old as unknown as typeof d);
+    expect(strip(b)).toEqual(strip(a));
+    const off = await runGrindBattle(files, snap, { ...d, wake: 0 });
+    expect(a.won).toBe(true);
+    expect(off.won).toBe(true);
+    expect(off.wakeTurns ?? 0).toBe(0);
+  }, 300_000);
+});

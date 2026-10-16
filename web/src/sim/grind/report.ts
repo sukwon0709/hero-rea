@@ -93,6 +93,8 @@ const PARAM_KO: Record<ParamKey, string> = {
   farmEnd: '농사 후 마무리 여유 턴',
   farmRatio: '농사 시작: 남은 적 전력 / 아군 전력 상한',
   farmTac: '농사 중 고정 경험치 책략 가중',
+  wake: '남은 적이 모두 대기 중이고 턴이 남으면 조기 마무리 대신 깨워서 싸움',
+  wakeRatio: '깨우기 시작: 남은 적 전력 / 아군 전력 상한',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -233,6 +235,8 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   farmEnd: ['농사 후 마무리에 여유 턴을 더 두는 게 안전하다고 배움', '마무리 여유를 줄여 농사 턴을 늘리는 게 이득이라고 배움'],
   farmRatio: ['적이 더 남아 있어도 농사를 시작하는 게 낫다고 배움', '적을 더 줄인 뒤에 농사를 시작하는 게 안전하다고 배움'],
   farmTac: ['농사 중 고정 경험치 책략을 더 우선하는 게 유리하다고 배움', '농사 중에도 공격이 낫다고 배움'],
+  wake: ['대기 중인 적을 깨워 남은 턴을 쓰는 게 낫다고 배움', '대기 중인 적을 깨우러 가지 않고 일찍 마무리하는 게 낫다고 배움'],
+  wakeRatio: ['적이 더 강해도 깨우러 가는 게 낫다고 배움', '적이 충분히 약할 때만 깨우는 게 안전하다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

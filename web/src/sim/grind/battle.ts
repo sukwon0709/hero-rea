@@ -35,6 +35,8 @@ export interface BattleOutcome {
   finishTurn: number | null;
   /** Why the policy started finishing (deadline, done, idle, leader, losses, escape, ...). */
   finishReason?: string;
+  /** Turns the wake phase held off an early finish (GrindParams.wake). */
+  wakeTurns?: number;
   params: GrindParams;
   gains: OfficerGain[];
   /** Total exp gained by deployed officers below 99, weighted by need (the search objective). */
@@ -303,6 +305,7 @@ export async function runGrindBattle(
     turnLimit: scene.b.info.turnLimit,
     finishTurn: stats?.finishTurn ?? null,
     finishReason: stats?.finishReason,
+    wakeTurns: stats?.wakeTurns,
     params: p,
     gains,
     score: won ? score : -1,
