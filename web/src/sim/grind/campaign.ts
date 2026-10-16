@@ -4,7 +4,7 @@
 // story did to them in between (baseline delta: ADD_STAT, new officers, enemy deployments).
 
 import type { BattleSnapshot } from './sandbox';
-import { searchBattle, SearchRng, type BattleOutcome, type BattleSearch, type CarryState, type OfficerCarry } from './battle';
+import { searchBattle, SearchRng, startLine, type BattleOutcome, type BattleSearch, type CarryState, type OfficerCarry } from './battle';
 import { PARAM_SPECS, clampParams, type GrindParams } from './policy';
 
 function clampHint(p: GrindParams): GrindParams {
@@ -23,6 +23,7 @@ export interface CampaignBattle {
   turns: number;
   turnLimit: number;
   finishTurn: number | null;
+  finishReason?: string;
   params: GrindParams;
   kept: string[];
   actions: BattleOutcome['actions'];
@@ -42,6 +43,8 @@ export interface CampaignBattle {
   attempts?: number;
   /** Script gains (bonus exp, duels, persuasions) and early endings of the played try. */
   script?: BattleOutcome['script'];
+  /** The start of the played try: gold, 폭탄, top-9 level against the enemy level. */
+  start?: BattleOutcome['start'];
 }
 
 export interface CampaignResult {
@@ -191,12 +194,22 @@ export function topLevel(snap: BattleSnapshot, officers: OfficerCarry[], n: numb
   return lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
 }
 
-/** Average level of the enemy units a battle starts with or brings in (its deployment records). */
+/**
+ * Average level of the enemy units a battle starts with or brings in (its deployment records). An
+ * enemy's level is its record's level byte (BATTLE_UNITS +0xa, set by 1cb6:81c4 -> 0cf5:7580 at the
+ * battle setup: a literal of the script, the same whatever our levels), not the officer's stored level.
+ */
 export function enemyLevel(snap: BattleSnapshot): number {
-  const lv: number[] = [];
-  for (const u of (snap.script as unknown as { units?: { officer: number; flags: number }[] }).units ?? [])
-    if (u.flags & 1 && u.officer < snap.state.officers.length) lv.push(snap.state.officers[u.officer].dyn.level);
+  const lv = enemyLevels(snap);
   return lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
+}
+
+/** The enemy records' levels (see enemyLevel). */
+export function enemyLevels(snap: BattleSnapshot): number[] {
+  const lv: number[] = [];
+  for (const u of (snap.script as unknown as { units?: { officer: number; flags: number; b?: number }[] }).units ?? [])
+    if (u.officer !== 0xffff && u.flags & 1 && u.officer < snap.state.officers.length) lv.push(u.b ?? snap.state.officers[u.officer].dyn.level);
+  return lv;
 }
 
 export async function runCampaign(
@@ -336,6 +349,7 @@ export async function runCampaign(
       turns: b.turns,
       turnLimit: b.turnLimit,
       finishTurn: b.finishTurn,
+      finishReason: b.finishReason,
       params: b.params,
       kept: b.kept,
       actions: b.actions,
@@ -348,10 +362,11 @@ export async function runCampaign(
       purchases: b.purchases,
       attempts: s.tried.findIndex((t) => t.won) + 1 || s.tried.length,
       script: b.script,
+      start: b.start,
       lostExp: !b.won ? b.expTotal : undefined,
       lossReasons: !b.won ? s.tried.reduce<Record<string, number>>((m, t) => ((m[t.loss ?? '?'] = (m[t.loss ?? '?'] ?? 0) + 1), m), {}) : undefined,
     });
-    o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won)`);
+    o.log?.(`  [${k}] ch${snap.chapter} ${snap.name}: ${b.won ? 'won' : stop ? 'STOP' : 'FORCED'} turns ${b.turns}/${b.turnLimit} exp ${b.expTotal} (${s.tried.filter((t) => t.won).length}/${s.tried.length} won) | ${startLine(b.start)}`);
     const wonNow = out.filter((x) => x.won).length;
     if (b.won && wonNow > (furthest ? furthest.out.filter((x) => x.won).length : 0))
       furthest = { out: [...out], lastOfficers, lastMoney, carry: carry as CarryState | null, reached: new Map(reached) };

@@ -5,8 +5,8 @@
 // Win: every enemy gone, or 유비 on (0,2) (+50 for all). Holding the north-east against the wave
 // (the hnPlan) loses at the levels the party arrives with (Lv12..14). This plan:
 //   1. stands next to the wave's entry cells by the turn before it (hnStageX/Y), so the turn-6
-//      player phase strikes first, and throws the 폭탄 (shop.ts buys them at 서주) on the units
-//      that can hit us: the wave falls by turn 10..11 with 8..9 of ours left;
+//      player phase strikes first (a 폭탄 only under the policy's emergency rule: one per battle,
+//      on a unit that can nearly finish 유비; Sukwon: no bomb abuse, levels decide it);
 //   2. then peels the waiting southern units with a bait: a sturdy unit stands where only the
 //      target (and at most hnExtra others) can reach it, the rest gather just outside the other
 //      waiting units' reach and kill whatever came (one or two a turn, the bridge in between);
@@ -15,7 +15,7 @@
 // the danger of the cell (the leader's worst case, every enemy in reach hitting it).
 
 import type { BattleScene } from '../../native/battle/scene';
-import type { GrindPolicy } from './policy';
+import { BOMBS_PER_BATTLE, type GrindPolicy } from './policy';
 import { floodMove, rangeCells, terrainAt, unitsInRange, moveTypeOf } from '../../engine/battle/hex';
 import { attackPower, defencePower, maxHp, movePoints, physicalDamage, castableTactics, tacticSkill, tacticTerrainOk, tryCure, healKind } from '../../engine/battle/rules';
 import { healUseful } from '../../engine/battle/combat';
@@ -408,6 +408,9 @@ export class HuainanStrike {
           for (const dd of unitsInRange(b.s, u, bomb ? 0x81 : CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80, x, y, false)) {
             const D = this.units[dd];
             if (!(D.flags & UnitFlag.Visible) || (!bomb && D.flags & UnitFlag.Confused)) continue;
+            // 폭탄: the emergency rule of the policy (one per battle, only on an enemy that can nearly
+            // finish 유비 this phase); the strike is not built on them
+            if (bomb && (this.policy.bombsUsed >= BOMBS_PER_BATTLE || !this.policy.threatensLeader(dd, 0.8))) continue;
             const od = this.of(D);
             const th = this.foeThreat(D);
             let v: number;
@@ -457,7 +460,10 @@ export class HuainanStrike {
     } else if (a.kind === 'tactic') await sc.castFlow(u.slot, a.tactic, false, a.target);
     else if (a.kind === 'item' && a.item) {
       const ok = await sc.useItem(u.slot, a.item.id, a.item.index, a.target);
-      if (ok && a.item.id === 0x21) this.stats.bombs++;
+      if (ok && a.item.id === 0x21) {
+        this.stats.bombs++;
+        this.policy.bombsUsed++;
+      }
       if (ok && a.item.id >= 0x2b && a.item.id <= 0x2d) this.stats.conf++;
     }
     u.flags |= UnitFlag.Acted;

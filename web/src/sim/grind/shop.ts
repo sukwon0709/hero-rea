@@ -12,9 +12,10 @@
 //      larger, no caster bonus): one troop scroll (원대서/원부서/원군서 0x2e..0x30) each for 유비 and
 //      the next three, one morale scroll (평기서/활기서/용기서 0x31..0x33) for 유비, the strongest
 //      that leaves 200 gold;)
-//   (2b. before the single heals: 폭탄 (0x21) and the confusion items (농무서/기상서/호우서
-//      0x2b..0x2d) up to opts.bombItems / opts.confuseItems held in the party (see below);)
-//   (the single heals and the cheap scrolls (3s) keep opts.healKeep gold: saving for 서주's 폭탄;)
+//   (2b. before the single heals: one 폭탄 (0x21) when opts.bombItems >= 1 (an emergency tool,
+//      not a plan: Sukwon, no bomb abuse) and the confusion items (농무서/기상서/호우서 0x2b..0x2d)
+//      up to opts.confuseItems held in the party (see below);)
+//   (the single heals and the cheap scrolls (3s) keep opts.healKeep gold;)
 //   3. bombs (scrolls 0x22..0x2a, which hit through e91a and give hit exp) with what is left above
 //      a reserve, one each for the party's officers with the highest intelligence;
 //   (3s. with opts.scrolls = N instead: the namu.wiki 병법서 grind. Every party officer, lowest level
@@ -102,11 +103,10 @@ export function shopVisit(
       if (id !== undefined) buy(0, id);
     }
   }
-  // 2b. 폭탄 (0x21, 1350..1650 troops for sure, 1cb6:b029) and the confusion items (0x2b..0x2d, a
-  // sure confusion), before the heals (the gold is the scarce part): sold early (서주, 북해) and
-  // nowhere again before 회남, whose turn-6 wave the party cannot hold at the levels it arrives
-  // with. Up to opts.bombItems / opts.confuseItems held in the party, carried by the strongest
-  // (they are deployed), 200 gold kept. The policy keeps them for hard battles.
+  // 2b. 폭탄 (0x21, 1350..1650 troops for sure, 1cb6:b029; 서주, at most one) and the confusion
+  // items (0x2b..0x2d, a sure confusion; 북해): up to opts.bombItems / opts.confuseItems held in
+  // the party, carried by the strongest (they are deployed), 200 gold kept. The policy keeps them
+  // for emergencies (폭탄: one per battle, to save the leader).
   const stock = (lo: number, hi: number) => team.reduce((n, o) => n + state.officers[o].dyn.items.filter((v) => v >= lo && v <= hi).length, 0);
   const fill = (lo: number, hi: number, want: number, cheapest: boolean) => {
     const ids = shop.filter((id) => id >= lo && id <= hi).sort((a, b) => (cheapest ? a - b : b - a));
@@ -121,7 +121,7 @@ export function shopVisit(
         n++;
       }
   };
-  fill(0x21, 0x21, Math.round(opts.bombItems ?? 0), false);
+  fill(0x21, 0x21, Math.min(1, Math.round(opts.bombItems ?? 0)), false);
   fill(0x2b, 0x2d, Math.round(opts.confuseItems ?? 0), true);
   // 2. troop heals, the strongest the shop has that the gold allows
   const want = opts.scrolls === undefined || !Number.isFinite(opts.scrolls) ? -1 : Math.round(opts.scrolls);

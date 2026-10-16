@@ -150,16 +150,17 @@ describe('grind battle names', () => {
 });
 
 describe('grind: 폭탄 / confusion items, the strike plan defaults, battle treasures', () => {
-  it('buys 폭탄 (500 gold) before the heals, then the cheapest confusion item, 200 gold kept', () => {
+  it('buys one 폭탄 (500 gold, an emergency tool) before the heals, then the cheapest confusion item, 200 gold kept', () => {
     const s = fakeState([14, 18, 14], 1700);
     (s.items[0x21] as { price: number }).price = 50; // 폭탄 500
     (s.items[0x2b] as { price: number }).price = 5; // 농무서 50
     (s.items[0x2c] as { price: number }).price = 10;
     (s.items[0x1e] as { price: number }).price = 5; // 콩 50
     const got = shopVisit(s, [0x1e, 0x21, 0x2b, 0x2c], { bombItems: 2, confuseItems: 2, scrolls: 0 });
-    expect(got.slice(0, 4).map((p) => [p.officer, p.item])).toEqual([[0, 0x21], [1, 0x21], [0, 0x2b], [1, 0x2b]]);
-    // 1700 - 1000 - 100 = 600 left for the heals
-    expect(got.slice(4).every((p) => p.item === 0x1e)).toBe(true);
+    // bombItems is capped at 1 (Sukwon: no bomb abuse)
+    expect(got.slice(0, 3).map((p) => [p.officer, p.item])).toEqual([[0, 0x21], [0, 0x2b], [1, 0x2b]]);
+    // 1700 - 500 - 100 = 1100 left for the heals
+    expect(got.slice(3).every((p) => p.item === 0x1e)).toBe(true);
     // a party already holding them buys no more
     const again = shopVisit(s, [0x21, 0x2b], { bombItems: 2, confuseItems: 2 });
     expect(again).toEqual([]);
@@ -181,7 +182,7 @@ describe('grind: 폭탄 / confusion items, the strike plan defaults, battle trea
     expect(Number.isNaN(old.hnStrike)).toBe(true);
     expect(paramOr(old, 'hnStrike')).toBeGreaterThan(0.5);
     expect([paramOr(old, 'hnStageX'), paramOr(old, 'hnStageY')]).toEqual([12, 4]);
-    expect(paramOr(old, 'bombBuy')).toBe(4);
+    expect(paramOr(old, 'bombBuy')).toBe(1);
     expect(paramOr({ ...d, bombBuy: 0 }, 'bombBuy')).toBe(0);
     expect(paramOr(old, 'healKeep')).toBe(0);
   });
@@ -199,5 +200,38 @@ describe('grind: 폭탄 / confusion items, the strike plan defaults, battle trea
     await host.addItem?.(0x2a);
     expect(s.officers[1].dyn.items[0]).toBe(0x2a);
     expect(s.officers[0].dyn.items.includes(0x2a)).toBe(false);
+  });
+});
+
+describe('grind: 폭탄 are an emergency tool; the battle-start line', () => {
+  it('one 폭탄 per battle, at most one bought (old plans with bombBuy 4 are clamped)', async () => {
+    const { BOMBS_PER_BATTLE, defaultParams, clampParams } = await import('../src/sim/grind/policy');
+    expect(BOMBS_PER_BATTLE).toBe(1);
+    expect(clampParams({ ...defaultParams(), bombBuy: 4 }).bombBuy).toBe(1);
+  });
+
+  it('enemy levels are the deployment records\' level bytes (BATTLE_UNITS +0xa), not the officers\' stored levels', async () => {
+    const { enemyLevel, enemyLevels } = await import('../src/sim/grind/campaign');
+    const officers = Array.from({ length: 4 }, () => ({ dyn: { level: 1 } }));
+    const snap = {
+      state: { officers },
+      script: {
+        units: [
+          { officer: 1, flags: 1, b: 12 },
+          { officer: 2, flags: 1, b: 18 },
+          { officer: 0, flags: 0 }, // ours
+          { officer: 0xffff, flags: 1, b: 99 }, // empty record
+          { officer: 3, flags: 3 }, // a reserve with no level byte: the stored level
+        ],
+      },
+    } as unknown as Parameters<typeof enemyLevel>[0];
+    expect(enemyLevels(snap)).toEqual([12, 18, 1]);
+    expect(enemyLevel(snap)).toBeCloseTo(31 / 3);
+  });
+
+  it('startLine: gold, 폭탄, top-9 level against the enemy', async () => {
+    const { startLine } = await import('../src/sim/grind/battle');
+    expect(startLine({ gold: 150, bombs: 1, top9: 12.6, sortie: 12.55, enemyAvg: 12.4, enemyMax: 18, enemies: 22 })).toBe('gold 150 폭탄 1 Lv 12.6 (sortie 12.6) vs enemy 12.4 (max 18, 22 units)');
+    expect(startLine(undefined)).toBe('');
   });
 });

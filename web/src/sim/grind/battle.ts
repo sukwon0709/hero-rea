@@ -32,6 +32,8 @@ export interface BattleOutcome {
   turns: number;
   turnLimit: number;
   finishTurn: number | null;
+  /** Why the policy started finishing (deadline, done, idle, leader, losses, escape, ...). */
+  finishReason?: string;
   params: GrindParams;
   gains: OfficerGain[];
   /** Total exp gained by deployed officers below 99, weighted by need (the search objective). */
@@ -52,6 +54,49 @@ export interface BattleOutcome {
   ms: number;
   /** The battle script's gains and early endings, and which gains the bot got. */
   script?: ScriptNotes;
+  /** The battle start (after the merchants): gold, 폭탄 held, our levels against the enemy's. */
+  start?: BattleStart;
+}
+
+/** What a battle starts with (after the shopping): the log and the report show it. */
+export interface BattleStart {
+  gold: number;
+  /** 폭탄 (0x21) held by 유비's faction. */
+  bombs: number;
+  /** Average level of the 9 highest-level members of 유비's faction (deployed or not). */
+  top9: number;
+  /** Average level of the deployed officers. */
+  sortie: number;
+  /** Average and highest level of the enemy units set up at the start (reserves included). */
+  enemyAvg: number;
+  enemyMax: number;
+  enemies: number;
+}
+
+/** BattleStart of a scene right after the battle setup. */
+export function battleStart(scene: BattleScene): BattleStart {
+  const st = scene.ctx.state;
+  const faction = st.officers[0].dyn.flags & 0x1f;
+  const ours = st.officers.filter((o, i) => i < 0x100 && (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction);
+  const top = ours.map((o) => Math.min(99, o.dyn.level)).sort((a, b) => b - a).slice(0, 9);
+  const avg = (v: number[]) => (v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : 0);
+  const sortie = scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status !== Status.Empty && u.officer < st.officers.length).map((u) => st.officers[u.officer].dyn.level);
+  const enemy = scene.units.slice(PLAYER_SLOTS).filter((u) => u.status !== Status.Empty && u.officer < st.officers.length).map((u) => st.officers[u.officer].dyn.level);
+  return {
+    gold: st.progress.money,
+    bombs: ours.reduce((n, o) => n + o.dyn.items.filter((v) => v === 0x21).length, 0),
+    top9: avg(top),
+    sortie: avg(sortie),
+    enemyAvg: avg(enemy),
+    enemyMax: enemy.length ? Math.max(...enemy) : 0,
+    enemies: enemy.length,
+  };
+}
+
+/** The log's short form: `gold 900 폭탄 1 Lv 12.3 (sortie 11.0) vs enemy 14.2 (max 18, 22 units)`. */
+export function startLine(s: BattleStart | undefined): string {
+  if (!s) return '';
+  return `gold ${s.gold} 폭탄 ${s.bombs} Lv ${s.top9.toFixed(1)} (sortie ${s.sortie.toFixed(1)}) vs enemy ${s.enemyAvg.toFixed(1)} (max ${s.enemyMax}, ${s.enemies} units)`;
 }
 
 export interface ScriptNotes {
@@ -150,6 +195,7 @@ export async function runGrindBattle(
   let policy: GrindPolicy | null = null;
   let before: { level: number; exp: number }[] = [];
   let scene0: BattleScene | null = null;
+  let start: BattleStart | undefined;
   let rerolls = p.rerolls ?? 0;
   const purchases: Purchase[] = [];
   const run = buildSandbox(
@@ -157,6 +203,7 @@ export async function runGrindBattle(
     snap,
     (scene) => {
       scene0 = scene;
+      start = battleStart(scene);
       const stage = scene.ctx.vm.stage;
       policy = new GrindPolicy(scene, p, analyseBattle(stage, scene.ctx.vm.state));
       policy.install();
@@ -231,6 +278,7 @@ export async function runGrindBattle(
     turns: stats?.turns ?? scene.b.info.turn,
     turnLimit: scene.b.info.turnLimit,
     finishTurn: stats?.finishTurn ?? null,
+    finishReason: stats?.finishReason,
     params: p,
     gains,
     score: won ? score : -1,
@@ -246,6 +294,7 @@ export async function runGrindBattle(
     rngAfter: run.rng.seed,
     ms: performance.now() - t0,
     script: scriptNotes(policy, ctx.state, won, scene.b.info.turnLimit),
+    start,
   };
 }
 

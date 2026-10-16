@@ -361,7 +361,10 @@ async function main() {
         // the generic enemies' levels are set when the battle starts, so the stuck run's arrival
         // levels +3 are the floor of the target
         const arrived = st.best?.campaign.carryOut?.officers ? topLevel(snaps[fr!.index], st.best.campaign.carryOut.officers, 9) : 0;
-        const level = Math.round(Math.max(enemyLevel(snaps[fr!.index]), arrived + 3)) + 2 * before;
+        // above the enemy (Sukwon: "적보다 더 높게"): the wall's enemy average +3 at least (회남
+        // strike plan, 10 seeds, the arrival party raised: +2 levels over the enemy average wins
+        // 5/10, +4 wins 9/10, +0 none)
+        const level = Math.round(Math.max(enemyLevel(snaps[fr!.index]) + 3, arrived + 3)) + 2 * before;
         st.restart = { wall: fr!.index, wallName: fr!.name, level, startGen: st.gen, gens: 0, elites: {}, eliteAge: {}, best: null, stall: 0 };
         console.log(`gen ${st.gen}: frontier [${fr!.index}] ${fr!.name} stuck ${stuck} generations -> full restart lineage from battle 1 (no frozen plans), level target Lv${level} at the wall, ${variants * 2} variants per battle`);
       }

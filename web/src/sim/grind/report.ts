@@ -402,7 +402,7 @@ export function progressJson(st: EvolveState, live?: LiveStatus, ab?: HintAb, be
           cleared: st.best.campaign.cleared ?? null,
           frontier: st.best.campaign.frontier ?? null,
           roster: st.best.campaign.roster,
-          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0, ...liuBeiAndTeam(b), early: b.script?.early ?? [] })),
+          battles: st.best.campaign.battles.map((b) => ({ index: b.index, name: b.name, won: b.won, forced: b.forced, turns: b.turns, turnLimit: b.turnLimit, expTotal: b.expTotal, keep: b.params.keep, rerolls: b.params.rerolls ?? 0, native: !!b.params.native, lossReasons: b.lossReasons ?? null, tries: b.variantsTried, attempts: b.attempts ?? null, bought: boughtText(b.purchases), promoted: b.actions.promoted ?? 0, items: b.actions.item ?? 0, ...liuBeiAndTeam(b), early: b.script?.early ?? [], start: b.start ?? null })),
         }
       : null,
     rules: learnedRules(st),
@@ -689,6 +689,7 @@ export function guideMarkdown(r: RealRunResult, st: EvolveState): string {
     L.push(`### ${b.index + 1}. ${CH[b.chapter] ?? b.chapter} ${b.name}의 전투`);
     L.push('');
     if (b.purchases?.length) L.push(`- 전투 전 상점 구입: ${boughtText(b.purchases)}.`);
+    if (b.start) L.push(`- 시작: 소지금 ${b.start.gold}, 폭탄 ${b.start.bombs}개, 아군 상위 9명 평균 Lv${b.start.top9.toFixed(1)} (출진 평균 Lv${b.start.sortie.toFixed(1)}) / 적 평균 Lv${b.start.enemyAvg.toFixed(1)} (최고 Lv${b.start.enemyMax}, ${b.start.enemies}부대).`);
     if (!b.won) {
       L.push(`- 시뮬레이터 정책으로는 이기지 못함(학습 실행이라면 여기서 멈춤). 이후 전투는 참고용으로 하네스가 이 전투를 대신 넘긴 상태에서 계속. 경험치 ${b.expTotal}.`);
       L.push('');

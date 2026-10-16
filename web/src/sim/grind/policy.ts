@@ -166,7 +166,7 @@ export interface GrindParams {
   bomb: number;
   /** Confusion items 농무서/기상서/호우서 (0x2b..0x2d, sure, no exp): weight like `bomb`. Absent: 1. */
   confuse: number;
-  /** Merchants: 폭탄 (0x21, 500 gold, sold at 서주) held in the party, bought up to this many. Absent: 4. */
+  /** Merchants: 폭탄 (0x21, 500 gold, sold at 서주) held in the party, bought up to this many (at most 1: an emergency tool). Absent: 1. */
   bombBuy: number;
   /** Merchants: confusion items (0x2b..0x2d, from 50 gold, 농무서 at 북해) bought up to this many. Absent: 4. */
   confuseBuy: number;
@@ -281,7 +281,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnWeak', min: 1, max: 8, def: 3, int: true },
   { key: 'bomb', min: 0, max: 3, def: 1 },
   { key: 'confuse', min: 0, max: 3, def: 1 },
-  { key: 'bombBuy', min: 0, max: 8, def: 4, int: true },
+  { key: 'bombBuy', min: 0, max: 1, def: 1, int: true },
   { key: 'confuseBuy', min: 0, max: 12, def: 4, int: true },
   { key: 'hnStrike', min: 0, max: 1, def: 0.6 },
   { key: 'healKeep', min: 0, max: 1500, def: 0, int: true },
@@ -290,6 +290,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnExtra', min: 0, max: 3, def: 1, int: true },
   { key: 'hnWaveRisk', min: 0.2, max: 1.5, def: 1 },
 ];
+
+/** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
+export const BOMBS_PER_BATTLE = 1;
 
 /** A parameter's value, or its default when the plan predates it (absent / NaN). */
 export function paramOr(p: GrindParams, k: ParamKey): number {
@@ -2280,9 +2283,12 @@ export class GrindPolicy {
       const bomb = id === 0x21;
       const k = paramOr(this.p, bomb ? 'bomb' : 'confuse');
       if (k <= 0) return null;
-      // kept for the hard battles (회남, the outnumbered escape battles); elsewhere only to save the leader
-      // (폭탄 are sold only at 서주 before 회남: outside 회남 only on a near-lethal threat to the leader)
-      const hard = this.hnOn() || (!bomb && !!this.exitPlan);
+      // 폭탄 are an emergency tool only (Sukwon 2026-10-16: "폭탄을 남용하진 마", levels are what
+      // matter): at most one per battle (BOMBS_PER_BATTLE), and only on an enemy that can hit the
+      // leader this phase for most of his troops; no battle plan (회남 included) is built on them.
+      // The confusion items are kept for the hard battles (회남, the outnumbered escape battles)
+      if (bomb && this.bombsUsed >= BOMBS_PER_BATTLE) return null;
+      const hard = !bomb && (this.hnOn() || !!this.exitPlan);
       let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
       for (const d of unitsInRange(b.s, u, bomb ? 0x81 : CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80, x, y, false)) {
         const D = this.scene.units[d];
@@ -2350,8 +2356,11 @@ export class GrindPolicy {
     return best;
   }
 
+  /** 폭탄 thrown this battle (BOMBS_PER_BATTLE; the 회남 strike plan counts its own in too). */
+  bombsUsed = 0;
+
   /** Enemy `e` can hit the guarded leader this phase for at least `share` of its troops. */
-  private threatensLeader(e: number, share: number): boolean {
+  threatensLeader(e: number, share: number): boolean {
     const b = this.b;
     const ls = b.slotOfOfficer(0);
     if (ls === NONE) return false;
@@ -2513,6 +2522,7 @@ export class GrindPolicy {
       const ok = await sc.useItem(a.slot, a.item.id, a.item.index, a.target);
       if (!ok) kind = 'wait';
       else {
+        if (a.item.id === 0x21) this.bombsUsed++;
         this.stats.actions.item = (this.stats.actions.item ?? 0) + 1;
         if (promo) this.stats.actions.promoted = (this.stats.actions.promoted ?? 0) + 1;
       }
