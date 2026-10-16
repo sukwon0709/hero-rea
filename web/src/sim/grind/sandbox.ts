@@ -7,7 +7,7 @@
 // battle-time host methods (game.ts makeHost) for the commands that change state.
 
 import type { Assets, GameContext, Ui } from '../../native/context';
-import type { GameState } from '../../engine/state';
+import { rosterOfficers, type GameState } from '../../engine/state';
 import { ScriptVM, type ScriptHost, type ScriptState } from '../../engine/script';
 import { Rng } from '../../engine/battle/rules';
 import { NONE, PLAYER_SLOTS, Status } from '../../engine/battle/types';
@@ -67,7 +67,7 @@ const noUi: Ui = {
 };
 
 /** Script host for the sandbox: the state-changing methods of the field engine's host (game.ts). */
-function sandboxHost(state: GameState, chapterOf: () => number): ScriptHost {
+export function sandboxHost(state: GameState, chapterOf: () => number): ScriptHost {
   const off = (o: number) => state.officers[o & 0x1ff]?.dyn;
   return {
     talk: async () => {},
@@ -97,7 +97,17 @@ function sandboxHost(state: GameState, chapterOf: () => number): ScriptHost {
     addGold: (n: number) => {
       state.progress.money = Math.max(0, Math.min(10000, state.progress.money + n));
     },
-    addItem: async () => {},
+    // ADD_ITEM (op 0x1b -> 0cf5:6d9c), as game.ts addItem: the first free slot of the first roster
+    // officer that has one (in a battle too: 회남's 업화서, 계교's 장창 and 연노 are battle treasures)
+    addItem: async (item: number) => {
+      for (const o of rosterOfficers(state)) {
+        const k = o.dyn.items.indexOf(0xff);
+        if (k >= 0) {
+          o.dyn.items[k] = item;
+          break;
+        }
+      }
+    },
     setForce: (o: number, f: number) => {
       const d = off(o);
       if (d) d.flags = (d.flags & ~0x1f) | (f & 0x1f);

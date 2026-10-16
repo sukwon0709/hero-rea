@@ -16,6 +16,7 @@ import {
   CLASS_BAND,
   CLASS_MOVE_TYPE,
   CLASS_RANGE,
+  CONFUSE_ITEM_RANGE,
   DIRS,
   NONE,
   PLAYER_SLOTS,
@@ -1149,7 +1150,9 @@ export class BattleScene {
     }
     if (id >= 0x2b && id <= 0x2d) {
       await this.say(S.confuseEnemy);
-      const t = await pick(false, 0x80);
+      // the range is the byte table built at 1cb6:add9 ([bp-0x10..-0xe] = 0, 1, 0, read at adfd):
+      // 기상서 (0x2c) reaches one cell further, 농무서 and 호우서 only the four neighbours
+      const t = await pick(false, CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80);
       if (t === NONE) return false;
       if (this.units[t].flags & UnitFlag.Confused) {
         await this.say(S.alreadyConfused);
