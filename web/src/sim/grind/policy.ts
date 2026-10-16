@@ -293,6 +293,40 @@ export interface GrindParams {
   srVerify: number;
   srLure: number;
   /**
+   * Hold the end, above 0.5 (absent: on): the blow that ends the battle (the victory officer's or
+   * the last enemy's defeat, the ending duel / persuasion, the win cell) waits while the turns left
+   * exceed what it needs (walking to it and the hits, finishEstimate) plus endSpare; the others are
+   * routed as before and the ones kept go on paying hit / tactic exp (Sukwon: use every turn).
+   * Released for the leader's safety (a guarded officer below half its troops) and in rescue plans.
+   */
+  endHold: number;
+  /** Hold the end: turns kept spare on top of the turns the ending needs. */
+  endSpare: number;
+  /**
+   * Let them mend, above 0.5 (absent: on): a weakened enemy we keep alive (the victory officer, a
+   * duel / persuasion partner, the ones `keep` spares, the held last one) is drawn by its AI to a
+   * village / fortress / barracks it can walk to (1cb6:c2be: +50 there when at 40% troops or morale
+   * under 40); our units keep off those cells so it gets there, comes back with 150..250 troops a
+   * turn (1cb6:7cc8) and pays hit exp again instead of sitting one blow from death.
+   */
+  nurse: number;
+  /**
+   * Milking (Sukwon's way): while our side has slack (the enemies left at most milkRatio of our
+   * strength, no wave due), a weakened enemy that can still mend (on a village / fortress /
+   * barracks, or one in its walk) is not killed: the kill throws away the hits it pays after
+   * 150..250 troops a turn come back (1cb6:7cc8). Cost of such a kill in exp per unit weight (0 = off).
+   */
+  milk: number;
+  /** Milking: the enemies' strength (level+5 times troops share, summed) at most this share of ours. */
+  milkRatio: number;
+  /**
+   * Milking: with slack, a blow pays less the more a lower-level unit that can reach the same enemy
+   * this phase would earn from it (hit exp (gap+3)*2 up to 16 for a lower attacker, 4 for a higher
+   * one, 1cb6:e2f4): the troops go to the low levels first. Share of that difference charged, scaled
+   * by the share of the enemy's troops the blow takes.
+   */
+  steer: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -407,6 +441,15 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'srVerify', min: 0, max: 6, def: 3, int: true },
   // the lure plan (거록, 계교) under the search: off by default (the search alone won more there)
   { key: 'srLure', min: 0, max: 1, def: 0 },
+  // hold the battle-ending blow until the last turns (endHeld); off by default (cost wins under the evolve params)
+  { key: 'endHold', min: 0, max: 1, def: 0.4 },
+  { key: 'endSpare', min: 0, max: 4, def: 1, int: true },
+  // keep the healing cells free for the weakened enemies kept alive (buildNurse); off by default
+  { key: 'nurse', min: 0, max: 1, def: 0.4 },
+  // milking: spare mendable enemies, give the blows to the low levels (buildNurse)
+  { key: 'milk', min: 0, max: 3, def: 1 },
+  { key: 'milkRatio', min: 0.2, max: 1.5, def: 0.6 },
+  { key: 'steer', min: 0, max: 3, def: 1 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -990,7 +1033,7 @@ export class GrindPolicy {
     if (this.duelPending(off)) return false;
     if (off === this.know.victory && this.bonusOn()) return false;
     if (this.p.spareBand > 0.5 && !this.finishing && this.b.officerOf(this.scene.units[target]).cls === 12 && this.ourTacticUsers() > 0) return false;
-    if (this.finishing) return this.charge() || !this.know.protect.has(off);
+    if (this.finishing) return !(this.endHeld() && this.endsBattle(target)) && (this.charge() || !this.know.protect.has(off));
     if (this.know.protect.has(off)) return false;
     // regrouping: kill what comes (the leader still spared)
     if (this.regroupUntil >= this.b.info.turn + 1) return true;
@@ -1004,6 +1047,157 @@ export class GrindPolicy {
     // the soft deadline (finish before a big wave: 하비 finished from turn 2) is gone: the waves are
     // braced for and survived while grinding (Sukwon), know.soft stays for the report
     return Math.min(lim, this.know.deadline ?? 999, this.know.endsAt ?? 999);
+  }
+
+  // ---- hold the end (GrindParams.endHold): the battle-ending blow waits for the last turns
+
+  /** endHeld() at the start of the search phase (a rollout's win is judged by it). */
+  private srHeld = false;
+  private endHeldMemo: { turn: number; v: boolean } | null = null;
+
+  /**
+   * The blow that ends the battle waits (while grinding too: the leader's own kill of the last
+   * enemy, the hurt actor's ending duel): the turns left above what the ending needs (finishEstimate) plus endSpare,
+   * and the leader (the defeat officer) above half its troops. Not for the plans with their own
+   * timing (escape / bonus walk-in, 회남, the scripted steps) nor for the emergency finishes.
+   */
+  private endHeld(): boolean {
+    if (paramOr(this.p, 'endHold') <= 0.5 || this.p.native) return false;
+    const r = this.finishing ? this.stats.finishReason : undefined;
+    if (r === 'leader' || r === 'losses' || r === 'escape' || r === 'native') return false;
+    if (this.stepsLeft() > 0 || this.exitPlan || this.hnOn()) return false;
+    const b = this.b;
+    const t = b.info.turn;
+    if (this.endHeldMemo && this.endHeldMemo.turn === t) return this.endHeldMemo.v;
+    let v = this.enemiesOnField() > 0;
+    for (const off of this.know.guarded) {
+      const sl = b.slotOfOfficer(off);
+      if (!v || sl === NONE || sl >= PLAYER_SLOTS) continue;
+      const u = this.scene.units[sl];
+      if (u.status !== Status.Field) continue;
+      const o = b.officerOf(u);
+      // (badly hurt, or a blow away from it where it stands: the end comes now)
+      if (o.hp * 100 < maxHp(o) * 35 || (o.hp * 2 < maxHp(o) && this.danger(u, u.x, u.y).worst >= o.hp * 0.6)) v = false;
+    }
+    if (v) v = this.deadline() - t > this.finishEstimate() + paramOr(this.p, 'endSpare');
+    if (!v && this.log && this.endHeldMemo?.v !== false) this.log(`end: released at turn ${t + 1} (${this.deadline() - t} turns left)`);
+    this.endHeldMemo = { turn: t, v };
+    return v;
+  }
+
+  /** Defeating this enemy ends the battle: the victory officer (or a protected one), or the last enemy on the field. */
+  private endsBattle(target: number): boolean {
+    const off = this.scene.units[target].officer;
+    const v = this.victoryNow();
+    if ((v !== null && off === v) || this.know.protect.has(off)) return true;
+    return this.enemiesOnField() <= 1;
+  }
+
+  // ---- let them mend (GrindParams.nurse): the healing cells a weakened enemy we keep can reach stay free
+
+  /** Cells (y*width+x) kept free this phase, or null. */
+  private nurse: Uint8Array | null = null;
+
+  /** Milking (GrindParams.milk): our side has slack this phase. */
+  private slack = false;
+  /** Enemy slots spared for milking this phase (they can mend). */
+  private milkable = new Set<number>();
+  /** Enemy slot -> the best weighted hit exp a unit of ours that can reach it this phase earns from it. */
+  private bestHit = new Map<number, number>();
+
+  private buildNurse() {
+    this.nurse = null;
+    this.slack = false;
+    this.milkable.clear();
+    this.bestHit.clear();
+    if (this.p.native || this.hnOn() || this.exitPlan) return;
+    if (this.finishing && !this.endHeld()) return;
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const turn = b.info.turn + 1;
+    // slack: the enemies weak next to us, no wave due in the next 3 turns, the guarded officers in shape
+    let slack = this.enemiesOnField() > 0 && this.sideStrength(false) <= this.sideStrength(true) * paramOr(this.p, 'milkRatio');
+    if (slack)
+      for (const e of this.know.turns) {
+        if (e.turn === null || e.turn < turn || e.turn > turn + 3) continue;
+        const foes = e.reinforce.filter((o) => {
+          const sl = b.slotOfOfficer(o);
+          return sl === NONE || sl >= PLAYER_SLOTS;
+        }).length;
+        if (foes >= 2) slack = false;
+      }
+    if (slack)
+      for (const off of this.know.guarded) {
+        const sl = b.slotOfOfficer(off);
+        if (sl === NONE || sl >= PLAYER_SLOTS || this.scene.units[sl].status !== Status.Field) continue;
+        const o = b.officerOf(this.scene.units[sl]);
+        if (o.hp < maxHp(o) * 0.6) slack = false;
+      }
+    this.slack = slack;
+    if (slack && paramOr(this.p, 'steer') > 0) {
+      for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+        if (!this.controllable(u) || u.officer >= 0x100) continue;
+        const o = b.officerOf(u);
+        if (CLASS_RANGE[o.cls] === NONE) continue;
+        const far = movePoints(o, b.s.items) + (CLASS_RANGE[o.cls] === 0 ? 1 : 2);
+        const w = this.weight(u.slot) * (this.know.guarded.has(u.officer) ? 2 : 1);
+        for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+          const E = this.scene.units[i];
+          if (E.status !== Status.Field || E.officer === 0xffff || Math.abs(E.x - u.x) + Math.abs(E.y - u.y) > far) continue;
+          const v = w * combatExp(true, o.level, b.officerOf(E).level, false, i);
+          if (v > (this.bestHit.get(i) ?? 0)) this.bestHit.set(i, v);
+        }
+      }
+    }
+    const nurseOn = paramOr(this.p, 'nurse') > 0.5;
+    const milkOn = slack && paramOr(this.p, 'milk') > 0;
+    if (!nurseOn && !milkOn) return;
+    const cells: [number, number][] = [];
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const t = b.s.terrain[y * W + x];
+        if (t !== TERRAIN_VILLAGE && t !== TERRAIN_FORTRESS && t !== TERRAIN_BARRACKS) continue;
+        const s2 = unitAt(b.s, x, y);
+        if (s2 !== NONE && s2 >= PLAYER_SLOTS) continue;
+        cells.push([x, y]);
+      }
+    // enemies that can hit 유비 / the defeat officer or a hurt unit of ours next phase are fought as before
+    const hot = (i: number) => {
+      for (const a of this.scene.units.slice(0, PLAYER_SLOTS)) {
+        if (a.status !== Status.Field || a.officer === 0xffff) continue;
+        const oa = b.officerOf(a);
+        if (!this.know.guarded.has(a.officer) && oa.hp >= maxHp(oa) * 0.6) continue;
+        if ((this.threat[a.y * W + a.x] ?? []).includes(i)) return true;
+      }
+      return false;
+    };
+    let m: Uint8Array | null = null;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      const kept = !this.killOk(i) || (this.endHeld() && this.endsBattle(i));
+      if (!kept && !(milkOn && !hot(i))) continue;
+      if (this.healCell(E)) {
+        // on a healing cell already: it comes back by itself
+        if (!kept && milkOn) this.milkable.add(i);
+        continue;
+      }
+      if (E.mode === AiMode.Hold || !cells.length) continue;
+      const oe = b.officerOf(E);
+      const mp = movePoints(oe, b.s.items);
+      const mt = moveTypeOf(b.s, E);
+      const near = cells.filter((c) => this.pathDist(c, mt, E.x, E.y) <= mp + 2);
+      if (!near.length) continue;
+      if (!kept && milkOn) this.milkable.add(i);
+      // the AI's weak test (1cb6:c280): troops <= 2*(max/5) or morale < 40; its cells are kept free
+      if (!nurseOn || !(Math.trunc(maxHp(oe) / 5) * 2 >= oe.hp || E.morale < 40)) continue;
+      for (const c of near) {
+        m ??= new Uint8Array(W * H);
+        m[c[1] * W + c[0]] = 1;
+      }
+    }
+    this.nurse = m;
+    if (this.log && (m || this.milkable.size)) this.log(`milk: slack ${slack ? 1 : 0}, ${this.milkable.size} spared, ${m ? m.reduce((a, c) => a + c, 0) : 0} healing cells kept free at turn ${turn}`);
   }
 
   // ---- hold plan: form up near the start, let the enemy come, push out once the waves are broken
@@ -1200,6 +1394,7 @@ export class GrindPolicy {
     this.buildThreat();
     this.updateHn();
     this.buildPrice();
+    this.buildNurse();
     this.buildLeaderKills();
     const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 && !this.quietField() ? await this.searchPhase() : await this.actLoop(null);
     if (b.info.result) return;
@@ -1372,7 +1567,10 @@ export class GrindPolicy {
       if (minD < 99) v -= urg * 6 * Math.min(minD, 40);
       const vo = this.victoryNow();
       const vs = vo !== null ? b.slotOfOfficer(vo) : NONE;
-      if (vs !== NONE && sc.units[vs].status === Status.Field) {
+      // (the end held: in place for it, no hurry to wear the victory officer / the last enemies down)
+      if (this.srHeld) {
+        // nothing
+      } else if (vs !== NONE && sc.units[vs].status === Status.Field) {
         const ov = b.officerOf(sc.units[vs]);
         v -= urg * 150 * Math.min(1, ov.hp / Math.max(1, maxHp(ov)));
       } else if (vo === null && !this.wcells().length) {
@@ -1384,7 +1582,7 @@ export class GrindPolicy {
         }
       }
     }
-    if (b.info.result === 2) v += this.finishing ? 3000 : -turnsLeft * 12 * alive;
+    if (b.info.result === 2) v += this.finishing && !this.srHeld ? 3000 : -turnsLeft * 12 * alive;
     // the turns ran out without a win: lost
     else if (b.info.turn >= b.info.turnLimit - 1 && this.know.endsAt === null) return -5e5 + v;
     return v;
@@ -1423,6 +1621,7 @@ export class GrindPolicy {
     const ns = Math.max(1, paramOr(this.p, 'srSamples'));
     const depth = Math.max(1, paramOr(this.p, 'srDepth'));
     const log = this.log;
+    this.srHeld = this.endHeld();
     const save = saveScene(sc, [this]);
     this.log = null;
     this.inRollout = true;
@@ -2708,7 +2907,7 @@ export class GrindPolicy {
     if (this.bonusOn()) return false;
     const mine = this.wadj().filter((a) => a.actor === u.officer && this.know.gains.some((g) => g.trigger === 4 && g.actor === u.officer && g.other === a.other && g.levels.length && !this.fired.has(g.record)));
     if (!mine.length) return false;
-    if (this.finishing || this.deadline() - this.b.info.turn <= 2) return true;
+    if ((this.finishing && !this.endHeld()) || this.deadline() - this.b.info.turn <= 2) return true;
     if (hp < max * 0.4 && (this.enemiesOnField() <= 1 || this.lateThird()) && this.danger(u, u.x, u.y).worst >= hp) return true;
     return false;
   }
@@ -2887,6 +3086,7 @@ export class GrindPolicy {
     const ownAdj = this.wadj().find((a) => a.actor === u.officer);
     const adjAt = ownAdj ? (() => { const s2 = b.slotOfOfficer(ownAdj.other); return s2 !== NONE && this.scene.units[s2].status === Status.Field ? ([this.scene.units[s2].x, this.scene.units[s2].y] as [number, number]) : null; })() : null;
     const chg = this.charge();
+    const endHeld = this.endHeld();
     // the bonus walk-in heads for its cell whatever the way round: the turns were counted for it
     const walkIn = guarded && u.officer === 0 && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
     // ... and the others clear the way there (the guards of the cell), leaving the spared leader be
@@ -2970,9 +3170,9 @@ export class GrindPolicy {
     // battles: three units, one gone to heal, left the others to 여포 at 호로관)
     // (any party size while regrouping on a quiet field: 태산, 유비 sat at 164 troops for 15 turns)
     const quietMend = this.quiet && this.regroupUntil >= b.info.turn + 1;
-    const mend = !fin && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
+    const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
-      if (!chg && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
+      if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
       if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
@@ -3007,6 +3207,18 @@ export class GrindPolicy {
           const oe = b.officerOf(E);
           if (oe.hp * 10 < maxHp(oe) * 3) base -= this.p.conserve * 4;
         }
+      // the end held: a unit that hits back (attack type 0) keeps out of the reach of an enemy whose
+      // defeat ends the battle and whom its counter would kill (서주: 53 countered the last enemy dead at T23)
+      if (endHeld && CLASS_ATTACK_TYPE[o.cls] === 0)
+        for (const e of this.threat[y * b.width + x] ?? []) {
+          const E = this.scene.units[e];
+          if (E.status !== Status.Field || E.officer === 0xffff || !this.endsBattle(e)) continue;
+          const oe = b.officerOf(E);
+          const cd = physicalDamage({ attack: attackPower(o, u.morale, b.s.items), defence: defencePower(oe, E.morale, b.s.items), attackerClass: o.cls, defenderClass: oe.cls, defenderTerrain: terrainAt(b.s, E.x, E.y), defenderHp: 0xffff, counter: true });
+          if (cd * 1.2 >= oe.hp) base -= 200;
+        }
+      // a healing cell a weakened enemy we keep alive can reach: left free for it (buildNurse)
+      if (this.nurse && this.nurse[y * b.width + x]) base -= 30;
       let dist = 99;
       // walking distance over passable terrain (a manhattan pull leaves units stuck behind walls
       // and rivers: 서주 2nd, three units waited 20 turns in the corner north of 차주)
@@ -3065,6 +3277,8 @@ export class GrindPolicy {
             counter: false,
           });
           const lethal = dmg >= od.hp;
+          // the blow that ends the battle waits for the last turns (endHeld)
+          if (lethal && this.endHeld() && this.endsBattle(d)) continue;
           // the leader may always take a kill (except a protected enemy): a kill is its safest exp
           // (the target cannot hit back) and a low-level leader is the usual reason battles are lost
           const kg = lethal ? this.killGain(D.officer) : 0;
@@ -3077,8 +3291,15 @@ export class GrindPolicy {
           const hit = combatExp(true, o.level, od.level, false, d);
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
-          if (fin) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
-          else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od)) - Math.min(this.troopCost(d, lethal ? od.hp : dmg, lethal, w), paramOr(this.p, 'cbCap') * w * all);
+          // (the end held: the enemies whose defeat ends the battle are farmed like in the grind, no rush on them)
+          if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
+          else {
+            v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od)) - Math.min(this.troopCost(d, lethal ? od.hp : dmg, lethal, w), paramOr(this.p, 'cbCap') * w * all);
+            // milking: a mendable enemy is not killed while we have slack; its troops go to the low levels first
+            if (lethal && this.milkable.has(d)) v -= paramOr(this.p, 'milk') * w * 24;
+            const bh = this.slack ? this.bestHit.get(d) ?? 0 : 0;
+            if (lethal && bh > w * hit) v -= paramOr(this.p, 'steer') * (bh - w * hit) * 2;
+          }
           // 회남: focus fire (the hurt enemy first: the wave thins faster, fewer hit back)
           if (hnLive) v += this.p.hnFocus * (20 * (1 - od.hp / Math.max(1, maxHp(od))) + (lethal ? 15 : 0));
           v += kg;
@@ -3114,7 +3335,7 @@ export class GrindPolicy {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
-        let v = farming && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
+        let v = (farming || (fin && endHeld)) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
@@ -3333,6 +3554,8 @@ export class GrindPolicy {
           if (hi >= oh.hp) {
             // a duel / persuasion partner is never killed by a tactic either (팽성: 경무's fire took 조하 from 유비)
             if (this.duelPending(H.officer)) ok = false;
+            else if (this.endHeld() && (this.endsBattle(h) || left - 1 < 1)) ok = false;
+            else if (!this.finishing && this.milkable.has(h) && paramOr(this.p, 'milk') > 0) ok = false;
             else if (this.finishing || (!this.know.protect.has(H.officer) && left - 1 >= this.p.keep)) {
               left--;
               lethal = true;
