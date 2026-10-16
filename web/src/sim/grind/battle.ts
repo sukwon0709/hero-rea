@@ -10,6 +10,7 @@ import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
 import { HuainanStrike } from './huainan';
+import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
 import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
@@ -182,6 +183,9 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
   };
 }
 
+/** Dev hooks run on each new battle scene after the policy is installed (scratch scripts: map dumps). */
+export const sceneHooks: ((scene: BattleScene) => void)[] = [];
+
 /** Plays one battle from `snap` with `params`. */
 export async function runGrindBattle(
   files: Map<string, Uint8Array>,
@@ -216,11 +220,31 @@ export async function runGrindBattle(
         strike.install();
         if (trace) strike.log = trace;
       }
+      const lo = paramOr(p, 'lure') > 0.5 && policy.know.stage ? lureOptionsFor(policy.know.stage.chapter, policy.know.stage.index, policy.know.block) : null;
+      if (lo && policy.know.stage && policy.know.block !== undefined) {
+        // the general risk weight scales the plan's (the search's mutations vary the play)
+        const mul = Math.min(2, Math.max(0.5, p.risk / 1.2));
+        const plan = new LurePlan(scene, policy, {
+          ...lo,
+          stage: lo.hold,
+          risk: (lo.risk ?? 1) * mul,
+          leaderRisk: (lo.leaderRisk ?? 2) * mul,
+          holdTurns: Math.max(0, (lo.holdTurns ?? 0) + paramOr(p, 'luHold')),
+          traps: scriptTraps(policy.know.stage, policy.know.block),
+          maxExtra: paramOr(p, 'luExtra'),
+          margin: paramOr(p, 'luMargin'),
+          killTurns: paramOr(p, 'luKill'),
+          maxEngaged: paramOr(p, 'luEngaged'),
+        });
+        plan.install();
+        if (trace) plan.log = trace;
+      }
       if (rerolls > 0) {
         rerolls--;
         policy.retreatNow = true;
       }
       if (trace) policy.log = trace;
+      for (const h of sceneHooks) h(scene);
       before = scene.ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));
     },
     prepareState(snap, carry, p, purchases, true, loadLearnTable(assetsFor(files).main)),
@@ -405,6 +429,14 @@ export async function searchBattle(
     m.kill = src.kill * Math.exp(rng.normal() * 0.4);
     const out = clampParams(m);
     out.rerolls = rng.next() < 0.5 ? src.rerolls ?? 0 : Math.floor(rng.next() * 8);
+    // the lure plan's own keys (거록, 계교; no effect elsewhere), now and then the plan off
+    if (rng.next() < 0.5) {
+      out.luExtra = Math.max(0, Math.min(2, paramOr(src, 'luExtra') + Math.round(rng.normal())));
+      out.luKill = Math.max(3, Math.min(10, paramOr(src, 'luKill') + Math.round(rng.normal() * 2)));
+      out.luHold = Math.max(-3, Math.min(3, paramOr(src, 'luHold') + Math.round(rng.normal() * 1.5)));
+      out.luMargin = Math.max(0, Math.min(4, paramOr(src, 'luMargin') + Math.round(rng.normal())));
+    }
+    if (rng.next() < 0.2) out.lure = paramOr(src, 'lure') > 0.5 ? 0.3 : 0.7;
     return out;
   };
   if (variants <= 1 && elite) queue.splice(0, queue.length, { ...elite });

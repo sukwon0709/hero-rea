@@ -80,6 +80,8 @@ export interface UnitOrder {
   bonus?: (x: number, y: number) => number;
   /** do not act (move only) */
   noAct?: boolean;
+  /** enemies (slots) this unit must not damage (the victory officer while others are left) */
+  avoid?: (enemySlot: number) => boolean;
 }
 
 export class HuainanStrike {
@@ -97,6 +99,9 @@ export class HuainanStrike {
   /** Officers of the big turn wave (the turn-6 여포 army at 회남). */
   readonly wave = new Set<number>();
   waveDead: number | null = null;
+  label(): string {
+    return `회남 strike: stage ${this.o.stage} before the wave of ${this.wave.size}`;
+  }
   /** Replaces the scene's player phase (after GrindPolicy.install, which keeps its event hooks). */
   install(): void {
     (this.sc as unknown as Record<string, unknown>).playerPhase = () => this.playerPhase();
@@ -262,7 +267,7 @@ export class HuainanStrike {
 
   async playerPhase() {
     const sc = this.sc, b = this.b;
-    if (b.info.turn === 0) this.log?.(`회남 strike: stage ${this.o.stage} before the wave of ${this.wave.size}`);
+    if (b.info.turn === 0) this.log?.(this.label());
     const any = sc.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && u.mode === AiMode.Player && !(u.flags & UnitFlag.Scripted));
     if (!any) return;
     if (b.info.turn === 0) await sc.victoryWindow(true);
@@ -330,7 +335,7 @@ export class HuainanStrike {
       if (range !== NONE)
         for (const dd of unitsInRange(b.s, u, range, x, y, false)) {
           const D = this.units[dd];
-          if (!(D.flags & UnitFlag.Visible)) continue;
+          if (!(D.flags & UnitFlag.Visible) || ord.avoid?.(dd)) continue;
           const od = this.of(D);
           const dmg = physicalDamage({ attack: attackPower(o, u.morale, b.s.items), defence: defencePower(od, D.morale, b.s.items), attackerClass: o.cls, defenderClass: od.cls, defenderTerrain: terrainAt(b.s, D.x, D.y), defenderHp: od.hp, counter: false });
           const kill = dmg >= od.hp;
@@ -354,7 +359,7 @@ export class HuainanStrike {
           const el = Math.trunc(tc / 5);
           for (const dd of unitsInRange(b.s, u, p | 0x80, x, y, false)) {
             const D = this.units[dd];
-            if (!(D.flags & UnitFlag.Visible) || !tacticTerrainOk(el, terrainAt(b.s, D.x, D.y))) continue;
+            if (!(D.flags & UnitFlag.Visible) || ord.avoid?.(dd) || !tacticTerrainOk(el, terrainAt(b.s, D.x, D.y))) continue;
             const od = this.of(D);
             const pc = tacticSkill(o);
             let pt = tacticSkill(od) >> 2;
@@ -407,7 +412,7 @@ export class HuainanStrike {
           const bomb = id === 0x21;
           for (const dd of unitsInRange(b.s, u, bomb ? 0x81 : CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80, x, y, false)) {
             const D = this.units[dd];
-            if (!(D.flags & UnitFlag.Visible) || (!bomb && D.flags & UnitFlag.Confused)) continue;
+            if (!(D.flags & UnitFlag.Visible) || (!bomb && D.flags & UnitFlag.Confused) || (bomb && ord.avoid?.(dd))) continue;
             // 폭탄: the emergency rule of the policy (one per battle, only on an enemy that can nearly
             // finish 유비 this phase); the strike is not built on them
             if (bomb && (this.policy.bombsUsed >= BOMBS_PER_BATTLE || !this.policy.threatensLeader(dd, 0.8))) continue;

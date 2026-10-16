@@ -200,6 +200,22 @@ export interface GrindParams {
   farmRatio: number;
   /** Farm phase: multiplier on the flat-rate tactics' value (confusion, morale, heals). */
   farmTac: number;
+  /**
+   * Lure plan (lure.ts) at 거록 and 계교, above 0.5 (absent: on): hold near the start while the
+   * mobile enemies come, peel the waiting groups one or two at a time with a bait, keep the victory
+   * officer for last, walk 유비 to the +50 cell when his way is clear and the turns just cover it.
+   */
+  lure: number;
+  /** Lure plan: waiting units a bait cell may wake besides its target. Absent: 1. */
+  luExtra: number;
+  /** Lure plan: spare turns on top of 유비's walk to the +50 cell. Absent: 1. */
+  luMargin: number;
+  /** Lure plan: turns kept for the last kill of the victory officer when the walk is blocked. Absent: 6. */
+  luKill: number;
+  /** Lure plan: awake enemies tolerated before the next bait goes out. Absent: 0. */
+  luEngaged: number;
+  /** Lure plan: turns added to the battle's opening hold. Absent: 0. */
+  luHold: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -309,6 +325,12 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'farmEnd', min: 1, max: 6, def: 2, int: true },
   { key: 'farmRatio', min: 0.1, max: 1.5, def: 0.4 },
   { key: 'farmTac', min: 1, max: 4, def: 2 },
+  { key: 'lure', min: 0, max: 1, def: 0.6 },
+  { key: 'luExtra', min: 0, max: 2, def: 1, int: true },
+  { key: 'luMargin', min: 0, max: 4, def: 1, int: true },
+  { key: 'luKill', min: 3, max: 10, def: 6, int: true },
+  { key: 'luEngaged', min: 0, max: 2, def: 0, int: true },
+  { key: 'luHold', min: -3, max: 3, def: 0, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */

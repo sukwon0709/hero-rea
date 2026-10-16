@@ -181,4 +181,48 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     const kp = analyseBattle(new DevAssets(files).chapter(1).stages[2], pc!.script);
     expect(kp.winAdj.some((a) => a.actor === 0 && a.other === 223)).toBe(true);
   }, 300_000);
+
+  it('lure plan: on by default at 거록 and 계교, off with lure 0; the script traps (유비 / any unit into an area wakes a group) are read from the records', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const { scriptTraps } = await import('../src/sim/grind/lure');
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const files = loadFiles();
+    const st = new DevAssets(files).chapter(1).stages[0];
+    // 거록: 유비 into (4..10, 8..13) sends 장합 (102) and his group at him
+    const tj = scriptTraps(st, 13);
+    expect(tj.some((t) => t.who === 0 && t.x0 === 4 && t.y0 === 8 && t.x1 === 10 && t.y1 === 13 && t.officers.includes(102))).toBe(true);
+    // 계교: any of ours into (10..15, 17..23) brings 원소's (9) army; 유비 into (23..29, 6..9) sends it at him
+    const tg = scriptTraps(st, 15);
+    expect(tg.some((t) => t.who === 0x400 && t.x0 === 10 && t.y0 === 17 && t.x1 === 15 && t.y1 === 23 && t.officers.includes(9))).toBe(true);
+    expect(tg.some((t) => t.who === 0 && t.x0 === 23 && t.y0 === 6 && t.officers.includes(9))).toBe(true);
+    for (const [block, label] of [[13, '거록'], [15, '계교']] as const) {
+      let snap = null;
+      for (let n = 0; n < 20 && !snap; n++) {
+        const s = await scenarioSnapshot(files, 1, n, 4242);
+        if (s.stage === 0 && s.block === block) snap = s;
+      }
+      expect(snap).not.toBeNull();
+      const lines: string[] = [];
+      const o = await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0 }, null, (l) => lines.push(l));
+      expect(lines.some((l) => l.startsWith(`${label} lure:`))).toBe(true);
+      expect(o.turns).toBeLessThanOrEqual(o.turnLimit);
+      const off: string[] = [];
+      await runGrindBattle(files, snap!, { ...defaultParams(), rerolls: 0, lure: 0 }, null, (l) => off.push(l));
+      expect(off.some((l) => l.includes(' lure:'))).toBe(false);
+    }
+  }, 600_000);
+
+  it('lure plan stays off elsewhere (사수관 plays the same with and without its keys)', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const off = Object.fromEntries(Object.entries(defaultParams()).filter(([k]) => !k.startsWith('lu'))) as ReturnType<typeof defaultParams>;
+    const a = await runGrindBattle(files, snap, defaultParams());
+    const b = await runGrindBattle(files, snap, off);
+    expect({ ...b, ms: 0, params: null }).toEqual({ ...a, ms: 0, params: null });
+  }, 300_000);
 });
