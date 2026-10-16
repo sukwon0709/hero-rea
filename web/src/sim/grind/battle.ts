@@ -333,7 +333,12 @@ export async function runGrindBattle(
 }
 
 /** runGrindBattle, with an engine/policy exception counted as a lost try (logged) instead of ending the search. */
+// battles (by index) played without the look-ahead search, e.g. GRIND_NOSEARCH=0,1,5,7,10 for the
+// easy ones the greedy policy already wins (the search is 10x slower per battle)
+const noSearch = new Set((process.env.GRIND_NOSEARCH ?? '').split(',').filter((x) => x.trim() !== '').map(Number));
+
 export async function safeGrindBattle(files: Map<string, Uint8Array>, snap: BattleSnapshot, params: GrindParams, carry: CarryState | null): Promise<BattleOutcome> {
+  if (noSearch.has(snap.index)) params = { ...params, search: 0 };
   try {
     return await runGrindBattle(files, snap, params, carry);
   } catch (e) {
