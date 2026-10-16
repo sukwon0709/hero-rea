@@ -75,6 +75,10 @@ const PARAM_KO: Record<ParamKey, string> = {
   hnStageY: '회남 기습: 증원 직전 턴에 설 칸 (y)',
   hnExtra: '회남 기습: 미끼 칸이 목표 말고 더 깨워도 되는 대기 적 수',
   hnWaveRisk: '회남 기습: 증원군이 남은 동안 아군(유비 제외) 위험 가중치',
+  farm: '경험치 농사(안전해지면 제한 턴까지 고정 경험치 책략)',
+  farmEnd: '농사 후 마무리 여유 턴',
+  farmRatio: '농사 시작: 남은 적 전력 / 아군 전력 상한',
+  farmTac: '농사 중 고정 경험치 책략 가중',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -197,6 +201,10 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   hnStageY: ['기습 대기 칸을 북쪽으로', '기습 대기 칸을 남쪽으로'],
   hnExtra: ['미끼를 더 조심스럽게', '미끼를 더 과감하게'],
   hnWaveRisk: ['증원군 앞에서 더 과감하게', '증원군 앞에서 더 조심스럽게'],
+  farm: ['안전해지면 남은 턴을 경험치 농사에 쓰는 게 유리하다고 배움', '농사보다 일찍 끝내는 게 낫다고 배움'],
+  farmEnd: ['농사 후 마무리에 여유 턴을 더 두는 게 안전하다고 배움', '마무리 여유를 줄여 농사 턴을 늘리는 게 이득이라고 배움'],
+  farmRatio: ['적이 더 남아 있어도 농사를 시작하는 게 낫다고 배움', '적을 더 줄인 뒤에 농사를 시작하는 게 안전하다고 배움'],
+  farmTac: ['농사 중 고정 경험치 책략을 더 우선하는 게 유리하다고 배움', '농사 중에도 공격이 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

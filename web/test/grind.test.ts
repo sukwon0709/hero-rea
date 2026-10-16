@@ -35,6 +35,27 @@ describe.skipIf(!hasGame)('grind: one battle in the sandbox', () => {
     expect(c.rngAfter).not.toBe(a.rngAfter);
   }, 300_000);
 
+  it('farm phase: on by default, uses the turns up to the finish it needs and still wins; off without it', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle } = await import('../src/sim/grind/battle');
+    const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const p = defaultParams();
+    expect(paramOr(p, 'farm')).toBeGreaterThan(0.5);
+    // plans made before the farm phase have no key: on
+    const old = { ...p } as Partial<typeof p>;
+    delete old.farm;
+    expect(paramOr(old as typeof p, 'farm')).toBeGreaterThan(0.5);
+    const on = await runGrindBattle(files, snap, p);
+    const off = await runGrindBattle(files, snap, { ...p, farm: 0 });
+    expect(off.finishReason).not.toBe('farm');
+    if (on.finishReason === 'farm') {
+      expect(on.won).toBe(true);
+      expect(on.finishTurn!).toBeGreaterThanOrEqual(off.finishTurn ?? 0);
+    }
+  }, 300_000);
+
   it('reads the script gains of 사수관: the 관우-화웅 duel (+1 level)', async () => {
     const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
     const { runGrindBattle } = await import('../src/sim/grind/battle');

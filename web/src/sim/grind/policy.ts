@@ -184,6 +184,21 @@ export interface GrindParams {
   hnExtra: number;
   /** Strike plan: risk weight of our non-leader units while the wave is up. Absent: 1. */
   hnWaveRisk: number;
+  /**
+   * Farm phase, above 0.5 (absent in older plans: on): once the battle is safe (유비 and the defeat
+   * officer healthy, the enemies left weak next to us, no wave due), the early finishes (idle,
+   * losses, done, the leader hurt) wait and the turns up to the last farmEnd + the turns the finish
+   * needs go to flat-rate exp: confusion / morale / heal tactics (8, 12 for classes 12/18, paid
+   * whatever the level gap, 1cb6:b2d6) on every turn, spending MP freely, and blows that do not kill
+   * on the enemies kept alive (hit exp is paid on every hit, 1cb6:e2f4).
+   */
+  farm: number;
+  /** Farm phase: turns kept spare on top of the estimated turns the finish needs (walking + killing). */
+  farmEnd: number;
+  /** Farm phase: the enemies' strength (level+5 times troops share, summed) at most this share of ours. */
+  farmRatio: number;
+  /** Farm phase: multiplier on the flat-rate tactics' value (confusion, morale, heals). */
+  farmTac: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -289,6 +304,10 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnStageY', min: 2, max: 7, def: 4, int: true },
   { key: 'hnExtra', min: 0, max: 3, def: 1, int: true },
   { key: 'hnWaveRisk', min: 0.2, max: 1.5, def: 1 },
+  { key: 'farm', min: 0, max: 1, def: 0.6 },
+  { key: 'farmEnd', min: 1, max: 6, def: 2, int: true },
+  { key: 'farmRatio', min: 0.1, max: 1.5, def: 0.4 },
+  { key: 'farmTac', min: 1, max: 4, def: 2 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -499,6 +518,8 @@ export interface GrindStats {
   finishTurn: number | null;
   /** Why the finish began: deadline, done (nobody needy), idle, leader, losses. */
   finishReason?: string;
+  /** Turns played in the farm phase (GrindParams.farm). */
+  farmTurns?: number;
   actions: { attack: number; kill: number; tactic: number; heal: number; wait: number; item?: number; promoted?: number };
   /** Officer -> exp gained per kind. */
   byOfficer: Map<number, { hits: number; kills: number; tactics: number; heals: number }>;
@@ -1463,8 +1484,10 @@ export class GrindPolicy {
       }
       return;
     }
+    this.farmOn = false;
     if (this.finishing) return;
     const b = this.b;
+    this.farmOn = this.farmSafe();
     if (this.bonusCell() && this.bonusOn()) {
       const left = this.deadline() - b.info.turn;
       const need = this.exitTurns(this.bonusCell()!);
@@ -1519,6 +1542,22 @@ export class GrindPolicy {
     // safely until the event; the danger costs already pull a hurt leader back
     const survive = this.know.endsAt !== null && this.know.endsAt <= Math.min(b.info.turnLimit, this.know.deadline ?? 999);
     if (survive) return;
+    // farm phase: safe now, so the early finishes wait; the finish starts when the turns left just
+    // cover what it needs (walking to and killing what wins the battle) plus farmEnd spare
+    if (this.farmOn && this.stepsLeft() === 0) {
+      const need = this.farmNeed();
+      if (left > need) {
+        this.stats.farmTurns = (this.stats.farmTurns ?? 0) + 1;
+        this.log?.(`farm: turn ${b.info.turn + 1}, ${left} turns left, finish needs ${need}`);
+        return;
+      }
+      this.finishing = true;
+      this.stats.finishTurn = b.info.turn + 1;
+      this.stats.finishReason = 'farm';
+      this.log?.(`finish: farm over at turn ${b.info.turn + 1} (needs ${need}, deadline ${this.deadline()})`);
+      this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      return;
+    }
     // before the last third, going badly means defend and regroup (Sukwon: no fast win by the
     // 총대장 alone, no emergency means): pull back around 유비 on good terrain, heal, kill what
     // comes; never head for the enemy leader or the escape cell (연주: the defensive plan charged
@@ -1539,6 +1578,133 @@ export class GrindPolicy {
       this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
     }
+  }
+
+  // ---- farm phase (GrindParams.farm): flat-rate exp on every turn once the battle is safe
+
+  private farmOn = false;
+
+  /** Strength of a side on the field: (level + 5) times the troops share, summed. */
+  private sideStrength(player: boolean): number {
+    const b = this.b;
+    let v = 0;
+    for (const u of this.scene.units) {
+      if (u.status !== Status.Field || u.officer === 0xffff || (u.slot < PLAYER_SLOTS) !== player) continue;
+      const o = b.officerOf(u);
+      v += (o.level + 5) * (o.hp / Math.max(1, maxHp(o)));
+    }
+    return v;
+  }
+
+  /**
+   * Safe to farm: 유비 and the defeat officer above 60% troops and out of a lethal worst case, no
+   * enemy wave due in the next 3 turns, and the enemies left at most farmRatio of our strength.
+   * Battles with their own end plans (escape, bonus walk-in, 회남, scripted steps) are left alone.
+   */
+  private farmSafe(): boolean {
+    if (paramOr(this.p, 'farm') <= 0.5 || this.finishing || this.p.native) return false;
+    if (this.stepsLeft() > 0 || this.exitPlan || this.hnOn() || (this.bonusCell() && this.bonusOn())) return false;
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    if (turn < 3 || this.enemiesOnField() === 0) return false;
+    for (const e of this.know.turns) {
+      if (e.turn === null || e.turn < turn || e.turn > turn + 3) continue;
+      const foes = e.reinforce.filter((o) => {
+        const sl = b.slotOfOfficer(o);
+        return sl === NONE || sl >= PLAYER_SLOTS;
+      }).length;
+      if (foes >= 2) return false;
+    }
+    // few enemies left (the ones kept alive and one more), weak next to us, and our side in shape
+    if (this.enemiesOnField() > Math.max(2, this.p.keep) + 1) return false;
+    if (this.sideStrength(false) > this.sideStrength(true) * paramOr(this.p, 'farmRatio')) return false;
+    let share = 0, n = 0;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (u.status !== Status.Field || u.officer === 0xffff) continue;
+      const o = b.officerOf(u);
+      share += o.hp / Math.max(1, maxHp(o));
+      n++;
+    }
+    if (!n || share / n < 0.5) return false;
+    this.buildThreat();
+    for (const off of this.know.guarded) {
+      const sl = b.slotOfOfficer(off);
+      if (sl === NONE || sl >= PLAYER_SLOTS) continue;
+      const u = this.scene.units[sl];
+      if (u.status !== Status.Field) continue;
+      const o = b.officerOf(u);
+      if (o.hp < maxHp(o) * 0.6) return false;
+      if (this.danger(u, u.x, u.y).worst >= o.hp * 0.5) return false;
+    }
+    return true;
+  }
+
+  /** Turns the finish needs from here, doubled for safety half again, plus farmEnd. */
+  private farmNeed(): number {
+    return Math.ceil(this.finishEstimate() * 1.5) + paramOr(this.p, 'farmEnd');
+  }
+
+  /**
+   * Turns the finish needs: walking to what wins the battle (a win cell, an adjacency partner, the
+   * victory officer, or every enemy) and killing it with the hits of our units (the best four per
+   * target, physical damage 1cb6:df14).
+   */
+  private finishEstimate(): number {
+    const b = this.b;
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    if (!ours.length) return 0;
+    const turnsTo = (u: Unit, at: [number, number], reach: number) => {
+      const mp = Math.max(1, movePoints(b.officerOf(u), b.s.items));
+      return Math.ceil(Math.max(0, this.pathDist(at, moveTypeOf(b.s, u), u.x, u.y) - reach) / mp);
+    };
+    const cells = this.wcells();
+    if (cells.length) {
+      let best = 99;
+      for (const c of cells) {
+        const at: [number, number] = [(c.x0 + c.x1) >> 1, (c.y0 + c.y1) >> 1];
+        for (const u of ours) if (c.officer === u.officer || c.officer === 0x400) best = Math.min(best, turnsTo(u, at, 0));
+      }
+      if (best < 99) return best + 1;
+    }
+    for (const a of this.wadj()) {
+      const s2 = b.slotOfOfficer(a.other);
+      if (s2 === NONE || this.scene.units[s2].status !== Status.Field) continue;
+      const T = this.scene.units[s2];
+      for (const u of ours) if (u.officer === a.actor || a.actor === 0x400) return turnsTo(u, [T.x, T.y], 1) + 1;
+    }
+    const v = this.victoryNow();
+    const vs = v !== null ? b.slotOfOfficer(v) : NONE;
+    const targets = vs !== NONE && this.scene.units[vs].status === Status.Field ? [this.scene.units[vs]] : this.scene.units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field);
+    let walk = 0, kill = 0, hpSum = 0, dmgSum = 0;
+    for (const T of targets) {
+      const ot = b.officerOf(T);
+      let near = 99;
+      const dmgs: number[] = [];
+      for (const u of ours) {
+        const o = b.officerOf(u);
+        const range = CLASS_RANGE[o.cls];
+        near = Math.min(near, turnsTo(u, [T.x, T.y], range === 0 || range === NONE ? 1 : 2));
+        dmgs.push(
+          physicalDamage({
+            attack: attackPower(o, u.morale, b.s.items),
+            defence: defencePower(ot, T.morale, b.s.items),
+            attackerClass: o.cls,
+            defenderClass: ot.cls,
+            defenderTerrain: terrainAt(b.s, T.x, T.y),
+            defenderHp: 0xffff,
+            counter: false,
+          }),
+        );
+      }
+      dmgs.sort((x, y) => y - x);
+      const d = Math.max(1, dmgs.slice(0, 4).reduce((a, c) => a + c, 0));
+      walk = Math.max(walk, near);
+      kill = Math.max(kill, Math.ceil(ot.hp / d));
+      hpSum += ot.hp;
+      dmgSum += dmgs.reduce((a, c) => a + c, 0);
+    }
+    kill = Math.max(kill, Math.ceil(hpSum / Math.max(1, dmgSum)));
+    return walk + kill;
   }
 
   /** The last third of the battle (turn limit, or a losing turn event before it). */
@@ -1989,6 +2155,7 @@ export class GrindPolicy {
   private bestAction(u: Unit): Action {
     const b = this.b;
     const fin = this.finishing;
+    const farming = this.farmOn && !fin;
     const slot = u.slot;
     const o = b.officerOf(u);
     // the leader's levels keep every later battle winnable: its exp counts double
@@ -2126,8 +2293,8 @@ export class GrindPolicy {
         base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
-      } else {
-        base -= (fin && goal ? 3 : this.idleTurns >= 2 ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
+      } else if (!(farming && gg)) {
+        base -= (fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
@@ -2135,7 +2302,9 @@ export class GrindPolicy {
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
       if (this.p.band) base += this.bandValue(u, x, y, w);
       if (this.p.terrain) base += this.terrainValue(u, x, y, hp, max);
-      if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
+      // (farm phase: safe now, so the open gain, a +50 bonus cell for everyone, is walked to in earnest)
+      if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
+      else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       if (chg && this.winAdjacent(u, x, y)) base += 400;
       // leave the cells next to an ending duel / persuasion target to its actor once it is close
@@ -2208,7 +2377,8 @@ export class GrindPolicy {
       for (const tc of tactics) {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
-        let v = base + a.value - this.p.mp * TACTIC_MP[tc];
+        // farm phase: the flat-rate tactics are the point and MP is there to be spent
+        let v = farming && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value) best = { slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal };
       }
@@ -2510,7 +2680,7 @@ export class GrindPolicy {
     const st = this.stats.byOfficer.get(officer) ?? { hits: 0, kills: 0, tactics: 0, heals: 0 };
     this.stats.byOfficer.set(officer, st);
     let kind = a.kind;
-    this.log?.(`T${b.info.turn + 1}${this.finishing ? 'F' : ''} ${o.level}:${officer}@${u.x},${u.y} ${a.kind} ${a.tactic === NONE ? '' : 't' + a.tactic} ${a.target === NONE ? '' : '->' + sc.units[a.target].officer + '(' + b.officerOf(sc.units[a.target]).hp + ')'} v=${a.value.toFixed(1)} hp=${o.hp} dw=${a.danger ?? ''}`);
+    this.log?.(`T${b.info.turn + 1}${this.finishing ? 'F' : ''} ${o.level}:${officer}@${u.x},${u.y} ${a.kind} ${a.tactic === NONE ? '' : 't' + a.tactic} ${a.target === NONE ? '' : '->' + sc.units[a.target].officer + '(' + b.officerOf(sc.units[a.target]).hp + ')'} v=${a.value.toFixed(1)} hp=${o.hp} mp=${u.mp} dw=${a.danger ?? ''}`);
     if (a.kind === 'attack') {
       const t = sc.units[a.target];
       const alive = () => t.status === Status.Field;
