@@ -167,7 +167,7 @@ export interface CampaignOptions {
    * exp), then replay forward: more levels on arrival. Those battles still count as cleared.
    */
   backtrack?: number;
-  /** on a loss, go back this many battles at once (backtrack = how many times) */
+  /** on a loss, go back this many battles at once, 2 more each further loss (backtrack = how many times) */
   backJump?: number;
   /** More effort where earlier runs stopped: this battle gets these variants/retries. */
   extra?: { battle: number; variants: number; rescue: number };
@@ -318,10 +318,12 @@ export async function runCampaign(
     // about to stop: go back one more battle and grind it harder (then replay forward)
     // backJump: go back several battles at once and search every one of them again for the most exp
     // (Sukwon: going back one battle barely changes the levels; go back 4-5 battles or to the start)
+    // each further loss goes back 2 more battles from the wall (5, 7, 9, ... back; Sukwon)
     if (!b.won && o.stopOnLoss !== false && o.backJump && backLeft > 0 && k > 0) {
-      const j = Math.max(0, k - o.backJump);
-      backLeft--;
       backFrom = backFrom < 0 ? k : backFrom;
+      const jumps = (o.backtrack ?? 0) - backLeft;
+      const j = Math.max(0, backFrom - o.backJump - 2 * jumps);
+      backLeft = j === 0 ? 0 : backLeft - 1;
       o.log?.(`  [${k}] ${snap.name}: lost; going back to [${j}] ${list[j].name} (battles ${j}..${k - 1} searched again for the most exp)`);
       for (let i = j; i < k; i++) regrind.add(i);
       ({ lastOfficers, lastMoney, carry } = before[j]);
