@@ -216,6 +216,27 @@ export interface GrindParams {
   luEngaged: number;
   /** Lure plan: turns added to the battle's opening hold. Absent: 0. */
   luHold: number;
+  /**
+   * Combat exp per enemy troop (absent: on). Hit exp (4..16, 1cb6:e2f4) does not grow with the
+   * damage, and the enemies' troops barely come back, so the troops are what a battle's hit exp is
+   * spent from. Each enemy's troops get a price: the best exp per troop point any of our units near
+   * it would earn on it (a weak, low-level attacker hitting a higher-level enemy: 16 exp for a small
+   * hit). A hit costs that price times its damage, times this weight: big hits from officers who
+   * out-level the target (4 exp) leave the enemy to the small hitters. 0 = off.
+   */
+  cbPrice: number;
+  /** Combat exp: share of the damage not charged on an enemy standing on a village / fortress (it heals 150..250 a turn, 1cb6:7cc8), and the weight of keeping it alive. */
+  cbHeal: number;
+  /** Combat exp: pull of a counterattacking unit (classes 9..11, 14; 1cb6:e42e) towards cells where enemies will attack it (a counter pays hit exp). */
+  cbCounter: number;
+  /** Combat exp: cells beyond its move + range within which a unit of ours counts for an enemy's price. */
+  cbReach: number;
+  /** Combat exp: share of the price charged on blows that do not kill even while the enemy side is the stronger one (learned off: it lost 서주, 태산). */
+  cbBase: number;
+  /** Combat exp: the most of a blow's own exp value its troop cost may take (below 1, a blow is never worse than waiting: the price picks targets, it does not idle units). */
+  cbCap: number;
+  /** Troops share under which a unit walks to the nearest healing cell (village, fortress, barracks) to recover and fight on (0 = off). */
+  cbMend: number;
   /** Share of the leader's troops the worst case (every enemy in reach hits it) may reach. */
   guard: number;
   /** Pull of the other units towards the leader (stay within 3 cells): the fight stays where the leader can join it and is covered. */
@@ -331,6 +352,13 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'luKill', min: 3, max: 10, def: 6, int: true },
   { key: 'luEngaged', min: 0, max: 2, def: 0, int: true },
   { key: 'luHold', min: -3, max: 3, def: 0, int: true },
+  { key: 'cbPrice', min: 0, max: 1.5, def: 0.6 },
+  { key: 'cbHeal', min: 0, max: 1, def: 0.6 },
+  { key: 'cbCounter', min: 0, max: 3, def: 0 },
+  { key: 'cbReach', min: 0, max: 8, def: 3, int: true },
+  { key: 'cbBase', min: 0, max: 1, def: 0 },
+  { key: 'cbCap', min: 0, max: 2, def: 0.8 },
+  { key: 'cbMend', min: 0, max: 0.8, def: 0.35 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1090,6 +1118,7 @@ export class GrindPolicy {
     this.decideFinish();
     this.buildThreat();
     this.updateHn();
+    this.buildPrice();
     this.buildLeaderKills();
     // the leader moves last: the enemies' reach is then computed with the others where they ended up
     // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
@@ -2216,6 +2245,143 @@ export class GrindPolicy {
     return false;
   }
 
+  // ---- combat exp per enemy troop (GrindParams.cbPrice)
+
+  /** Enemy slot -> exp per troop point the best of our units near it earns hitting it (its troops' price). */
+  private price = new Map<number, number>();
+  private priceScale = 0;
+  private priceFloor = 0;
+  private priceFade = 0;
+
+  /** Healing terrain (village, fortress: troops and morale; barracks: troops) under an enemy. */
+  private healCell(E: Unit): boolean {
+    const t = terrainAt(this.b.s, E.x, E.y);
+    return t === TERRAIN_VILLAGE || t === TERRAIN_FORTRESS || t === TERRAIN_BARRACKS;
+  }
+
+  /**
+   * Each enemy's price: over our controllable units within their move + range + cbReach cells of
+   * it, the best weighted hit exp per damage point (1cb6:e2f4 exp, 1cb6:df14 damage at its cell).
+   */
+  private buildPrice() {
+    this.price.clear();
+    if (!(paramOr(this.p, 'cbPrice') > 0) || this.finishing) return;
+    const b = this.b;
+    const reach = paramOr(this.p, 'cbReach');
+    // only while we have the upper hand: against a stronger side every kill is safety first
+    const se = this.sideStrength(false), so = this.sideStrength(true);
+    this.priceScale = Math.min(1, Math.max(0, 2 * (1 - se / Math.max(1, so))));
+    // a blow that does not kill takes nothing off the enemy's attack (1cb6:df14 does not read the
+    // attacker's troops): it may be charged cbBase of the price even while outnumbered
+    this.priceFloor = paramOr(this.p, 'cbBase');
+    // ... and fading out towards the finish: the last turns need the enemies down
+    const left = this.deadline() - b.info.turn - this.p.finish;
+    this.priceFade = Math.min(1, Math.max(0, (left - 6) / 6));
+    if (!this.priceFade || !(Math.max(this.priceScale, this.priceFloor) > 0)) return;
+    // the units in shape to take the hits (a hurt one is pulled back to heal)
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u) && u.officer < 0x100 && CLASS_RANGE[b.officerOf(u).cls] !== NONE && b.officerOf(u).hp >= maxHp(b.officerOf(u)) * 0.5);
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      const oe = b.officerOf(E);
+      // an enemy that can hit the leader or a hurt unit of ours next phase is fought as before
+      let hot = false;
+      for (const a of this.scene.units.slice(0, PLAYER_SLOTS)) {
+        if (a.status !== Status.Field || a.officer === 0xffff) continue;
+        const oa = b.officerOf(a);
+        if (!this.know.guarded.has(a.officer) && oa.hp >= maxHp(oa) * 0.6) continue;
+        if ((this.threat[a.y * b.width + a.x] ?? []).includes(i)) hot = true;
+      }
+      if (hot) continue;
+      let best = 0;
+      for (const u of ours) {
+        const o = b.officerOf(u);
+        const far = movePoints(o, b.s.items) + (CLASS_RANGE[o.cls] === 0 ? 1 : 2) + reach;
+        if (Math.abs(u.x - E.x) + Math.abs(u.y - E.y) > far) continue;
+        const w = this.weight(u.slot);
+        const dmg = physicalDamage({
+          attack: attackPower(o, u.morale, b.s.items),
+          defence: defencePower(oe, E.morale, b.s.items),
+          attackerClass: o.cls,
+          defenderClass: oe.cls,
+          defenderTerrain: terrainAt(b.s, E.x, E.y),
+          defenderHp: 0xffff,
+          counter: false,
+        });
+        best = Math.max(best, (w * combatExp(true, o.level, oe.level, false, i)) / Math.max(1, dmg));
+      }
+      this.price.set(i, best);
+    }
+  }
+
+  /**
+   * What `dmg` troops of enemy `e` cost in exp not earned later: its price times the damage (less
+   * on healing terrain, it comes back), plus, for a kill on healing terrain, the hits it would
+   * have kept giving.
+   */
+  private troopCost(e: number, dmg: number, lethal: boolean, w: number): number {
+    const k = paramOr(this.p, 'cbPrice');
+    if (!(k > 0) || this.finishing) return 0;
+    const lam = this.price.get(e) ?? 0;
+    if (!lam) return 0;
+    const E = this.scene.units[e];
+    const heal = this.healCell(E) ? paramOr(this.p, 'cbHeal') : 0;
+    let c = k * this.priceFade * (lethal ? this.priceScale : Math.max(this.priceScale, this.priceFloor)) * lam * dmg * (1 - heal);
+    if (lethal && heal > 0) {
+      const left = Math.max(0, this.deadline() - this.b.info.turn - this.p.finish);
+      c += heal * w * 8 * Math.min(6, left / 2);
+    }
+    return c;
+  }
+
+  /**
+   * Where a badly hurt unit goes to heal (cbMend): the nearest village / fortress / barracks it can
+   * walk to that no enemy stands on, the cells enemies can attack counted as 4 steps more. It comes
+   * back with 150..250 troops a turn (1cb6:7cc8) and earns again instead of waiting out the battle.
+   */
+  private mendGoal(u: Unit): [number, number] | null {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const mt = moveTypeOf(b.s, u);
+    let best: [number, number] | null = null, bv = 1e9;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const t = b.s.terrain[y * W + x];
+        if (t !== TERRAIN_VILLAGE && t !== TERRAIN_FORTRESS && t !== TERRAIN_BARRACKS) continue;
+        if (Math.abs(x - u.x) + Math.abs(y - u.y) > 16) continue;
+        const s2 = unitAt(b.s, x, y);
+        if (s2 !== NONE && s2 !== u.slot) continue;
+        const d = this.pathDist([x, y], mt, u.x, u.y);
+        if (d > 18) continue;
+        const v = d + 4 * Math.min(2, (this.threat[y * W + x]?.length ?? 0) + (this.tthreat[y * W + x]?.length ?? 0));
+        if (v < bv) [bv, best] = [v, [x, y]];
+      }
+    return best;
+  }
+
+  /**
+   * Counterattack exp a unit at (x, y) can expect over the enemy phase (1cb6:e42e: a class with
+   * attack type 0 hits back at physical attacks of types 0 / 2 / 5 with chance force/150, and the
+   * counter pays it the usual hit exp): each enemy that can reach the cell, shared between its targets.
+   */
+  private counterValue(u: Unit, x: number, y: number): number {
+    const b = this.b;
+    const o = b.officerOf(u);
+    if (CLASS_ATTACK_TYPE[o.cls] !== 0) return 0;
+    const pc = Math.min(1, o.force / 150);
+    let v = 0;
+    const here = this.threat[u.y * b.width + u.x] ?? [];
+    for (const e of this.threat[y * b.width + x] ?? []) {
+      const E = this.scene.units[e];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      const oe = b.officerOf(E);
+      const at = CLASS_ATTACK_TYPE[oe.cls];
+      if (at !== 0 && at !== 2 && at !== 5) continue;
+      v += (pc * combatExp(true, o.level, oe.level, false, e)) / Math.max(1, this.targetsOf(e) + (here.includes(e) ? 0 : 1));
+    }
+    return v;
+  }
+
   private bestAction(u: Unit): Action {
     const b = this.b;
     const fin = this.finishing;
@@ -2308,6 +2474,9 @@ export class GrindPolicy {
     // an ending duel / persuasion of this unit's own is taken once nothing is left to grind (or the
     // actor is about to fall): the battle ends on a level instead of a kill (호로관: 장비-여포)
     const dn = this.duelNow(u, hp, max);
+    // badly hurt: walk to a healing cell instead of waiting at the front (not in the small early
+    // battles: three units, one gone to heal, left the others to 여포 at 호로관)
+    const mend = !fin && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5 ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if (!chg && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
@@ -2360,6 +2529,8 @@ export class GrindPolicy {
         base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
+      } else if (mend) {
+        base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
       } else if (!(farming && gg)) {
         base -= (fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
@@ -2369,6 +2540,8 @@ export class GrindPolicy {
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
       if (this.p.band) base += this.bandValue(u, x, y, w);
       if (this.p.terrain) base += this.terrainValue(u, x, y, hp, max);
+      // a counterattacking unit in shape where enemies will attack it: the counters pay hit exp
+      if (!fin && !guarded && hp >= max * 0.7) base += paramOr(this.p, 'cbCounter') * w * this.counterValue(u, x, y) * Math.max(0, 1 - dang.worst / hp);
       // (farm phase: safe now, so the open gain, a +50 bonus cell for everyone, is walked to in earnest)
       if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
       else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
@@ -2409,7 +2582,7 @@ export class GrindPolicy {
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
           if (fin) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
-          else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od));
+          else v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od)) - Math.min(this.troopCost(d, lethal ? od.hp : dmg, lethal, w), paramOr(this.p, 'cbCap') * w * all);
           // 회남: focus fire (the hurt enemy first: the wave thins faster, fewer hit back)
           if (hnLive) v += this.p.hnFocus * (20 * (1 - od.hp / Math.max(1, maxHp(od))) + (lethal ? 15 : 0));
           v += kg;
@@ -2653,7 +2826,7 @@ export class GrindPolicy {
             const v = unitAt(b.s, nx, ny);
             if (v !== NONE && !sideOf(v)) hits.push(v);
           }
-        let exp = 0, burn = 0, ok = true, lethal = false;
+        let exp = 0, burn = 0, spent = 0, ok = true, lethal = false;
         let left = this.enemiesOnField();
         for (const h of hits) {
           const H = this.scene.units[h];
@@ -2671,9 +2844,10 @@ export class GrindPolicy {
           }
           exp += combatExp(true, o.level, oh.level, false, h);
           burn += (Math.min(oh.hp, (lo + hi) / 2) * 10) / Math.max(1, maxHp(oh));
+          spent += this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
         }
         if (!ok) continue;
-        const value = w * exp * this.p.tactic - this.p.conserve * burn;
+        const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic);
         if (!best || value > best.value) best = { value, target: d, exp, lethal };
       }
       return best;
@@ -2777,6 +2951,7 @@ export class GrindPolicy {
     if (kind === 'wait') this.stats.actions.wait++;
     u.flags |= UnitFlag.Acted;
     const gained = o.level * 100 + o.exp - before;
+    if (this.log && gained > 0) this.log(`  +${gained} exp`);
     if (a.kind === 'attack' || a.kind === 'item') {
       if (a.lethal) st.kills += Math.max(0, gained);
       else st.hits += Math.max(0, gained);

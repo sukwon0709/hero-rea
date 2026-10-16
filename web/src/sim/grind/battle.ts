@@ -437,6 +437,9 @@ export async function searchBattle(
       out.luMargin = Math.max(0, Math.min(4, paramOr(src, 'luMargin') + Math.round(rng.normal())));
     }
     if (rng.next() < 0.2) out.lure = paramOr(src, 'lure') > 0.5 ? 0.3 : 0.7;
+    // the troop price (combat exp per enemy troop): stronger or weaker, now and then off
+    if (rng.next() < 0.4) out.cbPrice = Math.max(0, Math.min(1.5, (paramOr(src, 'cbPrice') || 0.6) * Math.exp(rng.normal() * 0.4)));
+    if (rng.next() < 0.1) out.cbPrice = 0;
     return out;
   };
   if (variants <= 1 && elite) queue.splice(0, queue.length, { ...elite });
@@ -456,8 +459,8 @@ export async function searchBattle(
     const k = (r - 1) % 3;
     const c: GrindParams =
       k === 0 ? { ...a, rerolls: r + 7 }
-      : k === 1 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
-      : clampParams({ ...base, hold: 1, brace: 0, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
+      : k === 1 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, cbPrice: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
+      : clampParams({ ...base, hold: 1, brace: 0, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, cbPrice: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
     consider(await safeGrindBattle(files, snap, c, carry));
   }
   return { best: best as unknown as BattleOutcome, tried };
