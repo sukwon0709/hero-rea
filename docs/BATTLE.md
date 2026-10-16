@@ -751,8 +751,26 @@ The AI scratch bytes are seeded from the pre-call values (`ai0`), because the or
 values. Results: 4 seeds × 1500 cases (`BATTLE_REF_CASES=1500 BATTLE_REF_SEED=7|11|12|13`) all
 match. The default run is 140 cases at seed 7.
 
-Not executed (display-heavy), only read: `ce50` glue, `c3f4`, `cd4a`, `e91a`/`ec82` sequencing,
-`e42e`, `b2d6`, `b8c0`, `baf6`, `ab86`, `7cc8`, `898c`, `8130`, `4cac`, `6f64`.
+**Experience end to end.** `tools/exp_ref.py` runs whole routines on top of the same machine, with
+the screen, sound, message and script-event routines stubbed (a far return with the routine's own
+stack adjustment; script events answer "none"). `web/test/exp-ref.test.ts` compares:
+
+- `6f64` level-up: 100 exp per level at every level, several levels from one gain, no clamp past
+  99, generic officers and officers at 99+ unchanged;
+- `e91a` (with `df14`, `e26c`, `e2f4`, `e42e`, `ec82`, `898c`, `8504`): attacks, damage tactics
+  and scroll items (kinds 1–3), the hit and kill exp, the defender's counterattack and its own exp
+  (any player-side slot, computer-controlled allies included), level-ups, morale, departures;
+- `b2d6` (with `b8c0`, `baf6`) for a computer-controlled caster: +8 exp for tactics 15..35 that
+  are carried out (a failed confusion or morale roll still counts, a refused heal does not), +12
+  for classes 12/18 casting 21..29;
+- `4a30` victory bonus: every player-side unit on the field, only when the result is a win.
+
+Officer, unit and RNG state match. `6f64` has only three callers (`4a9e`, `b89c`, `ece4`); the
+other level writers are `ADD_STAT` (`0cf5:6bee`, level += b capped at 99, no exp), the enemy setup
+`81c4` (level straight from the deployment record) and the debug menus (`31b4`, `3228`, `41cf`).
+Results: 3000 cases at seeds 1, 2, 3, 5 and 11 all match; the default run is 600 cases at seed 11.
+
+Not executed (display-heavy), only read: `ce50` glue, `c3f4`, `cd4a`, `ab86`, `7cc8`, `8130`, `4cac`.
 
 A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path to
 `rand` (`0cf5:4884`/`48c4`). The computer move animation does not touch the RNG.
@@ -760,7 +778,7 @@ A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path
 Run:
 
 ```
-HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts
+HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts test/exp-ref.test.ts
 python3 -I tools/battle_ref.py /path/to/game 50 1 | head
 ```
 
