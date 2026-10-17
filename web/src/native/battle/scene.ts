@@ -1198,9 +1198,11 @@ export class BattleScene {
         if (b.info.result) return;
         const u = this.units[slot];
         if (u.mode === AiMode.Player) continue;
-        if (u.status !== Status.Field) continue;
+        // ce50 runs for units off the field too: it drops a target that left (mode 1) before the status test
         await this.aiUnit(slot);
         if (b.info.result) return;
+        // ce50:d0b6: the unit's events (8ad2) and the victory check (4abc) only after it moved or acted
+        if (!(u.flags & (UnitFlag.Moved | UnitFlag.Acted))) continue;
         if (this.units[slot].status === Status.Field) await this.unitEvents(slot);
         await this.victoryCheck();
       }
@@ -1235,7 +1237,7 @@ export class BattleScene {
     } else {
       await this.castFlow(slot, b.s.ai.tactic, false, b.s.ai.target);
     }
-    u.flags |= UnitFlag.Acted;
+    // (flag 0x80 comes from the attack or a tactic that was carried out, as in cd4a/b2d6)
   }
 
   /** The walk applyMove makes (Plan.route), for the animation. */

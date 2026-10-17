@@ -37,6 +37,7 @@ Unmarked statements in the rules sections are *read* unless the section says oth
 | `tools/battle_ref.py` | Unicorn harness that runs the original routines on random inputs and prints JSON |
 | `web/test/battle.test.ts` | Unit tests; table checks against MAIN.EXE; map parsing (game-gated) |
 | `web/test/battle-ref.test.ts` | TS vs the original for every harness case (game-gated, needs `python3` + `unicorn`) |
+| `tools/ai_ref.py`, `web/test/ai-ref.test.ts` | The whole computer phase `3f32` under Unicorn vs the TS replay (game-gated) |
 
 ## Map data
 
@@ -241,6 +242,16 @@ for each record r (0..44):
     codes 4/6: (tx,ty) = r.param (2cb4:0a1c -> 9fa6)
 remaining enemy slots: 8222 (cleared)
 ```
+
+- The target lookup `2cb4:002a` scans all 45 slots for the officer, whatever their status. With
+  the formation flag, `3ab6` does not clear the slots before `3926`, so the player units picked
+  on the formation screen (status 1) are already there. An order "move to officer 0" therefore
+  gets 유비's slot as its target, and the unit heads for 유비 from any distance (`ce50` mode 0).
+- `8422(u, facing, x, y)` puts a reserve unit at the first free cell of `7b08`'s search, which
+  stands on terrain its move type can enter: (x,y) itself, then a depth-first walk N,E,S,W at most
+  5 steps deep (each branch tries the cell before going deeper). When nothing is found, the unit is
+  placed at (0xff,0xff). `model.ts place()` has the same search; the (0xff,0xff) case is not
+  reproduced.
 
 `1cb6:4b52` is the battle main loop: `3ab6` (screen setup) and `3d68` (empty), then:
 
@@ -587,8 +598,12 @@ if not scripted and mode != 4:
 - `approach(goal)` is `c772` mode 1 on the grid filled from the goal.
 - `cd4a` does not attack for scripted units, mode 4, or units that already acted.
 
-`planUnit()` / `applyMove()` / `aiTakeTurn()` implement this. The planning helpers are verified;
-the move and act glue is read.
+`planUnit()` / `applyMove()` / `aiTakeTurn()` implement this. All of it is verified end to end
+through `3f32` (see [Verification](#verification)).
+
+- `3f32` calls `ce50` for every unit of the side with mode ≠ 7, including empty slots and units
+  off the field. The target test comes first, so a unit off the field whose target has left gets
+  target 0xff and mode 1.
 
 ### `dc00`: attack nearest
 
@@ -770,7 +785,21 @@ other level writers are `ADD_STAT` (`0cf5:6bee`, level += b capped at 99, no exp
 `81c4` (level straight from the deployment record) and the debug menus (`31b4`, `3228`, `41cf`).
 Results: 3000 cases at seeds 1, 2, 3, 5 and 11 all match; the default run is 600 cases at seed 11.
 
-Not executed (display-heavy), only read: `ce50` glue, `c3f4`, `cd4a`, `ab86`, `7cc8`, `8130`, `4cac`.
+**Computer phases end to end.** `tools/ai_ref.py` runs `1cb6:3f32` itself (both passes) on
+generated fields of 8..18 × 8..14 cells with 15–35% of the slots filled: random classes, levels,
+troops, morale, MP, items, terrain and weather; enemy modes 0..4 with targets anywhere on the map;
+allies on automatic; hidden, confused and scripted units; units in reserve or retreated; empty
+slots. That covers `7cc8` regeneration and the `8130` cure of the enemy side, the `3e12` order,
+and every unit's whole `ce50`: planning, `c3f4` move, `8a6e` arrival, `cd4a` attack with the
+counterattack, `b2d6` tactics, and the departures `8504` (유비 leaving ends the phase with result 3).
+Stubbed on top of `exp_ref.py`: the move and blink animations (`91ca`, `8e82`), the facing
+setter `8d74`, the unit's script events `8ad2`, the victory check `4abc` and the list redraws.
+`web/test/ai-ref.test.ts` replays each phase as `BattleScene.computerPhases` does and compares every
+unit (position, target, tx/ty, status, flags except 0x10/0x80, mode, morale, MP), every officer,
+the unit map, the result byte and the RNG seed. Results: 800 cases at seeds 1, 2 and 5 all match;
+the default run is 150 cases at seed 3.
+
+Not executed, only read: `ab86`, `4cac`, `8422`/`7b08`.
 
 A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path to
 `rand` (`0cf5:4884`/`48c4`). The computer move animation does not touch the RNG.
@@ -778,7 +807,7 @@ A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path
 Run:
 
 ```
-HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts test/exp-ref.test.ts
+HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts test/exp-ref.test.ts test/ai-ref.test.ts
 python3 -I tools/battle_ref.py /path/to/game 50 1 | head
 ```
 
