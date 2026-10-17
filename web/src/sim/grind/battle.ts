@@ -167,7 +167,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       });
     if (carry?.money !== undefined) state.progress.money = carry.money;
     // the merchants passed since the previous battle
-    if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list, { areaHeals: params.area > 0.5, scrolls: params.scrolls, bombItems: paramOr(params, 'bombBuy'), confuseItems: paramOr(params, 'confuseBuy'), healKeep: paramOr(params, 'healKeep') }));
+    if (shopping) for (const list of snap.shops ?? []) bought?.push(...shopVisit(state, list, { areaHeals: params.area > 0.5, scrolls: params.scrolls, bombItems: paramOr(params, 'bombBuy'), confuseItems: paramOr(params, 'confuseBuy'), healKeep: paramOr(params, 'healKeep'), promoLead: paramOr(params, 'promoLead') }));
     const fi = snap.formationInfo;
     if (fi) {
       // a record that held a placeholder at FORMATION time but now holds an enemy (the setup's

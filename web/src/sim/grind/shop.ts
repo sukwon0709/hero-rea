@@ -65,7 +65,7 @@ export function party(state: GameState): number[] {
 export function shopVisit(
   state: GameState,
   shop: number[],
-  opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number; bombItems?: number; confuseItems?: number; healKeep?: number } = {},
+  opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number; bombItems?: number; confuseItems?: number; healKeep?: number; promoLead?: number } = {},
 ): Purchase[] {
   const out: Purchase[] = [];
   const has = (o: number, id: number) => state.officers[o].dyn.items.includes(id);
@@ -88,6 +88,12 @@ export function shopVisit(
       buy(o, id);
     }
   }
+  // (1b. with opts.promoLead = N: the gold for the promotion items of the party members within N
+  // levels of their promotion level (and not holding the item yet) is kept back from every buy
+  // below, so it is there when a merchant sells them: Sukwon promotes whenever he can)
+  const promoReserve = promotionReserve(state, team, opts.promoLead);
+  const spendable = () => state.progress.money - promoReserve;
+  const buyLesser = (o: number, id: number) => ((state.items[id]?.price ?? 0) * 10 <= spendable() ? buy(o, id) : false);
   // 2a. area heals first when asked (GrindParams.area): the gold goes to them before the single heals
   if (opts.areaHeals) {
     const pickArea = (lo: number, hi: number) =>
@@ -96,11 +102,11 @@ export function shopVisit(
       if (free(o) <= 2 || state.officers[o].dyn.items.some((v) => v >= 0x2e && v <= 0x30)) continue;
       const id = pickArea(0x2e, 0x30);
       if (id === undefined) break;
-      buy(o, id);
+      buyLesser(o, id);
     }
     if (team.includes(0) && free(0) > 2 && !state.officers[0].dyn.items.some((v) => v >= 0x31 && v <= 0x33)) {
       const id = pickArea(0x31, 0x33);
-      if (id !== undefined) buy(0, id);
+      if (id !== undefined) buyLesser(0, id);
     }
   }
   // 2b. 폭탄 (0x21, 1350..1650 troops for sure, 1cb6:b029; 서주, at most one) and the confusion
@@ -108,7 +114,7 @@ export function shopVisit(
   // the party, carried by the strongest (they are deployed), 200 gold kept. The policy keeps them
   // for emergencies (폭탄: one per battle, to save the leader).
   const stock = (lo: number, hi: number) => team.reduce((n, o) => n + state.officers[o].dyn.items.filter((v) => v >= lo && v <= hi).length, 0);
-  const fill = (lo: number, hi: number, want: number, cheapest: boolean) => {
+  const fill = (lo: number, hi: number, want: number, cheapest: boolean, keep = true) => {
     const ids = shop.filter((id) => id >= lo && id <= hi).sort((a, b) => (cheapest ? a - b : b - a));
     if (!ids.length || want <= 0) return;
     let n = stock(lo, hi);
@@ -117,11 +123,12 @@ export function shopVisit(
         if (n >= want) break;
         if (free(o) <= 1) continue;
         const id = ids.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= 200);
-        if (id === undefined || !buy(o, id)) return;
+        if (id === undefined || !(keep ? buyLesser(o, id) : buy(o, id))) return;
         n++;
       }
   };
-  fill(0x21, 0x21, Math.min(1, Math.round(opts.bombItems ?? 0)), false);
+  // (the one emergency 폭탄 comes before the promotion reserve)
+  fill(0x21, 0x21, Math.min(1, Math.round(opts.bombItems ?? 0)), false, false);
   fill(0x2b, 0x2d, Math.round(opts.confuseItems ?? 0), true);
   // 2. troop heals, the strongest the shop has that the gold allows
   const want = opts.scrolls === undefined || !Number.isFinite(opts.scrolls) ? -1 : Math.round(opts.scrolls);
@@ -133,7 +140,7 @@ export function shopVisit(
       let n = state.officers[o].dyn.items.filter((v) => TROOP_HEALS.includes(v)).length;
       while (n < need(o) && free(o) > 2) {
         const id = heals.find((h) => (state.items[h]?.price ?? 0xff) * 10 <= state.progress.money - (opts.healKeep ?? 0));
-        if (id === undefined || !buy(o, id)) break;
+        if (id === undefined || !buyLesser(o, id)) break;
         n++;
       }
     }
@@ -149,7 +156,7 @@ export function shopVisit(
       let n = state.officers[o].dyn.items.filter((v) => v >= 0x22 && v <= 0x2a).length;
       while (n < want && free(o) > 1) {
         const id = cheap.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= Math.max(100, opts.healKeep ?? 0));
-        if (id === undefined || !buy(o, id)) break;
+        if (id === undefined || !buyLesser(o, id)) break;
         n++;
       }
     }
@@ -163,8 +170,24 @@ export function shopVisit(
       if (!bombs.length || free(o) <= 2 || state.officers[o].dyn.items.some((v) => v >= 0x22 && v <= 0x2a)) continue;
       const id = bombs.find((h) => state.progress.money - (state.items[h]?.price ?? 0xff) * 10 >= reserve);
       if (id === undefined) break;
-      buy(o, id);
+      buyLesser(o, id);
     }
   }
   return out;
+}
+
+/** Gold kept for promotion items (1b): party members within `lead` levels of their promotion level
+ * without the item yet; 0 when `lead` is not given. */
+export function promotionReserve(state: GameState, team: number[], lead: number | undefined): number {
+  if (lead === undefined || !Number.isFinite(lead) || lead < 0) return 0;
+  let r = 0;
+  for (const o of team) {
+    const d = state.officers[o].dyn;
+    for (let k = 0; k < 8; k++) {
+      const id = 0x13 + k;
+      if (d.cls !== PROMOTE_FROM[k] || d.level < PROMOTE_LEVEL[k] - lead || d.items.includes(id)) continue;
+      r += (state.items[id]?.price ?? 0) * 10;
+    }
+  }
+  return r;
 }

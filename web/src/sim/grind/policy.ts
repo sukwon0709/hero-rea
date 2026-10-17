@@ -336,6 +336,8 @@ export interface GrindParams {
    * 0.5), every unit fighting its way along (no waiting at the anchor for the way to clear)
    */
   hnPush: number;
+  /** Shop: gold is kept for the promotion items of members within this many levels of their promotion level (-1: off). */
+  promoLead: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -462,6 +464,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'steer', min: 0, max: 3, def: 1 },
   { key: 'hnDmg', min: 0, max: 3, def: 0 },
   { key: 'hnPush', min: 0, max: 1, def: 1 },
+  // shop: keep the gold for the promotion items of members within promoLead levels of promoting (-1 off)
+  { key: 'promoLead', min: -1, max: 12, def: -1, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */

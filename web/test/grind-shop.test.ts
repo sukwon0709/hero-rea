@@ -235,3 +235,19 @@ describe('grind: 폭탄 are an emergency tool; the battle-start line', () => {
     expect(startLine(undefined)).toBe('');
   });
 });
+
+describe('grind shop: gold kept for promotions (promoLead)', () => {
+  it('keeps the promotion item price for a member within promoLead levels; spends it without the option', () => {
+    const make = () => {
+      const s = fakeState([10, 13], 400);
+      (s.items[0x13] as { price: number }).price = 30;
+      return s;
+    };
+    const kept = make();
+    shopVisit(kept, [0x28], { scrolls: 4, promoLead: 3 });
+    expect(kept.progress.money).toBeGreaterThanOrEqual(300);
+    const spent = make();
+    shopVisit(spent, [0x28], { scrolls: 4 });
+    expect(spent.progress.money).toBeLessThan(300);
+  });
+});
