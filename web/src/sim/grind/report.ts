@@ -113,6 +113,8 @@ const PARAM_KO: Record<ParamKey, string> = {
   milk: '여유 있을 때 회복할 수 있는 적은 죽이지 않고 계속 때리기',
   milkRatio: '여유 판단: 남은 적 전력이 아군의 이 비율 이하',
   steer: '여유 있을 때 레벨 낮은 아군에게 공격 몰아주기',
+  hnDmg: '전투 모드: 적 병력을 깎는 값 (경험치 외에)',
+  hnPush: '회남: 지원군을 쓰러뜨리면 바로 다리를 건너 성채로 진격',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -273,6 +275,8 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   milk: ['회복할 적도 바로 잡는 게 낫다고 배움', '회복할 적은 살려 두고 계속 때리는 게 낫다고 배움'],
   milkRatio: ['적이 아주 약할 때만 여유로 보는 게 낫다고 배움', '적이 꽤 남아도 여유로 보는 게 낫다고 배움'],
   steer: ['누구나 때리는 게 낫다고 배움', '레벨 낮은 아군에게 몰아주는 게 낫다고 배움'],
+  hnDmg: ['경험치만 보는 게 낫다고 배움', '적 병력을 깎는 것도 쳐주는 게 낫다고 배움'],
+  hnPush: ['지원군 뒤에도 버티는 게 낫다고 배움', '지원군을 쓰러뜨리면 바로 진격하는 게 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

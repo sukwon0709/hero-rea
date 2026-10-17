@@ -73,7 +73,7 @@ describe('grind params: the 회남 plan', () => {
     expect(d.hnPlan).toBeGreaterThan(0.5);
     expect([d.hnX, d.hnY]).toEqual([21, 8]);
     const keys = PARAM_SPECS.map((s) => s.key).filter((k) => k.startsWith('hn'));
-    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak', 'hnStrike', 'hnStageX', 'hnStageY', 'hnExtra', 'hnWaveRisk']);
+    expect(keys).toEqual(['hnPlan', 'hnX', 'hnY', 'hnPeel', 'hnWave', 'hnReach', 'hnBack', 'hnRest', 'hnFront', 'hnFocus', 'hnWeak', 'hnStrike', 'hnStageX', 'hnStageY', 'hnExtra', 'hnWaveRisk', 'hnDmg', 'hnPush']);
     const old = clampParams(Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('hn'))) as unknown as typeof d);
     for (const k of keys) expect(Number.isNaN(old[k])).toBe(true);
     // NaN never turns the plan on

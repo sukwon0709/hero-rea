@@ -327,6 +327,16 @@ export interface GrindParams {
    */
   steer: number;
   /**
+   * Battle mode: value of the enemy troops a blow or a damage tactic takes (100 per whole unit, a
+   * kill +50), on top of the exp-based value (0: off, the battles are played for exp).
+   */
+  hnDmg: number;
+  /**
+   * 회남: once the wave is down to hnWave units, push over the bridge for the fort at once (above
+   * 0.5), every unit fighting its way along (no waiting at the anchor for the way to clear)
+   */
+  hnPush: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -450,6 +460,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'milk', min: 0, max: 3, def: 1 },
   { key: 'milkRatio', min: 0.2, max: 1.5, def: 0.6 },
   { key: 'steer', min: 0, max: 3, def: 1 },
+  { key: 'hnDmg', min: 0, max: 3, def: 0 },
+  { key: 'hnPush', min: 0, max: 1, def: 1 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1820,6 +1832,15 @@ export class GrindPolicy {
       return i !== NONE && i >= PLAYER_SLOTS && units[i].status === Status.Field;
     }).length;
     const hold = this.exitPlan.anchor;
+    // the wave down: push for the fort now (Sukwon: no resting; out of MP they still attack and move)
+    if (paramOr(this.p, 'hnPush') > 0.5 && waveIn && waveLeft <= paramOr(this.p, 'hnWave')) {
+      this.finishing = true;
+      this.stats.finishTurn = turn;
+      this.stats.finishReason = 'escape';
+      this.log?.(`회남: wave down, push for ${this.exitPlan.cell.join(',')} at turn ${turn}`);
+      this.stats.kept = units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      return;
+    }
     if (this.hnPhase === 'hold' && ((waveIn && waveLeft <= this.p.hnWave) || turn >= this.p.hnPeel)) {
       this.hnPhase = 'peel';
       this.log?.(`회남: peel from turn ${turn} (wave left ${waveLeft})`);
@@ -1847,7 +1868,10 @@ export class GrindPolicy {
       hp += b.officerOf(u).hp;
       max += maxHp(b.officerOf(u));
     }
-    const resting = this.hnPhase === 'peel' && hp < max * this.p.hnRest && !!T && this.sleeping(T);
+    // (Sukwon: never just sit when the troops are down: the pull-back only while someone can heal
+    // troops with the MP they have; otherwise waiting restores nothing and the peel goes on)
+    const healer = mine.some((u) => castableTactics(b.officerOf(u), u.mp, b.learn).some((t) => (t >= 24 && t <= 29) || (t >= 33 && t <= 35)));
+    const resting = this.hnPhase === 'peel' && hp < max * this.p.hnRest && !!T && this.sleeping(T) && healer;
     // the banned cells: where a waiting unit (not the target, unless resting) would see one of ours
     const ban = new Uint8Array(W * H);
     for (let k = 0; k < W * H; k++) {
@@ -3134,7 +3158,8 @@ export class GrindPolicy {
     const leaderPos: [number, number] | null = lslot !== NONE && lslot !== slot && this.scene.units[lslot].status === Status.Field ? [this.scene.units[lslot].x, this.scene.units[lslot].y] : null;
     // a healer with MP walks towards the most hurt ally, so heals (useless on full troops) stay possible
     let healGoal: [number, number] | null = null;
-    if (!fin && tactics.some((t) => t >= 21 && t <= 35)) {
+    // (회남 push: healers keep healing on the way, Sukwon)
+    if ((!fin || this.hnEsc()) && tactics.some((t) => t >= 21 && t <= 35)) {
       let worst = 0.85;
       // 격려/응원/고무 (21..23, 30..32) restore morale: a unit below 100 morale is a target too
       const moraleHeals = tactics.some((t) => (t >= 21 && t <= 23) || (t >= 27 && t <= 29) || (t >= 30 && t <= 32));
@@ -3187,6 +3212,9 @@ export class GrindPolicy {
       if (hnLive && !guarded && !hnWeak && this.hnBait && this.hnBait[0] === x && this.hnBait[1] === y) base += 30 * (hp / Math.max(1, max));
       const t = terrainAt(b.s, x, y);
       if (hp < max * this.p.retreat && (t === 8 || t === 13 || t === 14)) base += 6;
+      // 회남 push: off the one-wide bridge (a unit parked on it, hurt or out of MP, held up the column and
+      // 유비 behind it for turns); hurt units make for the villages at either end instead
+      if (hnEsc && !guarded && t === 4) base -= 8;
       // stand next to allies: fewer sides open to the enemy
       let mates = 0;
       for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
@@ -3240,7 +3268,9 @@ export class GrindPolicy {
       } else if (mend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
       } else if (!(farming && gg)) {
-        base -= (fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, 40);
+        // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
+        // walking and sat out the whole push in the north-east)
+        base -= (fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, hnEsc ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
@@ -3300,6 +3330,9 @@ export class GrindPolicy {
             const bh = this.slack ? this.bestHit.get(d) ?? 0 : 0;
             if (lethal && bh > w * hit) v -= paramOr(this.p, 'steer') * (bh - w * hit) * 2;
           }
+          // battle mode: the troops taken count by themselves (not only through the exp)
+          const dw = paramOr(this.p, 'hnDmg');
+          if (dw > 0) v += dw * ((100 * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 50 : 0));
           // 회남: focus fire (the hurt enemy first: the wave thins faster, fewer hit back)
           if (hnLive) v += this.p.hnFocus * (20 * (1 - od.hp / Math.max(1, maxHp(od))) + (lethal ? 15 : 0));
           v += kg;
@@ -3567,7 +3600,7 @@ export class GrindPolicy {
           spent += this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
         }
         if (!ok) continue;
-        const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic);
+        const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic) + paramOr(this.p, 'hnDmg') * (10 * burn + (lethal ? 50 : 0));
         if (!best || value > best.value) best = { value, target: d, exp, lethal };
       }
       return best;
