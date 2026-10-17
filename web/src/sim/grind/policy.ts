@@ -339,6 +339,13 @@ export interface GrindParams {
   /** Shop: gold is kept for the promotion items of members within this many levels of their promotion level (-1: off). */
   promoLead: number;
   /**
+   * 연주 escape plan (yeonju.ts), above 0.5: 유비 walks fixed waypoints, then rollouts pick his way to
+   * the exit (3,19), reached around turn 15-17 (Sukwon approved the early escape there only).
+   */
+  yjEscape: number;
+  /** 연주 escape plan: RNG samples per option of the rollouts. */
+  yjSamples: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -466,6 +473,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'hnPush', min: 0, max: 1, def: 1 },
   // shop: keep the gold for the promotion items of members within promoLead levels of promoting (-1 off)
   { key: 'promoLead', min: -1, max: 12, def: -1, int: true },
+  // 연주 (battle 16 only): the early escape plan (on by default) and its rollout samples
+  { key: 'yjEscape', min: 0, max: 1, def: 0.6 },
+  { key: 'yjSamples', min: 1, max: 4, def: 3, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */

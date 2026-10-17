@@ -11,6 +11,7 @@ import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
 import { describeGain } from './events';
 import { HuainanStrike } from './huainan';
 import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
+import { YeonjuEscape, isYeonjuAt } from './yeonju';
 import { mixSeed } from './search';
 import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
@@ -248,6 +249,13 @@ export async function runGrindBattle(
           killTurns: paramOr(p, 'luKill'),
           maxEngaged: paramOr(p, 'luEngaged'),
         });
+        plan.install();
+        if (trace) plan.log = trace;
+      }
+      // 연주 (battle 16): the approved early escape to (3,19)
+      const st = policy.know.stage;
+      if (paramOr(p, 'yjEscape') > 0.5 && st && isYeonjuAt(st.chapter, st.index, policy.know.block)) {
+        const plan = new YeonjuEscape(scene, policy, { samples: Math.max(1, Math.round(paramOr(p, 'yjSamples'))), depth: 2 });
         plan.install();
         if (trace) plan.log = trace;
       }

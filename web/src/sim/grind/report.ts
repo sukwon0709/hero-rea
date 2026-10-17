@@ -116,6 +116,8 @@ const PARAM_KO: Record<ParamKey, string> = {
   hnDmg: '전투 모드: 적 병력을 깎는 값 (경험치 외에)',
   hnPush: '회남: 지원군을 쓰러뜨리면 바로 다리를 건너 성채로 진격',
   promoLead: '상점: 전직 레벨이 가까운 장수의 전직 아이템 값을 남겨 둠 (레벨 차)',
+  yjEscape: '연주: 유비가 정해진 길로 돌아 (3,19)로 탈출 (15~17턴)',
+  yjSamples: '연주 탈출: 수마다 굴려 보는 난수 표본 수',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -279,6 +281,8 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   hnDmg: ['경험치만 보는 게 낫다고 배움', '적 병력을 깎는 것도 쳐주는 게 낫다고 배움'],
   hnPush: ['지원군 뒤에도 버티는 게 낫다고 배움', '지원군을 쓰러뜨리면 바로 진격하는 게 낫다고 배움'],
   promoLead: ['전직 아이템 값을 덜 남기는 게 낫다고 배움', '전직 아이템 값을 일찍부터 남기는 게 낫다고 배움'],
+  yjEscape: ['연주에서 탈출하지 않는 게 낫다고 배움', '연주에서 일찍 탈출하는 게 낫다고 배움'],
+  yjSamples: ['연주 탈출 표본을 줄이는 게 낫다고 배움', '연주 탈출 표본을 늘리는 게 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {
