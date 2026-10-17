@@ -401,6 +401,15 @@ export interface GrindParams {
    */
   scrollEarn: number;
   /**
+   * Escort exit (장판파: the 백성, allies under the computer, walk to a cell whose arrival wins):
+   * a unit of ours stands on that cell so the battle goes on while exp is to be had. It steps off
+   * after this many player phases in a row without exp (Sukwon: use the turns for exp, but no
+   * sitting around for nothing), in the finish, or when 유비 / the party is in danger.
+   */
+  escIdle: number;
+  /** Escort exit: the cell is also freed once the turns left are at most this many. */
+  escWin: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -548,6 +557,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   // exp per unit-turn: idle units walk to the nearest enemy; the cheap scrolls compete with waiting
   { key: 'idleAp', min: 0, max: 3, def: 0 },
   { key: 'scrollEarn', min: 0, max: 2, def: 0 },
+  // escort exit (장판파): the cell the escorted allies walk to stays blocked until exp runs dry
+  { key: 'escIdle', min: 2, max: 12, def: 4, int: true },
+  { key: 'escWin', min: 1, max: 10, def: 3, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1679,6 +1691,7 @@ export class GrindPolicy {
     this.updateHold();
     this.updateBrace();
     this.decideFinish();
+    this.updatePark();
     this.buildThreat();
     this.updateHn();
     this.buildPrice();
@@ -2597,6 +2610,78 @@ export class GrindPolicy {
     }
   }
 
+  // ---- escort exit (GrindParams.escIdle): allies under the computer walking to a winning cell
+
+  /** Exit cell (y * width + x) -> the slot of ours parked on it; freed for good once parkOff. */
+  private parkAt = new Map<number, number>();
+  private parkOff = false;
+
+  /**
+   * 장판파: the 백성 (our side, the computer's 이동 / 무공격이동 to it) walk to the exit cell, and the first to arrive
+   * ends the battle (turn 8 of 70). One of ours stands on each such cell while exp is to be had;
+   * it steps off after escIdle phases without exp, in the last escWin turns, in the finish, or when
+   * the leader is hurt / half the party is gone (Sukwon: use the turns, but no idle turns).
+   */
+  private updatePark() {
+    if (this.parkOff) return;
+    const b = this.b;
+    const W = b.width;
+    const units = this.scene.units;
+    // exit cell -> the fewest turns an escort needs to get there
+    const cells = new Map<number, number>();
+    for (const c of this.wcells()) {
+      if (c.officer >= 0x400 || c.x0 !== c.x1 || c.y0 !== c.y1) continue;
+      const s = b.slotOfOfficer(c.officer);
+      if (s === NONE || s >= PLAYER_SLOTS) continue;
+      const e = units[s];
+      if (e.status !== Status.Field || (e.mode !== AiMode.MoveTo && e.mode !== AiMode.MoveNoAttack) || e.tx !== c.x0 || e.ty !== c.y0) continue;
+      const k = c.y0 * W + c.x0;
+      const et = this.pathDist([c.x0, c.y0], moveTypeOf(b.s, e), e.x, e.y) / Math.max(1, movePoints(b.officerOf(e), b.s.items));
+      cells.set(k, Math.min(cells.get(k) ?? 99, et));
+    }
+    if (!cells.size) {
+      this.parkAt.clear();
+      return;
+    }
+    const mine = units.slice(0, PLAYER_SLOTS).filter((u) => u.officer < 0x100 && u.status !== Status.Empty && u.status !== Status.Reserve);
+    const leaderHurt = mine.some((u) => this.know.guarded.has(u.officer) && u.status === Status.Field && b.officerOf(u).hp * 100 < maxHp(b.officerOf(u)) * (this.p.lead ? 35 : 60));
+    const halfGone = mine.filter((u) => u.status !== Status.Field).length * 2 >= mine.length;
+    const left = this.deadline() - b.info.turn;
+    const why = this.finishing ? 'finish' : left <= paramOr(this.p, 'escWin') ? 'last turns' : this.idleTurns >= paramOr(this.p, 'escIdle') ? 'idle' : leaderHurt ? 'leader' : halfGone ? 'losses' : null;
+    if (why) {
+      this.parkOff = true;
+      this.parkAt.clear();
+      this.log?.(`escort: exit freed at turn ${b.info.turn + 1} (${why})`);
+      return;
+    }
+    for (const [k, s] of [...this.parkAt]) if (!cells.has(k) || !this.controllable(units[s])) this.parkAt.delete(k);
+    const taken = new Set(this.parkAt.values());
+    for (const [k, et] of cells) {
+      if (this.parkAt.has(k)) continue;
+      const x = k % W, y = (k - x) / W;
+      let bs = NONE, bd = 1e9;
+      for (const u of units.slice(0, PLAYER_SLOTS)) {
+        if (!this.controllable(u) || this.know.guarded.has(u.officer) || taken.has(u.slot)) continue;
+        const o = b.officerOf(u);
+        if (o.hp * 2 < maxHp(o)) continue;
+        const d = this.pathDist([x, y], moveTypeOf(b.s, u), u.x, u.y) / Math.max(1, movePoints(o, b.s.items));
+        if (d < bd) [bd, bs] = [d, u.slot];
+      }
+      // (one who cannot be there before the escorts would only walk alone into the enemy: 장판파 2nd's
+      // exit lies past the enemy's lines)
+      if (bs === NONE || bd > et + 1) continue;
+      this.parkAt.set(k, bs);
+      taken.add(bs);
+      this.log?.(`escort: officer ${units[bs].officer} holds the exit ${x},${y} from turn ${b.info.turn + 1}`);
+    }
+  }
+
+  /** The exit cell this unit holds (updatePark), or null. */
+  private parkCellOf(slot: number): [number, number] | null {
+    for (const [k, s] of this.parkAt) if (s === slot) return [k % this.b.width, Math.floor(k / this.b.width)];
+    return null;
+  }
+
   // ---- farm phase (GrindParams.farm): flat-rate exp on every turn once the battle is safe
 
   private farmOn = false;
@@ -3512,6 +3597,7 @@ export class GrindPolicy {
     // idle walk (GrindParams.idleAp): two commands in a row without exp, in shape, not in the finish
     const idleWalk = !fin && !guarded && hp * 2 >= max && (this.unitIdle.get(slot) ?? 0) >= 2 ? paramOr(this.p, 'idleAp') : 0;
     const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
+    const pk = this.parkCellOf(slot);
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -3620,6 +3706,8 @@ export class GrindPolicy {
       if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
       else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
+      // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
+      if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
       // leave the cells next to an ending duel / persuasion target to its actor once it is close
       if (chg && this.blocksActor(u, x, y)) base -= 15;

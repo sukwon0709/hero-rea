@@ -353,11 +353,22 @@ describe('grind: fish pen params', () => {
       expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
     }
     // learned plans store the CEM mean by index: the pen keys were appended after idleFinish (and
-    // only later keys, the shop's sell and then idleAp / scrollEarn, follow them)
+    // only later keys, the shop's sell, idleAp / scrollEarn and the escort exit's escIdle / escWin, follow them)
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn']);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin']);
+  });
+  it('escort exit (escIdle, escWin): appended last; plans without them take the defaults', async () => {
+    const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(d.escIdle).toBe(4);
+    expect(d.escWin).toBe(3);
+    const old = { ...d } as Record<string, number>;
+    delete old.escIdle;
+    delete old.escWin;
+    expect(paramOr(old as unknown as typeof d, 'escIdle')).toBe(4);
+    expect(paramOr(old as unknown as typeof d, 'escWin')).toBe(3);
   });
   it('idleAp and scrollEarn: appended last, off by default, so older plans play as before', async () => {
     const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
