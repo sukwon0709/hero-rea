@@ -338,6 +338,27 @@ describe('grind: look-ahead search params', () => {
   });
 });
 
+describe('grind: fish pen params', () => {
+  it('the pen keys are learnable within bounds, appended at the end, and plans made before them read the defaults', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    const keys = ['pen', 'penRatio', 'penHarm', 'penPrice', 'penCell', 'penCounter'] as const;
+    const old = { ...d } as Record<string, number>;
+    for (const k of keys) delete old[k];
+    const p = old as unknown as typeof d;
+    for (const k of keys) {
+      expect(paramOr(p, k)).toBe(d[k]);
+      const s = PARAM_SPECS.find((x) => x.key === k)!;
+      expect(clampParams({ ...d, [k]: s.max + 500 })[k]).toBe(s.max);
+      expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
+    }
+    // learned plans store the CEM mean by index: the pen keys come last
+    const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
+    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
+  });
+});
+
 describe.skipIf(!hasGame)('grind: look-ahead search in the sandbox', () => {
   it('rollouts leave no trace (one candidate plays as the greedy policy), and the search wins 사수관', async () => {
     const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');

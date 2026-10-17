@@ -36,6 +36,7 @@ import {
   maxHp,
   maxMp,
   moraleDrop,
+  moraleLoss,
   movePoints,
   physicalDamage,
   tacticSkill,
@@ -45,6 +46,7 @@ import {
 } from '../../engine/battle/rules';
 import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
+import { isYeonjuAt } from './yeonju';
 import {
   AiMode,
   CLASS_ATTACK_TYPE,
@@ -356,6 +358,26 @@ export interface GrindParams {
   /** Player phases in a row without exp before the finish starts ('idle'; was 8). */
   idleFinish: number;
   /**
+   * Fish pen (가두리양식장), above 0.5: once the enemies left are weak next to us (penRatio), one
+   * enemy officer is picked (most hit exp for our units, harmless enough: penHarm) and boxed in by
+   * our units on its sides; it is never killed while the pen holds (nor driven off by morale: a
+   * confused unit at 0 morale leaves, 1cb6:a0d0), its troops go to the blows with the best exp per
+   * damage point first (penPrice), the others cast on it (control tactics pay +8 whatever happens,
+   * 1cb6:b2d6; at 0 morale an unconfused unit takes 견제 forever: the "zombie") and take its attacks
+   * (a counter pays hit exp, penCounter). It falls in the finish (the last turns).
+   */
+  pen: number;
+  /** Pen: the other enemies' strength (level+5 times troops share, summed) at most this share of ours. */
+  penRatio: number;
+  /** Pen: the most a candidate's blow may take of our units' troops on average (share of the maximum). */
+  penHarm: number;
+  /** Pen: weight of the price of the pen's troops (the exp per damage point of the first blow they do not cover). */
+  penPrice: number;
+  /** Pen: value of standing on a side of the penned enemy (boxing it in). */
+  penCell: number;
+  /** Pen: weight of the counter exp a unit next to the penned enemy can expect from its attacks. */
+  penCounter: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -491,6 +513,13 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'lone', min: 0, max: 2, def: 0 },
   { key: 'tacHit', min: 0, max: 1, def: 0 },
   { key: 'idleFinish', min: 3, max: 10, def: 8, int: true },
+  // the fish pen (buildPen): box one enemy in, never finish it before the last turns
+  { key: 'pen', min: 0, max: 1, def: 0.6 },
+  { key: 'penRatio', min: 0.2, max: 1.5, def: 0.6 },
+  { key: 'penHarm', min: 0.1, max: 0.8, def: 0.35 },
+  { key: 'penPrice', min: 0, max: 2, def: 1 },
+  { key: 'penCell', min: 0, max: 20, def: 6 },
+  { key: 'penCounter', min: 0, max: 2, def: 0.5 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1241,6 +1270,196 @@ export class GrindPolicy {
     if (this.log && (m || this.milkable.size)) this.log(`milk: slack ${slack ? 1 : 0}, ${this.milkable.size} spared, ${m ? m.reduce((a, c) => a + c, 0) : 0} healing cells kept free at turn ${turn}`);
   }
 
+  // ---- fish pen (GrindParams.pen): box one enemy in and farm it until the last turns
+
+  /** The penned enemy's slot this phase (NONE: no pen). */
+  private pen = NONE;
+  /** The officer penned last (kept while it stays a fair pick). */
+  private penOfficer = -1;
+  /** Price per troop point of the pen (exp per damage of the first blow its troops do not cover). */
+  private penLam = 0;
+  /** Troops the pen keeps back for the counters of our units next to it (1cb6:e42e, half damage). */
+  private penReserve = 0;
+  /** Box it in (stand on its sides); off while it may walk to a healing cell kept free for it. */
+  private penBox = false;
+  /** The pen at the start of the search phase (a rollout that loses it is scored down). */
+  private srPen = NONE;
+  /** Healing cells kept free for the penned enemy to walk to (y*width+x), or null. */
+  private penFree: Uint8Array | null = null;
+
+  /** Free healing cells (village, fortress, barracks) enemy E can walk to this phase or the next (not in 부동 / 대기). */
+  private penMendCells(E: Unit): [number, number][] {
+    if (E.mode === AiMode.Hold || E.mode === AiMode.Wait) return [];
+    const b = this.b;
+    const W = b.width;
+    const oe = b.officerOf(E);
+    const mp = movePoints(oe, b.s.items);
+    const mt = moveTypeOf(b.s, E);
+    const out: [number, number][] = [];
+    for (let y = Math.max(0, E.y - mp - 2); y <= Math.min(b.height - 1, E.y + mp + 2); y++)
+      for (let x = Math.max(0, E.x - mp - 2); x <= Math.min(W - 1, E.x + mp + 2); x++) {
+        const t = b.s.terrain[y * W + x];
+        if (t !== TERRAIN_VILLAGE && t !== TERRAIN_FORTRESS && t !== TERRAIN_BARRACKS) continue;
+        const s2 = unitAt(b.s, x, y);
+        if (s2 !== NONE && s2 >= PLAYER_SLOTS) continue;
+        if (this.pathDist([x, y], mt, E.x, E.y) <= mp + 2) out.push([x, y]);
+      }
+    return out;
+  }
+
+  private penOn(): boolean {
+    if (paramOr(this.p, 'pen') <= 0.5 || this.p.native || this.hnOn()) return false;
+    const st = this.know.stage;
+    if (st && paramOr(this.p, 'yjEscape') > 0.5 && isYeonjuAt(st.chapter, st.index, this.know.block)) return false;
+    return true;
+  }
+
+  /** Physical damage of our unit u on enemy E where they stand (counter: halved). */
+  private blowOn(u: Unit, E: Unit, counter = false): number {
+    const b = this.b;
+    const o = b.officerOf(u), oe = b.officerOf(E);
+    return physicalDamage({
+      attack: attackPower(o, u.morale, b.s.items),
+      defence: defencePower(oe, E.morale, b.s.items),
+      attackerClass: o.cls,
+      defenderClass: oe.cls,
+      defenderTerrain: terrainAt(b.s, E.x, E.y),
+      defenderHp: 0xffff,
+      counter,
+    });
+  }
+
+  /** A non-lethal blow of `loss` morale on E drives it off the field (confused at 0 morale, 1cb6:898c / a0d0). */
+  private moraleLeaves(E: Unit, loss: number): boolean {
+    const m = E.morale - loss;
+    return m <= 0 && ((E.flags & UnitFlag.Confused) !== 0 || (loss > 0 && m < 30));
+  }
+
+  /** Our units that take part in the pen: controllable named officers in shape (half their troops). */
+  private penUnits(): Unit[] {
+    const b = this.b;
+    return this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u) && u.officer < 0x100 && b.officerOf(u).hp * 2 >= maxHp(b.officerOf(u)));
+  }
+
+  private buildPen() {
+    const prev = this.pen;
+    this.pen = NONE;
+    this.penLam = 0;
+    this.penReserve = 0;
+    this.penBox = false;
+    this.penFree = null;
+    if (!this.penOn() || this.finishing) return;
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    if (turn < 2 || this.enemiesOnField() === 0) return;
+    // no wave due in the next 2 turns
+    for (const e of this.know.turns) {
+      if (e.turn === null || e.turn < turn || e.turn > turn + 2) continue;
+      const foes = e.reinforce.filter((o) => {
+        const sl = b.slotOfOfficer(o);
+        return sl === NONE || sl >= PLAYER_SLOTS;
+      }).length;
+      if (foes >= 2) return;
+    }
+    // the guarded officers in shape
+    for (const off of this.know.guarded) {
+      const sl = b.slotOfOfficer(off);
+      if (sl === NONE || sl >= PLAYER_SLOTS || this.scene.units[sl].status !== Status.Field) continue;
+      const o = b.officerOf(this.scene.units[sl]);
+      if (o.hp < maxHp(o) * 0.5) return;
+    }
+    const ours = this.penUnits();
+    if (ours.length < 2) return;
+    const left = Math.max(1, this.deadline() - b.info.turn - this.p.finish);
+    const so = this.sideStrength(true);
+    const se = this.sideStrength(false);
+    const anc = this.holding() ? this.anchorNow() : null;
+    let best = NONE, bv = -1e9;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff || !(E.flags & UnitFlag.Visible) || E.flags & UnitFlag.Scripted) continue;
+      const oe = b.officerOf(E);
+      // the others weak next to us
+      const own = (oe.level + 5) * (oe.hp / Math.max(1, maxHp(oe)));
+      if (se - own > so * paramOr(this.p, 'penRatio')) continue;
+      // harmless enough: its blow on our units, on average, a small share of their troops
+      let harm = 0, ev = 0, near = 99;
+      for (const u of ours) {
+        const o = b.officerOf(u);
+        if (CLASS_RANGE[oe.cls] !== NONE) harm += this.hitOn(E, u, u.x, u.y) / Math.max(1, maxHp(o));
+        const w = this.weight(u.slot) * (this.know.guarded.has(u.officer) ? 2 : 1);
+        if (CLASS_RANGE[o.cls] !== NONE) ev += w * combatExp(true, o.level, oe.level, false, i);
+        const mp = Math.max(1, movePoints(o, b.s.items));
+        near = Math.min(near, Math.ceil(Math.max(0, this.pathDist([E.x, E.y], moveTypeOf(b.s, u), u.x, u.y) - 1) / mp));
+      }
+      harm /= ours.length;
+      if (process.env.GRIND_TRACE_PEN) this.log?.(`  pen? ${E.officer} L${oe.level} hp ${oe.hp} harm ${harm.toFixed(2)} near ${near} others ${(se - own).toFixed(0)}/${so.toFixed(0)}`);
+      if (harm > paramOr(this.p, 'penHarm')) continue;
+      if (near > 4) continue;
+      if (anc && Math.abs(anc[0] - E.x) + Math.abs(anc[1] - E.y) > 8) continue;
+      // troops to farm: what the blows can take before the counter reserve, plus what a healing cell
+      // brings back (150..250 a turn, 1cb6:7cc8): on one, or one it can walk to when weak (1cb6:c280)
+      const mend = this.healCell(E) ? 1 : this.penMendCells(E).length ? 0.6 : 0;
+      const room = Math.min(1, oe.hp / Math.max(1, maxHp(oe))) + mend * Math.min(3, (200 * left) / Math.max(1, maxHp(oe)));
+      let v = ev * room - 4 * near - 20 * harm;
+      // a 군악대 cannot hit back and gives its neighbours MP (1cb6:7cc8)
+      if (oe.cls === 12) v += 10;
+      if (E.officer === this.penOfficer) v += 15;
+      if (v > bv) [bv, best] = [v, i];
+    }
+    if (best === NONE) {
+      if (prev !== NONE && this.log) this.log(`pen: off at turn ${turn}`);
+      return;
+    }
+    const T = this.scene.units[best];
+    const ot = b.officerOf(T);
+    // our counters (attack type 0 units hit back at types 0 / 2 / 5) may finish it in its phase
+    const at = CLASS_ATTACK_TYPE[ot.cls];
+    let reserve = 0;
+    if (at === 0 || at === 2 || at === 5)
+      for (const u of ours) if (CLASS_ATTACK_TYPE[b.officerOf(u).cls] === 0) reserve = Math.max(reserve, this.blowOn(u, T, true));
+    // the price: units by exp per damage point, each blow once a turn over the pen's turns (about
+    // half of them in reach); the first unit the troops do not cover sets it
+    const onHeal = this.healCell(T);
+    const mendAt = onHeal ? [] : this.penMendCells(T);
+    const pool = ot.hp - reserve + (onHeal ? 200 * left : mendAt.length ? 120 * left : 0);
+    const rs = ours
+      .filter((u) => CLASS_RANGE[b.officerOf(u).cls] !== NONE)
+      .map((u) => {
+        const d = Math.max(1, this.blowOn(u, T));
+        const w = this.weight(u.slot) * (this.know.guarded.has(u.officer) ? 2 : 1);
+        return { d, r: (w * combatExp(true, b.officerOf(u).level, ot.level, false, best)) / d };
+      })
+      .sort((x, y) => y.r - x.r);
+    let cum = 0, lam = 0;
+    for (let j = 0; j < rs.length; j++) {
+      cum += rs[j].d * left * 0.5;
+      if (cum > pool) {
+        lam = j + 1 < rs.length ? rs[j + 1].r : 0;
+        break;
+      }
+    }
+    this.pen = best;
+    this.penOfficer = T.officer;
+    this.penLam = lam * paramOr(this.p, 'penPrice');
+    this.penReserve = reserve;
+    // weak (1cb6:c280: troops <= 2*(max/5) or morale < 40) next to a free healing cell: it walks
+    // there by itself; the cells stay free and it is boxed in once on one
+    const weak = Math.trunc(maxHp(ot) / 5) * 2 >= ot.hp || T.morale < 40;
+    this.penBox = onHeal || !weak || !mendAt.length;
+    this.penFree = null;
+    if (!this.penBox) {
+      this.penFree = new Uint8Array(b.width * b.height);
+      for (const [x, y] of mendAt) this.penFree[y * b.width + x] = 1;
+    }
+    if (this.log && (prev !== best || turn % 5 === 0)) this.log(`pen: ${T.officer} L${ot.level} c${ot.cls} hp ${ot.hp} mor ${T.morale} at ${T.x},${T.y} turn ${turn}, price ${this.penLam.toFixed(3)}, reserve ${reserve}, box ${this.penBox ? 1 : 0}`);
+  }
+
+  /** The pen is up (from the last phase's pick: the finish checks it before the phase's maps are built). */
+  private penning(): boolean {
+    return this.pen !== NONE && this.scene.units[this.pen].status === Status.Field;
+  }
+
   // ---- hold plan: form up near the start, let the enemy come, push out once the waves are broken
 
   private anchor: [number, number] | null = null;
@@ -1436,6 +1655,7 @@ export class GrindPolicy {
     this.updateHn();
     this.buildPrice();
     this.buildNurse();
+    this.buildPen();
     this.buildLeaderKills();
     const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 && !this.quietField() ? await this.searchPhase() : await this.actLoop(null);
     if (b.info.result) return;
@@ -1614,7 +1834,7 @@ export class GrindPolicy {
       if (e.status === Status.Field) {
         const oe = b.officerOf(e);
         v += foeW * 10 * (1 - Math.min(1, oe.hp / Math.max(1, maxHp(oe))));
-      } else if (was.status === Status.Field) v += foeW * 10;
+      } else if (was.status === Status.Field) v += i === this.srPen && !this.finishing ? -150 : foeW * 10;
     }
     // the finish: progress to the win (the goal's distance, the victory officer's troops, or the
     // enemy's troops when every enemy must fall), more pressing as the turns run out
@@ -1685,6 +1905,7 @@ export class GrindPolicy {
     const depth = Math.max(1, paramOr(this.p, 'srDepth'));
     const log = this.log;
     this.srHeld = this.endHeld();
+    this.srPen = this.penning() ? this.pen : NONE;
     const save = saveScene(sc, [this]);
     this.log = null;
     this.inRollout = true;
@@ -2336,6 +2557,9 @@ export class GrindPolicy {
       this.regroupUntil = turn + 1;
       return;
     }
+    // the pen holds: no early finish (idle, nothing left to grind, the plan's reserved finish turns)
+    // while its turns last; the finish starts when the turns left just cover it (as the farm phase)
+    if (this.penning() && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && left > this.farmNeed()) return;
     if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -3233,8 +3457,7 @@ export class GrindPolicy {
     }
     const plus = (d: { worst: number; expected: number; n?: number }, extra: number) => ({ worst: d.worst + extra, expected: d.expected + extra, n: d.n });
     // the best script gain open to this unit (duel partner, persuasion target, bonus cell): walk to it
-    const gg = !fin ? this.gainGoal(u) : null;
-    const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
+    const gg = !fin ? this.gainGoal(u) : null;    const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
     // a duel with the leader kept for the bonus walk-in would end the battle first (계교: 장비-문추):
     // its actor keeps off the cells next to it
     const vic = this.know.victory;
@@ -3253,6 +3476,10 @@ export class GrindPolicy {
     // battles: three units, one gone to heal, left the others to 여포 at 호로관)
     // (any party size while regrouping on a quiet field: 태산, 유비 sat at 164 troops for 15 turns)
     const quietMend = this.quiet && this.regroupUntil >= b.info.turn + 1;
+    // the fish pen: the penned enemy, and whether this unit takes part (in shape)
+    const penT = this.penning() && !fin ? this.scene.units[this.pen] : null;
+    const penOt = penT ? b.officerOf(penT) : null;
+    const penMe = !!penT && u.officer < 0x100 && hp * 2 >= max;
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -3294,8 +3521,17 @@ export class GrindPolicy {
           const E = this.scene.units[v];
           if (E.status !== Status.Field || E.officer === 0xffff) continue;
           const oe = b.officerOf(E);
-          if (oe.hp * 10 < maxHp(oe) * 3) base -= this.p.conserve * 4;
+          if (oe.hp * 10 < maxHp(oe) * 3 && !(penT && v === this.pen)) base -= this.p.conserve * 4;
         }
+      // the pen: stand on its sides (it cannot walk off, its blows go to the units next to it), and a
+      // unit that hits back earns the counters' hit exp from its attacks (1cb6:e42e)
+      if (penMe && penT && penOt && Math.abs(penT.x - x) + Math.abs(penT.y - y) === 1) {
+        if (this.penBox) base += paramOr(this.p, 'penCell') * Math.min(1, hp / max);
+        const at = CLASS_ATTACK_TYPE[penOt.cls];
+        // (the counter's troops are the pen's too: at its price a strong counter costs more than it pays)
+        if (CLASS_ATTACK_TYPE[o.cls] === 0 && (at === 0 || at === 2 || at === 5) && !(penT.flags & UnitFlag.Confused))
+          base += paramOr(this.p, 'penCounter') * (w * combatExp(true, o.level, penOt.level, false, this.pen) - this.penLam * this.blowOn(u, penT, true)) * Math.min(1, o.force / 150) * 0.5;
+      }
       // the end held: a unit that hits back (attack type 0) keeps out of the reach of an enemy whose
       // defeat ends the battle and whom its counter would kill (서주: 53 countered the last enemy dead at T23)
       if (endHeld && CLASS_ATTACK_TYPE[o.cls] === 0)
@@ -3308,6 +3544,7 @@ export class GrindPolicy {
         }
       // a healing cell a weakened enemy we keep alive can reach: left free for it (buildNurse)
       if (this.nurse && this.nurse[y * b.width + x]) base -= 30;
+      if (penT && this.penFree && this.penFree[y * b.width + x]) base -= 30;
       let dist = 99;
       // walking distance over passable terrain (a manhattan pull leaves units stuck behind walls
       // and rivers: 서주 2nd, three units waited 20 turns in the corner north of 차주)
@@ -3328,6 +3565,9 @@ export class GrindPolicy {
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else if (mend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
+      } else if (penMe && penT && !goal) {
+        // the pen: walk up to the penned enemy
+        base -= 1.5 * Math.max(0, this.pathDist([penT.x, penT.y], moveTypeOf(b.s, u), x, y) - 1);
       } else if (!(farming && gg)) {
         // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
         // walking and sat out the whole push in the north-east)
@@ -3368,6 +3608,11 @@ export class GrindPolicy {
             counter: false,
           });
           const lethal = dmg >= od.hp;
+          // the pen is not finished while it holds, nor left for our counters to finish
+          const penHit = !!penT && d === this.pen;
+          if (penHit && (lethal || od.hp - dmg <= this.penReserve)) continue;
+          // (pen on) an enemy we keep is not driven off by morale either: confused at 0 morale it leaves (1cb6:a0d0)
+          if (!lethal && !fin && this.penOn() && this.moraleLeaves(D, moraleLoss(1, dmg, od.hp, od.level, D.morale)) && (penHit || !this.killOk(d))) continue;
           // the blow that ends the battle waits for the last turns (endHeld)
           if (lethal && this.endHeld() && this.endsBattle(d)) continue;
           // the leader may always take a kill (except a protected enemy): a kill is its safest exp
@@ -3384,7 +3629,10 @@ export class GrindPolicy {
           let v = base;
           // (the end held: the enemies whose defeat ends the battle are farmed like in the grind, no rush on them)
           if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
-          else {
+          else if (penHit) {
+            // the pen's troops go to the best exp per damage point first (buildPen's price)
+            v += w * hit - this.penLam * dmg;
+          } else {
             v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od)) - Math.min(this.troopCost(d, lethal ? od.hp : dmg, lethal, w), paramOr(this.p, 'cbCap') * w * all);
             // milking: a mendable enemy is not killed while we have slack; its troops go to the low levels first
             if (lethal && this.milkable.has(d)) v -= paramOr(this.p, 'milk') * w * 24;
@@ -3429,7 +3677,7 @@ export class GrindPolicy {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
-        let v = (farming || (fin && endHeld)) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
+        let v = (farming || (fin && endHeld) || penT) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
@@ -3516,6 +3764,8 @@ export class GrindPolicy {
         const D = this.scene.units[d];
         if (!(D.flags & UnitFlag.Visible) || D.status !== Status.Field) continue;
         if (!bomb && D.flags & UnitFlag.Confused) continue;
+        // (confused at 0 morale the pen would leave the field, 1cb6:a0d0)
+        if (!bomb && d === this.pen && this.penning() && D.morale === 0) continue;
         const od = b.officerOf(D);
         if (this.spared(D.officer) || this.know.protect.has(D.officer)) continue;
         const th = this.foeThreat(d);
@@ -3548,12 +3798,15 @@ export class GrindPolicy {
         const D = this.scene.units[d];
         if (!(D.flags & UnitFlag.Visible) || !tacticTerrainOk(element, terrainAt(b.s, D.x, D.y))) continue;
         const od = b.officerOf(D);
-        const [lo] = this.tacticDamageRange({ level: o.level, intel: o.intel }, { level: od.level, intel: od.intel, cls: od.cls }, element, power, terrainAt(b.s, D.x, D.y));
+        const [lo, hi] = this.tacticDamageRange({ level: o.level, intel: o.intel }, { level: od.level, intel: od.intel, cls: od.cls }, element, power, terrainAt(b.s, D.x, D.y));
         const lethal = lo >= od.hp;
         if (lethal && !this.killOk(d)) continue;
+        // the pen: never a scroll that could finish it (or leave it to our counters)
+        const penH = d === this.pen && this.penning() && !this.finishing;
+        if (penH && hi >= od.hp - this.penReserve) continue;
         if (this.spared(D.officer) && od.hp - lo * 2 < maxHp(od) * 0.5) continue;
         const ex = combatExp(true, o.level, od.level, lethal, d);
-        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - cost;
+        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : penH ? w * ex - this.penLam * (lo + hi) / 2 : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - cost;
         if (!best || v > best.value) best = { value: v, target: d, exp: ex, lethal };
       }
       return best;
@@ -3666,6 +3919,10 @@ export class GrindPolicy {
           const pc = tacticSkill(o);
           const land = paramOr(this.p, 'tacHit') > 0.5 ? (pc > 0 ? Math.max(0, pc - 1 - pt) / pc : 0) : 1;
           if (this.spared(H.officer) && oh.hp - hi * 1.5 < maxHp(oh) * 0.5) ok = false;
+          // the pen: no tactic that could finish it (or leave it to our counters), nor drive it off by morale
+          const penH = h === this.pen && this.penning() && !this.finishing;
+          if (penH && hi >= oh.hp - this.penReserve) ok = false;
+          if (hi < oh.hp && !this.finishing && this.penOn() && this.moraleLeaves(H, moraleLoss(2, hi, oh.hp, oh.level, H.morale)) && (penH || !this.killOk(h))) ok = false;
           if (hi >= oh.hp) {
             // a duel / persuasion partner is never killed by a tactic either (팽성: 경무's fire took 조하 from 유비)
             if (this.duelPending(H.officer)) ok = false;
@@ -3679,8 +3936,11 @@ export class GrindPolicy {
             } else ok = false;
           }
           exp += combatExp(true, o.level, oh.level, false, h);
-          burn += (land * Math.min(oh.hp, (lo + hi) / 2) * 10) / Math.max(1, maxHp(oh));
-          spent += land * this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
+          if (penH) spent += land * this.penLam * Math.min(oh.hp, (lo + hi) / 2);
+          else {
+            burn += (land * Math.min(oh.hp, (lo + hi) / 2) * 10) / Math.max(1, maxHp(oh));
+            spent += land * this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
+          }
         }
         if (!ok) continue;
         const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic) + paramOr(this.p, 'hnDmg') * (10 * burn + (lethal ? 50 * killP : 0));
@@ -3703,12 +3963,15 @@ export class GrindPolicy {
         // a confused unit at morale 0 leaves the field (1cb6:a0d0): that is a defeat without kill exp
         const leaves = (s: number, drop: number) => {
           const U = this.scene.units[s];
+          // (pen on, exact: a morale tactic that takes nothing off, at 0 morale, confuses no one, 898c:
+          // an unconfused unit at 0 morale takes 견제 for +8 forever)
+          if (this.penOn()) return tc <= 17 ? U.morale <= 0 : this.moraleLeaves(U, drop);
           return U.morale - drop <= 0 && (tc <= 17 || (U.flags & UnitFlag.Confused) !== 0 || U.morale - drop < 30);
         };
         let bad = false;
         for (const s of affected) {
           const drop = tc >= 18 ? moraleDrop(o, b.officerOf(this.scene.units[s]), p, this.scene.units[s].morale) : 0;
-          if (leaves(s, drop) && !this.killOk(s)) bad = true;
+          if (leaves(s, drop) && (!this.killOk(s) || (s === this.pen && this.penning() && !this.finishing))) bad = true;
           // the leader kept for the bonus walk-in: a routed leader (morale 0) is a defeat too
           if (this.spared(this.scene.units[s].officer)) bad = true;
         }
