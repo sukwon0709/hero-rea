@@ -353,11 +353,11 @@ describe('grind: fish pen params', () => {
       expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
     }
     // learned plans store the CEM mean by index: the pen keys were appended after idleFinish (and
-    // only later keys, the shop's sell, idleAp / scrollEarn, the escort exit's escIdle / escWin and the band farm, follow them)
+    // only later keys, the shop's sell, idleAp / scrollEarn, the escort exit's escIdle / escWin, the band farm and the gate, follow them)
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd']);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate']);
   });
   it('escort exit (escIdle, escWin): appended last; plans without them take the defaults', async () => {
     const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
@@ -387,8 +387,28 @@ describe('grind: band farm params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd'] as const;
-    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    // the gate keys come after them
+    expect(PARAM_SPECS.slice(-keys.length - 2, -2).map((s) => s.key)).toEqual([...keys]);
     expect(d.bandFarm).toBeGreaterThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    for (const k of keys) delete old[k];
+    for (const k of keys) {
+      expect(paramOr(old as unknown as typeof d, k)).toBe(d[k]);
+      const s = PARAM_SPECS.find((x) => x.key === k)!;
+      expect(clampParams({ ...d, [k]: s.max + 500 })[k]).toBe(s.max);
+      expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
+    }
+  });
+});
+
+describe('grind: gate params', () => {
+  it('gate and gateLate are appended last, on (open once no enemy is near) by default, learnable within bounds', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    const keys = ['gate', 'gateLate'] as const;
+    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    expect(d.gate).toBeGreaterThan(0.5);
+    expect(d.gateLate).toBe(0);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
     for (const k of keys) {

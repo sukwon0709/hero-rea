@@ -22,7 +22,7 @@
 
 import type { BattleScene } from '../../native/battle/scene';
 import type { GameState } from '../../engine/state';
-import type { ScriptState } from '../../engine/script';
+import { getFlag, type ScriptState } from '../../engine/script';
 import type { Stage } from '../../formats/scenario';
 import { recordCommands } from '../../native/battle/dev/setup';
 import { scriptGains, recordIndexOf, turnEvents, cellOf, leaveWins, type ScriptGain, type TurnEvent } from './events';
@@ -432,6 +432,16 @@ export interface GrindParams {
   /** Band farm: turns kept spare on top of the finish's estimate (finishEstimate) while it runs (the farm phase's farmNeed takes 1.5 times it plus farmEnd). */
   bfEnd: number;
   /**
+   * Gates (BattleKnowledge.gates), above 0.5: once a gate's flags are set, its officer walks onto its
+   * cell when no enemy is within 8 steps of us any more (gateLate 0), or once at most gateLate turns
+   * are left (하비: the castle opens around turn 19 instead of turn 30, with its 13 units to farm;
+   * before this the party stood idle from turn 17 to 31 in front of the raised bridge and 5 of 12
+   * seeds ran out of time against 여포).
+   */
+  gate: number;
+  /** Gates: walk to the gate once at most this many turns are left, enemies near or not (0: as soon as none is near). */
+  gateLate: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -589,6 +599,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'bfCell', min: 0, max: 8, def: 3 },
   { key: 'bfPen', min: 0, max: 200, def: 60 },
   { key: 'bfEnd', min: 0, max: 6, def: 2, int: true },
+  // gates: walk onto a flag-gated map-changing cell (하비's drawbridge) once nothing is left nearby
+  { key: 'gate', min: 0, max: 1, def: 0.6 },
+  { key: 'gateLate', min: 0, max: 45, def: 0, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -657,6 +670,13 @@ export interface BattleKnowledge {
    * so the win cells and the victory of later groups wait for these.
    */
   steps: { group: number; trigger: number; officer: number; x0: number; y0: number; x1: number; y1: number }[];
+  /**
+   * Gates: arrival events (trigger 6 / 11) behind an IF on flags other events set, that change the
+   * map (MAP_CHIP) and neither end nor lose the battle (하비 r8: after the three persuasions, 유비 at
+   * the drawbridge (12,12) lowers it and 조조's army comes in; without it the bridge stays up until
+   * the turn-30 event). The cells, the flags the IF needs, and the officers the event brings in.
+   */
+  gates: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; set: number[]; clear: number[]; reinforce: number[] }[];
   stage?: Stage;
   block?: number;
 }
@@ -677,7 +697,7 @@ function winning(stage: Stage, code: number, victory: number | null, block?: num
 
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -694,6 +714,15 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     if (r.trigger === 4 && winning(stage, r.code, k.victory, script.block, r.group)) k.winAdj.push({ actor: r.p1, other: r.p2, group: r.group });
     if (r.trigger === 6 && cmds.some((c) => c.name === 'ADD_ITEM') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER'))
       k.treasure.push({ officer: r.p1, x: cellOf(r.p2)[0], y: cellOf(r.p2)[1] });
+    if ((r.trigger === 6 || r.trigger === 11) && cmds.some((c) => c.name === 'MAP_CHIP') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER')) {
+      const cond = cmds.find((c) => c.name === 'IF') as { set: number[]; clear: number[] } | undefined;
+      if (cond && cond.set.length) {
+        const [x0, y0] = cellOf(r.p2);
+        const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
+        const reinforce = cmds.filter((c) => c.name === 'REINFORCE').map((c) => (c as unknown as { officer: number }).officer);
+        k.gates.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), set: [...cond.set], clear: [...cond.clear], reinforce });
+      }
+    }
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
   }
@@ -943,7 +972,7 @@ export class GrindPolicy {
       const r = await run(t);
       if (r !== 'none' && this.know.stage && this.know.block !== undefined) {
         const i = recordIndexOf(this.know.stage, this.know.block, ctx.vm.state.record);
-        if (i !== null && this.know.gains.some((g) => g.record === i) && !this.fired.has(i)) {
+        if (i !== null && (this.know.gains.some((g) => g.record === i) || this.know.gates.some((g) => g.record === i)) && !this.fired.has(i)) {
           this.fired.add(i);
           this.stats.gainsFired!.push(i);
           this.log?.(`gain: record ${i} fired`);
@@ -1013,6 +1042,28 @@ export class GrindPolicy {
       if (at && (!best || v > best.value)) best = { at, value: v };
     }
     return best;
+  }
+
+  /** The cell of an open gate this unit should walk onto now (GrindParams.gate), or null. */
+  private gateGoal(u: Unit): [number, number] | null {
+    if (paramOr(this.p, 'gate') <= 0.5 || !this.know.gates.length) return null;
+    const st = this.scene.ctx.vm.state;
+    for (const g of this.know.gates) {
+      if (g.actor !== u.officer && !(g.actor === 0x400 && u.slot < PLAYER_SLOTS)) continue;
+      if (this.fired.has(g.record)) continue;
+      // already brought about another way (하비: the turn-30 event lowers the bridge and brings 조조 in)
+      if (g.reinforce.some((o) => {
+        const sl = this.b.slotOfOfficer(o);
+        return sl !== NONE && this.scene.units[sl].status === Status.Field;
+      })) continue;
+      if (!g.set.every((f) => getFlag(st, f)) || g.clear.some((f) => getFlag(st, f))) continue;
+      const left = this.deadline() - this.b.info.turn;
+      // gateLate set: at that many turns left (enemies near or not); else once none is near
+      const at = paramOr(this.p, 'gateLate');
+      if (!this.finishing && (at > 0 ? left > at : this.foesNear(8))) continue;
+      return [(g.x0 + g.x1) >> 1, (g.y0 + g.y1) >> 1];
+    }
+    return null;
   }
 
   /**
@@ -2732,9 +2783,11 @@ export class GrindPolicy {
     }
     // the pen holds: no early finish (idle, nothing left to grind, the plan's reserved finish turns)
     // while its turns last; the finish starts when the turns left just cover it (as the farm phase)
-    if (this.penning() && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && left > this.farmNeed()) return;
+    // (never past the plan's own finish turns: `finish` is the push the battle's end needs, 하비's
+    // castle took 15 turns where the estimate said 5 and the holds ran into the time limit)
+    if (this.penning() && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.farmNeed()) return;
     // ... and so does the band farm (the casters earn every turn on the bands' MP)
-    if (this.bandFarming && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && left > this.bandNeed()) return;
+    if (this.bandFarming && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.bandNeed()) return;
     if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -2819,6 +2872,19 @@ export class GrindPolicy {
   // ---- farm phase (GrindParams.farm): flat-rate exp on every turn once the battle is safe
 
   private farmOn = false;
+
+  /** An enemy within `near` steps of one of our units on its own way (a gate waits until none is). */
+  private foesNear(near: number): boolean {
+    const b = this.b;
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff);
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      const mt = moveTypeOf(b.s, E);
+      if (ours.some((u) => this.pathDist([u.x, u.y], mt, E.x, E.y) <= near)) return true;
+    }
+    return false;
+  }
 
   /** Strength of a side on the field: (level + 5) times the troops share, summed. */
   private sideStrength(player: boolean): number {
@@ -3710,7 +3776,10 @@ export class GrindPolicy {
     }
     const plus = (d: { worst: number; expected: number; n?: number }, extra: number) => ({ worst: d.worst + extra, expected: d.expected + extra, n: d.n });
     // the best script gain open to this unit (duel partner, persuasion target, bonus cell): walk to it
-    const gg = !fin ? this.gainGoal(u) : null;    const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
+    const gg = !fin ? this.gainGoal(u) : null;
+    // an open gate this unit walks onto (하비's drawbridge), in the finish too
+    const gateAt = this.gateGoal(u);
+    const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
     // a duel with the leader kept for the bonus walk-in would end the battle first (계교: 장비-문추):
     // its actor keeps off the cells next to it
     const vic = this.know.victory;
@@ -3864,6 +3933,8 @@ export class GrindPolicy {
       if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
       else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
+      // an open gate: its officer walks onto the cell
+      if (gateAt) base += gateAt[0] === x && gateAt[1] === y ? 200 : -4 * Math.min(this.pathDist(gateAt, moveTypeOf(b.s, u), x, y), 40);
       // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
