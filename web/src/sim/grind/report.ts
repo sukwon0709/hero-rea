@@ -130,6 +130,8 @@ const PARAM_KO: Record<ParamKey, string> = {
   penCell: '가두리: 대상 옆 칸에 서는 값',
   penCounter: '가두리: 대상의 공격에 반격해서 얻는 경험치의 무게',
   sell: '도구상 판매: 0 안 함, 1 직업변경서·안 쓰는 장비, 2 강한 병법서도(싼 것과 바꿈), 3 빈 칸마다 초열서 대량 구입',
+  idleAp: '경험치 없이 두 번 쉰 부대가 가장 가까운 적에게 걸어가는 세기(0 끔)',
+  scrollEarn: '싼 병법서(2장 이상)를 던지는 값을 경험치의 몇 배 더 쳐 줄지(0 예전대로)',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -307,6 +309,8 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   penCell: ['가둔 적 옆에 꼭 붙지 않아도 된다고 배움', '가둔 적 사방을 막는 게 낫다고 배움'],
   penCounter: ['반격 경험치는 덜 따지는 게 낫다고 배움', '반격 경험치를 노려 붙는 게 낫다고 배움'],
   sell: ['안 쓰는 도구를 덜 파는 게 낫다고 배움', '팔아서 병법서를 많이 사는 게 낫다고 배움'],
+  idleAp: ['쉬는 부대가 덜 걸어 나가는 게 낫다고 배움', '쉬는 부대가 적에게 더 걸어 나가는 게 낫다고 배움'],
+  scrollEarn: ['병법서를 덜 던지는 게 낫다고 배움', '병법서를 더 던지는 게 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

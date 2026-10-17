@@ -387,6 +387,20 @@ export interface GrindParams {
    */
   sell: number;
   /**
+   * Idle walk: a unit that earned nothing on its last two commands (out of reach of every target)
+   * walks to the nearest enemy at this weight per step (approach's is 0.3 x approach) instead of
+   * waiting where it stands, still under the danger cost. 0 off.
+   */
+  idleAp: number;
+  /**
+   * Scroll throws (the cheap attack scrolls, 0x22..0x2a, with two or more held): a sure, counter-free
+   * hit on an enemy at or above the thrower's level (8..16 exp) gets scrollEarn x (exp - 4) more,
+   * no stock cost, and in the 회남 plan the troops-taken and focus terms a blow has (hnDmg,
+   * hnFocus). 0: the old valuation. (On a weaker enemy a scroll pays 4 exp for troops the low
+   * levels' blows earn more from: 북해 with 39 scrolls, throwing them all lost exp.)
+   */
+  scrollEarn: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -531,6 +545,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'penCounter', min: 0, max: 2, def: 0.5 },
   // merchants: sell the unused items (class-change books, spare equipment, strong scrolls) and bulk-buy 초열서
   { key: 'sell', min: 0, max: 3, def: 1, int: true },
+  // exp per unit-turn: idle units walk to the nearest enemy; the cheap scrolls compete with waiting
+  { key: 'idleAp', min: 0, max: 3, def: 0 },
+  { key: 'scrollEarn', min: 0, max: 2, def: 0 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -3419,6 +3436,7 @@ export class GrindPolicy {
       }
     };
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
+    let throwBest: Action | null = null;
     const tactics = castableTactics(o, u.mp, b.learn).filter((t) => !(t < 5 && WEATHER_TYPE[b.info.weather] === RAIN));
     const held = u.officer < 0x100 ? b.stateOfficer(u).dyn.items.map((id, index) => ({ id, index })).filter((e) => e.id !== 0xff) : [];
     // danger is the sum over every enemy that can reach the cell (an overestimate: they also have
@@ -3491,6 +3509,9 @@ export class GrindPolicy {
     const penT = this.penning() && !fin ? this.scene.units[this.pen] : null;
     const penOt = penT ? b.officerOf(penT) : null;
     const penMe = !!penT && u.officer < 0x100 && hp * 2 >= max;
+    // idle walk (GrindParams.idleAp): two commands in a row without exp, in shape, not in the finish
+    const idleWalk = !fin && !guarded && hp * 2 >= max && (this.unitIdle.get(slot) ?? 0) >= 2 ? paramOr(this.p, 'idleAp') : 0;
+    const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -3582,7 +3603,10 @@ export class GrindPolicy {
       } else if (!(farming && gg)) {
         // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
         // walking and sat out the whole push in the north-east)
-        base -= (fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3) * Math.min(dist, hnEsc ? 200 : 40);
+        const apW = fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
+        // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
+        if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
+        else base -= apW * Math.min(dist, hnEsc ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
@@ -3699,9 +3723,12 @@ export class GrindPolicy {
         let v = base + a.value;
         if (chg && a.target === vslot) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
+        if (a.earn && (!throwBest || v + a.earn > throwBest.value)) throwBest = { slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v + a.earn, exp: a.exp, lethal: a.lethal, danger: dang.worst };
       }
     }
     b.place(slot, null, home[0], home[1]);
+    // a scroll throw worth its exp (scrollEarn) replaces a wait, never a blow or a tactic
+    if (throwBest && best.kind === 'wait' && throwBest.value > best.value) offer(throwBest);
     if (alts) this.lastAlts = [...alts.values()].sort((p, q) => q.value - p.value);
     return best;
   }
@@ -3711,7 +3738,7 @@ export class GrindPolicy {
    * and level), a troop heal on a badly hurt ally (the leader first), a bomb like a hit. Items give
    * no exp of their own (a bomb hit does, through e91a).
    */
-  private itemValue(u: Unit, id: number, x: number, y: number, w: number, guarded: boolean): { value: number; target: number; exp: number; lethal: boolean } | null {
+  private itemValue(u: Unit, id: number, x: number, y: number, w: number, guarded: boolean): { value: number; target: number; exp: number; lethal: boolean; earn?: number } | null {
     const b = this.b;
     const o = b.officerOf(u);
     void guarded;
@@ -3804,7 +3831,9 @@ export class GrindPolicy {
       // a stock of cheap scrolls (GrindParams.scrolls) is meant to be thrown: a sure, counter-free hit
       const held = o.items.filter((v) => v >= 0x22 && v <= 0x2a).length;
       const cost = Number.isFinite(this.p.scrolls) && held >= 2 ? 1 : 6;
-      let best: { value: number; target: number; exp: number; lethal: boolean } | null = null;
+      const earn = held >= 2 ? paramOr(this.p, 'scrollEarn') : 0;
+      const hnLive = this.hnOn() && !this.finishing && !!this.exitPlan;
+      let best: { value: number; target: number; exp: number; lethal: boolean; earn?: number } | null = null;
       for (const d of unitsInRange(b.s, u, power | 0x80, x, y, false)) {
         const D = this.scene.units[d];
         if (!(D.flags & UnitFlag.Visible) || !tacticTerrainOk(element, terrainAt(b.s, D.x, D.y))) continue;
@@ -3817,8 +3846,20 @@ export class GrindPolicy {
         if (penH && hi >= od.hp - this.penReserve) continue;
         if (this.spared(D.officer) && od.hp - lo * 2 < maxHp(od) * 0.5) continue;
         const ex = combatExp(true, o.level, od.level, lethal, d);
-        const v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : penH ? w * ex - this.penLam * (lo + hi) / 2 : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - cost;
-        if (!best || v > best.value) best = { value: v, target: d, exp: ex, lethal };
+        let v = (this.finishing ? ex + (lo * 30) / Math.max(1, maxHp(od)) : penH ? w * ex - this.penLam * (lo + hi) / 2 : w * ex - (this.p.conserve * Math.min(lo, od.hp) * 10) / Math.max(1, maxHp(od))) - cost;
+        // a stock to throw at an enemy at or above the thrower's level (8..16 exp for a few hundred
+        // troops; on a weaker one, 4 exp, the troops are worth more to the low levels' blows): the exp
+        // counts more and the stock costs nothing, but only against waiting (bestAction): in place of a
+        // blow a scroll takes fewer troops (회남: the wave fell two turns later, the escape ran out of time)
+        let bonus = 0;
+        if (earn > 0 && ex >= 8) {
+          bonus = cost + w * (ex - 4) * earn;
+          const dmg = Math.min(od.hp, (lo + hi) / 2);
+          const dw = paramOr(this.p, 'hnDmg');
+          if (dw > 0) bonus += dw * ((100 * dmg) / Math.max(1, maxHp(od)) + (lethal ? 50 : 0));
+          if (hnLive) bonus += this.p.hnFocus * (20 * (1 - od.hp / Math.max(1, maxHp(od))) + (lethal ? 15 : 0));
+        }
+        if (!best || v + bonus > best.value + (best.earn ?? 0)) best = { value: v, target: d, exp: ex, lethal, earn: bonus };
       }
       return best;
     }
@@ -3844,6 +3885,8 @@ export class GrindPolicy {
 
   /** 폭탄 thrown this battle (BOMBS_PER_BATTLE; the 회남 strike plan counts its own in too). */
   bombsUsed = 0;
+  /** Player slot -> its commands in a row that earned no exp (GrindParams.idleAp). */
+  private unitIdle = new Map<number, number>();
 
   /** Enemy `e` can hit the guarded leader this phase for at least `share` of its troops. */
   threatensLeader(e: number, share: number): boolean {
@@ -4068,6 +4111,7 @@ export class GrindPolicy {
     if (kind === 'wait') this.stats.actions.wait++;
     u.flags |= UnitFlag.Acted;
     const gained = o.level * 100 + o.exp - before;
+    this.unitIdle.set(a.slot, gained > 0 ? 0 : (this.unitIdle.get(a.slot) ?? 0) + 1);
     if (this.log && gained > 0) this.log(`  +${gained} exp`);
     if (a.kind === 'attack' || a.kind === 'item') {
       if (a.lethal) st.kills += Math.max(0, gained);

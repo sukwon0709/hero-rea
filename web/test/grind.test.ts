@@ -353,11 +353,21 @@ describe('grind: fish pen params', () => {
       expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
     }
     // learned plans store the CEM mean by index: the pen keys were appended after idleFinish (and
-    // only later keys, the shop's sell, follow them)
+    // only later keys, the shop's sell and then idleAp / scrollEarn, follow them)
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(idx('sell')).toBe(PARAM_SPECS.length - 1);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn']);
+  });
+  it('idleAp and scrollEarn: appended last, off by default, so older plans play as before', async () => {
+    const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    for (const k of ['idleAp', 'scrollEarn'] as const) {
+      expect(d[k]).toBe(0);
+      const old = { ...d } as Record<string, number>;
+      delete old[k];
+      expect(paramOr(old as unknown as typeof d, k)).toBe(0);
+    }
   });
 });
 
