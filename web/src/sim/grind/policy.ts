@@ -410,6 +410,28 @@ export interface GrindParams {
   /** Escort exit: the cell is also freed once the turns left are at most this many. */
   escWin: number;
   /**
+   * Band farm (군악대 MP), above 0.5: with casters of ours that know a flat-rate tactic (confusion /
+   * morale 15..20, heals 21..35: +8, +12 for classes 12/18, cast or not, 1cb6:b2d6), the 군악대 on
+   * the field (either side: at each turn start it gives its 4 neighbours level/10+1 MP, 1cb6:7cc8)
+   * are the battle's renewable exp. The enemy bands are never killed nor driven off by morale
+   * (bfSpare: from the start, else once safe); once safe (bfRatio) the casters spend their MP
+   * freely, the ones short of MP stand next to a band (lowest levels first, bfCell), a kept enemy
+   * band is the fish pen's pick (bfPen: boxed in, so it neither walks off nor dies), and the early
+   * finishes wait until the turns left just cover the finish. 견제 goes to 0-morale unconfused
+   * enemies first (they never leave: 898c rolls confusion on a drop only, a0d0 needs it).
+   */
+  bandFarm: number;
+  /** Band farm: the other enemies' strength (level+5 times troops share, summed) at most this share of ours. */
+  bfRatio: number;
+  /** Band farm, above 0.5: the enemy bands are kept alive from the start (else only once safe). */
+  bfSpare: number;
+  /** Band farm: value per MP a caster short of MP gains standing next to a band (by its weight). */
+  bfCell: number;
+  /** Band farm: the fish pen's preference for a kept enemy band. */
+  bfPen: number;
+  /** Band farm: turns kept spare on top of the finish's estimate (finishEstimate) while it runs (the farm phase's farmNeed takes 1.5 times it plus farmEnd). */
+  bfEnd: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -560,6 +582,13 @@ export const PARAM_SPECS: ParamSpec[] = [
   // escort exit (장판파): the cell the escorted allies walk to stays blocked until exp runs dry
   { key: 'escIdle', min: 2, max: 12, def: 4, int: true },
   { key: 'escWin', min: 1, max: 10, def: 3, int: true },
+  // band farm: keep the 군악대 alive and cast on their MP every turn (buildBand)
+  { key: 'bandFarm', min: 0, max: 1, def: 0.6 },
+  { key: 'bfRatio', min: 0.2, max: 1.5, def: 0.6 },
+  { key: 'bfSpare', min: 0, max: 1, def: 0.6 },
+  { key: 'bfCell', min: 0, max: 8, def: 3 },
+  { key: 'bfPen', min: 0, max: 200, def: 60 },
+  { key: 'bfEnd', min: 0, max: 6, def: 2, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -769,6 +798,9 @@ export interface GrindStats {
   farmTurns?: number;
   /** Turns the wake phase held off an early finish (every enemy left waiting, turns to spare). */
   wakeTurns?: number;
+  /** Player phases the band farm ran (GrindParams.bandFarm), and the flat-rate casts (15..35) made in them. */
+  bandTurns?: number;
+  bandCasts?: number;
   actions: { attack: number; kill: number; tactic: number; heal: number; wait: number; item?: number; promoted?: number };
   /** Officer -> exp gained per kind. */
   byOfficer: Map<number, { hits: number; kills: number; tactics: number; heals: number }>;
@@ -1143,6 +1175,8 @@ export class GrindPolicy {
     if (this.duelPending(off)) return false;
     if (off === this.know.victory && this.bonusOn()) return false;
     if (this.p.spareBand > 0.5 && !this.finishing && this.b.officerOf(this.scene.units[target]).cls === 12 && this.ourTacticUsers() > 0) return false;
+    // the band farm keeps the enemy 군악대 (their MP is the renewable exp)
+    if (!this.finishing && this.bandKeep.has(target)) return false;
     if (this.finishing) return !(this.endHeld() && this.endsBattle(target)) && (this.charge() || !this.know.protect.has(off));
     if (this.know.protect.has(off)) return false;
     // regrouping: kill what comes (the leader still spared)
@@ -1444,6 +1478,8 @@ export class GrindPolicy {
       let v = ev * room - 4 * near - 20 * harm;
       // a 군악대 cannot hit back and gives its neighbours MP (1cb6:7cc8)
       if (oe.cls === 12) v += 10;
+      // the band farm: a kept enemy band is the pen (boxed in, it neither walks off nor falls)
+      if (this.bandFarming && this.bandKeep.has(i)) v += paramOr(this.p, 'bfPen');
       if (E.officer === this.penOfficer) v += 15;
       if (v > bv) [bv, best] = [v, i];
     }
@@ -1498,6 +1534,100 @@ export class GrindPolicy {
   /** The pen is up (from the last phase's pick: the finish checks it before the phase's maps are built). */
   private penning(): boolean {
     return this.pen !== NONE && this.scene.units[this.pen].status === Status.Field;
+  }
+
+  // ---- band farm (GrindParams.bandFarm): the 군악대's MP turned into flat-rate tactic exp
+
+  /** Enemy 군악대 slots kept alive this phase (never killed, never driven off by morale). */
+  private bandKeep = new Set<number>();
+  /** The band farm runs this phase (safe): casters spend MP freely and the short ones stand next to a band. */
+  private bandFarming = false;
+  /** 군악대 slots on the field (either side) the casters gather around this phase. */
+  private bands: number[] = [];
+  /** The kept bands at the start of the search phase (a rollout that loses one is scored down). */
+  private srBands = new Set<number>();
+
+  private bandOn(): boolean {
+    if (paramOr(this.p, 'bandFarm') <= 0.5 || this.p.native || this.hnOn()) return false;
+    const st = this.know.stage;
+    if (st && paramOr(this.p, 'yjEscape') > 0.5 && isYeonjuAt(st.chapter, st.index, this.know.block)) return false;
+    return true;
+  }
+
+  /** u knows a flat-rate tactic at its level (confusion / morale 15..20, heals 21..35). */
+  private knowsFlat(u: Unit): boolean {
+    if (u.officer >= 0x100) return false;
+    const o = this.b.officerOf(u);
+    for (let t = 15; t < 36; t++) if (this.b.learn[t * CLASS_COUNT + o.cls] <= o.level) return true;
+    return false;
+  }
+
+  /** MP a unit standing at (x, y) gets from the bands next to it at the next turn start (1cb6:7cc8), up to what it lacks. */
+  private bandGain(u: Unit, x: number, y: number, spend = 0): number {
+    const b = this.b;
+    const o = b.officerOf(u);
+    let g = 0;
+    for (const s of this.bands) {
+      if (s === u.slot) continue;
+      const B = this.scene.units[s];
+      if (B.status !== Status.Field || Math.abs(B.x - x) + Math.abs(B.y - y) !== 1) continue;
+      g += Math.trunc(b.officerOf(B).level / 10) + 1;
+    }
+    return Math.min(g, Math.max(0, maxMp(o) - u.mp + spend));
+  }
+
+  private buildBand() {
+    this.bandKeep.clear();
+    this.bands = [];
+    const was = this.bandFarming;
+    this.bandFarming = false;
+    if (!this.bandOn() || this.finishing) return;
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    const casters = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u) && this.knowsFlat(u));
+    if (!casters.length) return;
+    // emergencies: regrouping, or bracing against a wave that outnumbers us (kill what comes)
+    const emergency = this.regroupUntil >= turn || (this.bracing() && this.enemiesOnField() > this.oursOnField());
+    let keptStrength = 0;
+    for (const u of this.scene.units) {
+      if (u.status !== Status.Field || u.officer === 0xffff || b.officerOf(u).cls !== 12) continue;
+      if (u.slot < PLAYER_SLOTS) {
+        this.bands.push(u.slot);
+        continue;
+      }
+      if (!(u.flags & UnitFlag.Visible) || u.flags & UnitFlag.Scripted || this.know.protect.has(u.officer)) continue;
+      this.bands.push(u.slot);
+      if (!emergency) {
+        this.bandKeep.add(u.slot);
+        const o = b.officerOf(u);
+        keptStrength += (o.level + 5) * (o.hp / Math.max(1, maxHp(o)));
+      }
+    }
+    if (!this.bands.length) return;
+    // safe: the other enemies weak next to us, no wave due in the next 2 turns, the guarded officers in shape
+    let safe = !emergency && this.sideStrength(false) - keptStrength <= this.sideStrength(true) * paramOr(this.p, 'bfRatio');
+    if (safe)
+      for (const e of this.know.turns) {
+        if (e.turn === null || e.turn < turn || e.turn > turn + 2) continue;
+        const foes = e.reinforce.filter((o) => {
+          const sl = b.slotOfOfficer(o);
+          return sl === NONE || sl >= PLAYER_SLOTS;
+        }).length;
+        if (foes >= 2) safe = false;
+      }
+    if (safe)
+      for (const off of this.know.guarded) {
+        const sl = b.slotOfOfficer(off);
+        if (sl === NONE || sl >= PLAYER_SLOTS || this.scene.units[sl].status !== Status.Field) continue;
+        const o = b.officerOf(this.scene.units[sl]);
+        if (o.hp < maxHp(o) * 0.5) safe = false;
+      }
+    if (process.env.GRIND_TRACE_BAND) this.log?.(`  band? turn ${turn} se ${this.sideStrength(false).toFixed(0)} kept ${keptStrength.toFixed(0)} so ${this.sideStrength(true).toFixed(0)} safe ${safe ? 1 : 0} bands ${this.bands.map((s) => `${this.scene.units[s].officer}@${this.scene.units[s].x},${this.scene.units[s].y} m${this.scene.units[s].mode}`).join(' ')}`);
+    if (!safe && paramOr(this.p, 'bfSpare') <= 0.5) this.bandKeep.clear();
+    this.bandFarming = safe;
+    if (safe && !this.inRollout) this.stats.bandTurns = (this.stats.bandTurns ?? 0) + 1;
+    if (this.log && (safe !== was || (safe && turn % 5 === 0)))
+      this.log(`band: ${safe ? 'farm' : 'off'} at turn ${turn}, bands ${this.bands.map((s) => `${this.scene.units[s].officer}@${this.scene.units[s].x},${this.scene.units[s].y}`).join(' ')}, kept ${this.bandKeep.size}, casters ${casters.length}`);
   }
 
   // ---- hold plan: form up near the start, let the enemy come, push out once the waves are broken
@@ -1695,6 +1825,7 @@ export class GrindPolicy {
     this.buildThreat();
     this.updateHn();
     this.buildPrice();
+    this.buildBand();
     this.buildNurse();
     this.buildPen();
     this.buildLeaderKills();
@@ -1875,7 +2006,7 @@ export class GrindPolicy {
       if (e.status === Status.Field) {
         const oe = b.officerOf(e);
         v += foeW * 10 * (1 - Math.min(1, oe.hp / Math.max(1, maxHp(oe))));
-      } else if (was.status === Status.Field) v += i === this.srPen && !this.finishing ? -150 : foeW * 10;
+      } else if (was.status === Status.Field) v += (i === this.srPen || this.srBands.has(i)) && !this.finishing ? -150 : foeW * 10;
     }
     // the finish: progress to the win (the goal's distance, the victory officer's troops, or the
     // enemy's troops when every enemy must fall), more pressing as the turns run out
@@ -1947,6 +2078,7 @@ export class GrindPolicy {
     const log = this.log;
     this.srHeld = this.endHeld();
     this.srPen = this.penning() ? this.pen : NONE;
+    this.srBands = new Set(this.bandKeep);
     const save = saveScene(sc, [this]);
     this.log = null;
     this.inRollout = true;
@@ -2559,7 +2691,7 @@ export class GrindPolicy {
     // farm phase: safe now, so the early finishes wait; the finish starts when the turns left just
     // cover what it needs (walking to and killing what wins the battle) plus farmEnd spare
     if (this.farmOn && this.stepsLeft() === 0) {
-      const need = this.farmNeed();
+      const need = this.bandFarming ? this.bandNeed() : this.farmNeed();
       if (left > need) {
         this.stats.farmTurns = (this.stats.farmTurns ?? 0) + 1;
         this.log?.(`farm: turn ${b.info.turn + 1}, ${left} turns left, finish needs ${need}`);
@@ -2601,6 +2733,8 @@ export class GrindPolicy {
     // the pen holds: no early finish (idle, nothing left to grind, the plan's reserved finish turns)
     // while its turns last; the finish starts when the turns left just cover it (as the farm phase)
     if (this.penning() && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && left > this.farmNeed()) return;
+    // ... and so does the band farm (the casters earn every turn on the bands' MP)
+    if (this.bandFarming && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && left > this.bandNeed()) return;
     if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -2807,6 +2941,11 @@ export class GrindPolicy {
   }
 
   /** Turns the finish needs from here, doubled for safety half again, plus farmEnd. */
+  /** Turns the finish needs while the band farm runs (to the last turns: bfEnd spare). */
+  private bandNeed(): number {
+    return this.finishEstimate() + paramOr(this.p, 'bfEnd');
+  }
+
   private farmNeed(): number {
     return Math.ceil(this.finishEstimate() * 1.5) + paramOr(this.p, 'farmEnd');
   }
@@ -3594,6 +3733,20 @@ export class GrindPolicy {
     const penT = this.penning() && !fin ? this.scene.units[this.pen] : null;
     const penOt = penT ? b.officerOf(penT) : null;
     const penMe = !!penT && u.officer < 0x100 && hp * 2 >= max;
+    // the band farm: a caster short of MP (after this turn's cast) stands next to a band, the lowest
+    // levels first (by weight); one with MP to spare leaves the cell to them
+    const bandMe = this.bandFarming && !fin && this.bands.length > 0 && hp * 2 >= max && this.knowsFlat(u);
+    const bandSpend = bandMe && tactics.some((t) => t >= 15) ? 4 : 0;
+    let bandGoal: [number, number] | null = null;
+    if (bandMe && maxMp(o) - u.mp + bandSpend >= 2) {
+      let bd = 99;
+      for (const s of this.bands) {
+        const B = this.scene.units[s];
+        if (s === slot || B.status !== Status.Field) continue;
+        const d = Math.abs(B.x - u.x) + Math.abs(B.y - u.y);
+        if (d < bd) [bd, bandGoal] = [d, [B.x, B.y]];
+      }
+    }
     // idle walk (GrindParams.idleAp): two commands in a row without exp, in shape, not in the finish
     const idleWalk = !fin && !guarded && hp * 2 >= max && (this.unitIdle.get(slot) ?? 0) >= 2 ? paramOr(this.p, 'idleAp') : 0;
     const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
@@ -3699,6 +3852,11 @@ export class GrindPolicy {
       if (!fin && !guarded && leaderPos) base -= this.p.escort * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 3);
       if (healGoal) base -= this.p.heal * 0.4 * Math.max(0, Math.abs(healGoal[0] - x) + Math.abs(healGoal[1] - y) - 1);
       if (this.p.band) base += this.bandValue(u, x, y, w);
+      if (bandMe) {
+        const g = this.bandGain(u, x, y, bandSpend);
+        base += paramOr(this.p, 'bfCell') * w * g;
+        if (!g && bandGoal) base -= 0.8 * Math.max(0, Math.abs(bandGoal[0] - x) + Math.abs(bandGoal[1] - y) - 1);
+      }
       if (this.p.terrain) base += this.terrainValue(u, x, y, hp, max);
       // a counterattacking unit in shape where enemies will attack it: the counters pay hit exp
       if (!fin && !guarded && hp >= max * 0.7) base += paramOr(this.p, 'cbCounter') * w * this.counterValue(u, x, y) * Math.max(0, 1 - dang.worst / hp);
@@ -3735,7 +3893,7 @@ export class GrindPolicy {
           const penHit = !!penT && d === this.pen;
           if (penHit && (lethal || od.hp - dmg <= this.penReserve)) continue;
           // (pen on) an enemy we keep is not driven off by morale either: confused at 0 morale it leaves (1cb6:a0d0)
-          if (!lethal && !fin && this.penOn() && this.moraleLeaves(D, moraleLoss(1, dmg, od.hp, od.level, D.morale)) && (penHit || !this.killOk(d))) continue;
+          if (!lethal && !fin && (this.penOn() || this.bandOn()) && this.moraleLeaves(D, moraleLoss(1, dmg, od.hp, od.level, D.morale)) && (penHit || !this.killOk(d))) continue;
           // the blow that ends the battle waits for the last turns (endHeld)
           if (lethal && this.endHeld() && this.endsBattle(d)) continue;
           // the leader may always take a kill (except a protected enemy): a kill is its safest exp
@@ -3800,7 +3958,7 @@ export class GrindPolicy {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
-        let v = (farming || (fin && endHeld) || penT) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
+        let v = (farming || (fin && endHeld) || penT || this.bandFarming) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
@@ -4064,7 +4222,7 @@ export class GrindPolicy {
           // the pen: no tactic that could finish it (or leave it to our counters), nor drive it off by morale
           const penH = h === this.pen && this.penning() && !this.finishing;
           if (penH && hi >= oh.hp - this.penReserve) ok = false;
-          if (hi < oh.hp && !this.finishing && this.penOn() && this.moraleLeaves(H, moraleLoss(2, hi, oh.hp, oh.level, H.morale)) && (penH || !this.killOk(h))) ok = false;
+          if (hi < oh.hp && !this.finishing && (this.penOn() || this.bandOn()) && this.moraleLeaves(H, moraleLoss(2, hi, oh.hp, oh.level, H.morale)) && (penH || !this.killOk(h))) ok = false;
           if (hi >= oh.hp) {
             // a duel / persuasion partner is never killed by a tactic either (팽성: 경무's fire took 조하 from 유비)
             if (this.duelPending(H.officer)) ok = false;
@@ -4091,6 +4249,10 @@ export class GrindPolicy {
       return best;
     }
     if (tc <= 20) {
+      // (band farm: the safest target, not the first: a 0-morale unconfused one takes 견제 forever,
+      // one that stays at 30 or more is never confused, 898c; a riskier one may be driven off)
+      const pick = this.bandOn();
+      let bestT: { value: number; target: number; exp: number; lethal: boolean } | null = null, bestPref = -1;
       for (const d of unitsInRange(b.s, u, p | 0x80, x, y, false)) {
         const D = this.scene.units[d];
         if (!(D.flags & UnitFlag.Visible)) continue;
@@ -4107,7 +4269,7 @@ export class GrindPolicy {
           const U = this.scene.units[s];
           // (pen on, exact: a morale tactic that takes nothing off, at 0 morale, confuses no one, 898c:
           // an unconfused unit at 0 morale takes 견제 for +8 forever)
-          if (this.penOn()) return tc <= 17 ? U.morale <= 0 : this.moraleLeaves(U, drop);
+          if (this.penOn() || this.bandOn()) return tc <= 17 ? U.morale <= 0 : this.moraleLeaves(U, drop);
           return U.morale - drop <= 0 && (tc <= 17 || (U.flags & UnitFlag.Confused) !== 0 || U.morale - drop < 30);
         };
         let bad = false;
@@ -4119,9 +4281,13 @@ export class GrindPolicy {
         }
         if (bad) continue;
         void od;
-        return { value: w * 8 * this.p.control, target: d, exp: 8, lethal: false };
+        if (!pick) return { value: w * 8 * this.p.control, target: d, exp: 8, lethal: false };
+        const conf = (D.flags & UnitFlag.Confused) !== 0;
+        const drop = tc >= 18 ? moraleDrop(o, od, p, D.morale) : 0;
+        const pref = tc >= 18 ? (D.morale === 0 && !conf ? 3 : D.morale - drop >= 30 ? 2 : 0) : D.morale > 0 && !conf ? 1 : 0;
+        if (pref > bestPref) [bestPref, bestT] = [pref, { value: w * 8 * this.p.control, target: d, exp: 8, lethal: false }];
       }
-      return null;
+      return bestT;
     }
     const bonus = tc <= 29 && (o.cls === 12 || o.cls === 18) ? 12 : 8;
     if (tc <= 29) {
@@ -4192,6 +4358,7 @@ export class GrindPolicy {
       if (!ok) kind = 'wait';
       else {
         this.stats.tactics.set(a.tactic, (this.stats.tactics.get(a.tactic) ?? 0) + 1);
+        if (this.bandFarming && a.tactic >= 15 && !this.inRollout) this.stats.bandCasts = (this.stats.bandCasts ?? 0) + 1;
         if (a.tactic >= 21) this.stats.actions.heal++;
         else this.stats.actions.tactic++;
       }

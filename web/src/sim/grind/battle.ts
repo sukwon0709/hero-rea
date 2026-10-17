@@ -39,6 +39,9 @@ export interface BattleOutcome {
   finishReason?: string;
   /** Turns the wake phase held off an early finish (GrindParams.wake). */
   wakeTurns?: number;
+  /** Player phases the band farm ran (GrindParams.bandFarm), and the flat-rate casts made in them. */
+  bandTurns?: number;
+  bandCasts?: number;
   /** Look-ahead search counters (GrindParams.search): phases searched, rollouts, phases changed. */
   search?: { phases: number; rollouts: number; changed: number };
   params: GrindParams;
@@ -324,6 +327,8 @@ export async function runGrindBattle(
     finishTurn: stats?.finishTurn ?? null,
     finishReason: stats?.finishReason,
     wakeTurns: stats?.wakeTurns,
+    bandTurns: stats?.bandTurns,
+    bandCasts: stats?.bandCasts,
     search: stats?.search,
     params: p,
     gains,
