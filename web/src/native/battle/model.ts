@@ -213,8 +213,8 @@ export class Battle {
   }
 
   /**
-   * 1cb6:8422: puts a reserve unit on the field at (x,y), or the nearest free cell its move type can
-   * stand on (7b08's search, simplified to a breadth-first ring search; the original recurses N,E,S,W).
+   * 1cb6:8422: puts a reserve unit on the field at (x,y), or at the first free cell its move type
+   * can stand on in 7b08's search: depth-first from (x,y), neighbours N,E,S,W, at most 5 steps deep.
    */
   place(slot: number, facingLeft: boolean | null, x: number, y: number): boolean {
     const u = this.units[slot];
@@ -224,11 +224,20 @@ export class Battle {
       const free = (cx: number, cy: number) =>
         cx >= 0 && cy >= 0 && cx < this.width && cy < this.height && this.s.unitAt[cy * this.width + cx] === NONE &&
         moveCost(mt, this.map.terrain[cy * this.width + cx]) !== 0xff;
-      let pos: [number, number] | null = free(x, y) ? [x, y] : null;
-      for (let r = 1; !pos && r < Math.max(this.width, this.height); r++)
-        for (let dy = -r; dy <= r && !pos; dy++)
-          for (let dx = -r; dx <= r && !pos; dx++)
-            if (Math.abs(dx) + Math.abs(dy) === r && free(x + dx, y + dy)) pos = [x + dx, y + dy];
+      const search = (cx: number, cy: number, depth: number): [number, number] | null => {
+        if (free(cx, cy)) return [cx, cy];
+        if (depth === 0) return null;
+        for (let d = 0; d < 4; d++) {
+          const nx = cx + [0, 1, 0, -1][d];
+          const ny = cy + [-1, 0, 1, 0][d];
+          if (nx < 0 || ny < 0 || nx >= this.width || ny >= this.height) continue;
+          const p = search(nx, ny, depth - 1);
+          if (p) return p;
+        }
+        return null;
+      };
+      const pos = search(x, y, 5);
+      // (nothing free within 5 steps: the original puts the unit at (0xff,0xff); not reproduced)
       if (!pos) return false;
       [x, y] = pos;
       u.status = Status.Field;

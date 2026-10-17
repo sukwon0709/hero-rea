@@ -367,13 +367,14 @@ export interface Plan {
  */
 export function planUnit(s: AiState, u: Unit): Plan | null {
   const scripted = (u.flags & UnitFlag.Scripted) !== 0;
-  const mp = scripted ? 100 : movePoints(off(s, u), s.items);
   if (u.target !== NONE && s.units[u.target].status !== Status.Field) {
     u.target = NONE;
     u.mode = AiMode.AttackNearest;
   }
   if (u.status !== Status.Field || u.flags & UnitFlag.Acted) return null;
   if (u.flags & UnitFlag.Confused) return null;
+  // (ce50 reads the move points first; 7c1e has no side effects, and empty slots get here too)
+  const mp = scripted ? 100 : movePoints(off(s, u), s.items);
   aiPrepare(s, u);
   // (The "follow the commander" branch at 1cb6:cef5 needs DS:0xe525 bit 0, which is only ever cleared: dead code.)
   switch (u.mode) {
