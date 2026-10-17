@@ -54,6 +54,45 @@ describe('grind shop: cheap scrolls for everyone', () => {
   });
 });
 
+describe('grind shop: selling (Game.shopSell, ((price*3)>>2)*10, story items 1910)', () => {
+  const story = (s: GameState, id: number, type: number, power: number) => Object.assign(s.items[id], { price: 0xff, type, power });
+  it('sell 1: class-change books and unused equipment go first, and the gold buys the scrolls', () => {
+    const s = fakeState([10, 3], 0);
+    story(s, 0x12, 1, 0);
+    story(s, 0x0c, 0, 12);
+    story(s, 0x0f, 0, 10);
+    s.officers[0].dyn.items[0] = 0x12; // 검술지침서: 1910
+    s.officers[1].dyn.items[0] = 0x0f; // the weaker weapon of two: 1910
+    s.officers[1].dyn.items[1] = 0x0c; // the best weapon stays
+    const sold: { officer: number; item: number; price: number }[] = [];
+    const got = shopVisit(s, [0x28], { scrolls: 2, sell: 1, sold });
+    expect(sold.map((x) => [x.officer, x.item, x.price])).toEqual([[0, 0x12, 1910], [1, 0x0f, 1910]]);
+    expect(s.officers[1].dyn.items.includes(0x0c)).toBe(true);
+    expect(got.length).toBe(4);
+    expect(s.progress.money).toBe(3820 - 4 * 50);
+  });
+
+  it('sell 2 trades strong scrolls for cheap ones, sell 3 fills every free slot but one; never past 10000', () => {
+    const s = fakeState([10], 0);
+    s.officers[0].dyn.items[0] = 0x2a; // 업화서 (price 25 here): 180
+    shopVisit(s, [0x28], { scrolls: 2, sell: 1 });
+    expect(s.officers[0].dyn.items[0]).toBe(0x2a); // kept at 1
+    const t = fakeState([10], 0);
+    t.officers[0].dyn.items[0] = 0x2a;
+    shopVisit(t, [0x28], { scrolls: 2, sell: 2 });
+    expect(t.officers[0].dyn.items.filter((v) => v === 0x28).length).toBe(1); // 180 gold: one, 100 kept
+    const u = fakeState([10], 2000);
+    shopVisit(u, [0x28], { scrolls: 2, sell: 3 });
+    expect(u.officers[0].dyn.items.filter((v) => v === 0x28).length).toBe(7);
+    const v = fakeState([10], 9000);
+    story(v, 0x12, 1, 0);
+    v.officers[0].dyn.items[0] = 0x12;
+    shopVisit(v, [], { scrolls: 2, sell: 1 });
+    expect(v.officers[0].dyn.items[0]).toBe(0x12);
+    expect(v.progress.money).toBe(9000);
+  });
+});
+
 describe('grind params: the namu.wiki techniques', () => {
   it('new plans get the defaults, old plans (keys absent) keep the old behaviour as NaN', async () => {
     const { defaultParams, clampParams } = await import('../src/sim/grind/policy');

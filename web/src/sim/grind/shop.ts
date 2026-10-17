@@ -24,6 +24,17 @@
 //      hit-exp action for an officer with no MP left; keeps 100 gold and 1 free slot. After the
 //      heals: buying them first lost 서주 (the early gold, 200..800, does not cover both).)
 // Weapons, armour and horses are never sold in this game (story items only).
+// Selling (opts.sell, GrindParams.sell; Game.shopSell, 2cb4:33xx / 3cb4:3441): any item sells for
+// ((price byte * 3) >> 2) * 10 gold, gold capped at 10000; a story item (price byte 0xff) for 1910.
+// Done before the buys, so the gold funds them:
+//   sell >= 1: what the bot never uses: the class-change books (둔갑천서/청랑서/고취구 0x00..0x02,
+//     궁술/마술/검술지침서 0x10..0x12) and a weapon / horse / armour that is not its holder's best
+//     of that kind (only the best counts, 0cf5:6aee);
+//   sell >= 2: also the attack scrolls stronger than the cheapest kinds (0x23/0x24, 0x26/0x27,
+//     0x29/0x2a) when this shop sells a cheap one (the same hit exp for fewer troops: the namu.wiki
+//     grind sells 화룡서/업화서 and buys 초열서);
+//   sell >= 3: the cheap-scroll fill (3s) goes on past `scrolls` per officer to every free slot but
+//     one (the expert buys 34..46 초열서 per battle).
 
 import type { GameState } from '../../engine/state';
 import { PROMOTE_FROM, PROMOTE_LEVEL } from './policy';
@@ -48,6 +59,54 @@ export function buyItem(state: GameState, officer: number, item: number): boolea
   return true;
 }
 
+/** Game.shopSell (3cb4:3441): ((price * 3) >> 2) * 10, a story item (0xff) 1910. */
+export function sellPrice(state: GameState, item: number): number {
+  const it = state.items[item];
+  return it ? ((it.price * 3) >> 2) * 10 : 0;
+}
+
+/** Sells the item in `slot` of `officer`: the slot is emptied, the gold added up to 10000. Returns the gold. */
+export function sellItem(state: GameState, officer: number, slot: number): number {
+  const d = state.officers[officer]?.dyn;
+  const id = d?.items[slot];
+  if (!d || id === undefined || id === 0xff) return 0;
+  const price = sellPrice(state, id);
+  d.items[slot] = 0xff;
+  state.progress.money = Math.min(10000, state.progress.money + price);
+  return price;
+}
+
+/** Class-change books the bot never reads (ab86 class change: 0x00..0x02, 0x10..0x12). */
+export const CLASS_BOOKS = [0x00, 0x01, 0x02, 0x10, 0x11, 0x12];
+/** Attack scrolls stronger than the cheapest of their element (power 1, 2). */
+const STRONG_SCROLLS = [0x23, 0x24, 0x26, 0x27, 0x29, 0x2a];
+const CHEAP_SCROLLS = [0x28, 0x25, 0x22];
+
+/** What `level` of selling (see the header) lets go from the party: [officer, slot] pairs. */
+export function spareItems(state: GameState, team: number[], shop: number[], level: number): [number, number][] {
+  const out: [number, number][] = [];
+  if (level < 1) return out;
+  const cheapHere = CHEAP_SCROLLS.some((id) => shop.includes(id));
+  for (const o of team) {
+    const items = state.officers[o].dyn.items;
+    // the best weapon (type 0), horse (4) and armour (5) of the holder stay, the first of equals
+    const keep = new Map<number, number>();
+    items.forEach((id, k) => {
+      const it = id === 0xff ? undefined : state.items[id];
+      if (!it || it.price !== 0xff || ![0, 4, 5].includes(it.type)) return;
+      const cur = keep.get(it.type);
+      if (cur === undefined || (state.items[items[cur]]?.power ?? 0) < (it.power ?? 0)) keep.set(it.type, k);
+    });
+    items.forEach((id, k) => {
+      if (id === 0xff) return;
+      const it = state.items[id];
+      const equipment = !!it && it.price === 0xff && [0, 4, 5].includes(it.type) && keep.get(it.type) !== k;
+      if (CLASS_BOOKS.includes(id) || equipment || (level >= 2 && cheapHere && STRONG_SCROLLS.includes(id))) out.push([o, k]);
+    });
+  }
+  return out;
+}
+
 const TROOP_HEALS = [0x1e, 0x1f, 0x20, 0x34, 0x35, 0x36];
 const healPower = (id: number) => (id >= 0x34 ? id - 0x34 : id % 3);
 
@@ -65,9 +124,19 @@ export function party(state: GameState): number[] {
 export function shopVisit(
   state: GameState,
   shop: number[],
-  opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number; bombItems?: number; confuseItems?: number; healKeep?: number; promoLead?: number } = {},
+  opts: { reserve?: number; bombs?: boolean; areaHeals?: boolean; scrolls?: number; bombItems?: number; confuseItems?: number; healKeep?: number; promoLead?: number; sell?: number; sold?: Purchase[] } = {},
 ): Purchase[] {
   const out: Purchase[] = [];
+  // (without the cheap-scroll option the old rule 3 buys the strong scrolls: none are sold then)
+  const scrollsOn = opts.scrolls !== undefined && Number.isFinite(opts.scrolls);
+  const sellLevel = opts.sell !== undefined && Number.isFinite(opts.sell) ? Math.min(scrollsOn ? 3 : 1, Math.round(opts.sell)) : 0;
+  // 0. selling first (see the header), so the gold goes to the buys below; never past the 10000 cap
+  for (const [o, k] of spareItems(state, party(state), shop, sellLevel)) {
+    const item = state.officers[o].dyn.items[k];
+    if (state.progress.money + sellPrice(state, item) > 10000) continue;
+    const price = sellItem(state, o, k);
+    opts.sold?.push({ officer: o, item, price });
+  }
   const has = (o: number, id: number) => state.officers[o].dyn.items.includes(id);
   const free = (o: number) => state.officers[o].dyn.items.filter((v) => v === 0xff).length;
   const buy = (o: number, id: number) => {
@@ -131,7 +200,8 @@ export function shopVisit(
   fill(0x21, 0x21, Math.min(1, Math.round(opts.bombItems ?? 0)), false, false);
   fill(0x2b, 0x2d, Math.round(opts.confuseItems ?? 0), true);
   // 2. troop heals, the strongest the shop has that the gold allows
-  const want = opts.scrolls === undefined || !Number.isFinite(opts.scrolls) ? -1 : Math.round(opts.scrolls);
+  let want = opts.scrolls === undefined || !Number.isFinite(opts.scrolls) ? -1 : Math.round(opts.scrolls);
+  if (sellLevel >= 3 && want >= 0) want = 8; // bulk: every free slot but one
   const heals = shop.filter((id) => TROOP_HEALS.includes(id)).sort((a, b) => healPower(b) - healPower(a) || b - a);
   const buyHeals = (who: number[]) => {
     if (!heals.length) return;
@@ -150,7 +220,7 @@ export function shopVisit(
 
   // 3s. cheap scrolls for everyone, lowest level first (GrindParams.scrolls; NaN/undefined = rule 3)
   if (want >= 0 && opts.bombs !== false) {
-    const cheap = [0x28, 0x25, 0x22].filter((id) => shop.includes(id));
+    const cheap = CHEAP_SCROLLS.filter((id) => shop.includes(id));
     const low = [...team].filter((o) => state.officers[o].dyn.level < 99).sort((a, b) => state.officers[a].dyn.level - state.officers[b].dyn.level || a - b);
     for (const o of low) {
       let n = state.officers[o].dyn.items.filter((v) => v >= 0x22 && v <= 0x2a).length;

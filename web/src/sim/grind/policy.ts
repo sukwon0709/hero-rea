@@ -378,6 +378,15 @@ export interface GrindParams {
   /** Pen: weight of the counter exp a unit next to the penned enemy can expect from its attacks. */
   penCounter: number;
   /**
+   * Merchants: selling (shop.ts, Game.shopSell: ((price*3)>>2)*10 gold, a story item 1910), before
+   * the buys. 0 off; 1 the class-change books and the equipment its holder does not use; 2 also the
+   * strong attack scrolls where cheap ones are sold; 3 also the cheap-scroll fill to every free slot
+   * but one (the expert's bulk 초열서). Learnable; absent (older plans): the default, 1 (the bot
+   * never reads a class-change book; measured at 회남, 8/10 -> 10/10 wins: the 3820 gold of
+   * 유비's 검술/궁술지침서 buys the scrolls and the area / troop heals).
+   */
+  sell: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -520,6 +529,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'penPrice', min: 0, max: 2, def: 1 },
   { key: 'penCell', min: 0, max: 20, def: 6 },
   { key: 'penCounter', min: 0, max: 2, def: 0.5 },
+  // merchants: sell the unused items (class-change books, spare equipment, strong scrolls) and bulk-buy 초열서
+  { key: 'sell', min: 0, max: 3, def: 1, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */

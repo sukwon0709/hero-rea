@@ -352,10 +352,12 @@ describe('grind: fish pen params', () => {
       expect(clampParams({ ...d, [k]: s.max + 500 })[k]).toBe(s.max);
       expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
     }
-    // learned plans store the CEM mean by index: the pen keys come last
+    // learned plans store the CEM mean by index: the pen keys were appended after idleFinish (and
+    // only later keys, the shop's sell, follow them)
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
-    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
+    expect(idx('sell')).toBe(PARAM_SPECS.length - 1);
   });
 });
 
