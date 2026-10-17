@@ -46,6 +46,8 @@ export interface BattleSnapshot {
   moneyAfter?: number;
   /** Shop item lists the story passed through since the previous battle (merchant towns). */
   shops?: number[][];
+  /** The story branches the capture took (branches.ts); absent on captures made before the picks. */
+  branches?: Record<string, string>;
 }
 
 export function cloneSnapshot<T>(v: T): T {

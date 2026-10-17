@@ -12,6 +12,7 @@ import type { Game } from '../../native/game';
 import { battleNameLines } from '../../engine/battle/map';
 import { storyName } from './names';
 import type { BattleSnapshot, FormationInfo } from './sandbox';
+import { branchChoice, storyPicks, type BranchChoice } from './branches';
 
 const dec = new TextDecoder('euc-kr');
 
@@ -129,9 +130,10 @@ export async function playHooked(
   }
 }
 
-/** Baseline capture: force-won battles, snapshots only. */
-export async function captureStory(files: Map<string, Uint8Array>, seed = 12345, log?: (l: string) => void) {
+/** Baseline capture: force-won battles, snapshots only, along the given story branches (default: the recommended ones). */
+export async function captureStory(files: Map<string, Uint8Array>, seed = 12345, log?: (l: string) => void, branches: BranchChoice = branchChoice()) {
   const t0 = performance.now();
-  const { p, snaps } = await playHooked(files, { seed, forceAll: true, log });
+  const { p, snaps } = await playHooked(files, { seed, forceAll: true, log, storyPicks: storyPicks(branches) });
+  for (const s of snaps) s.branches = { ...branches };
   return { result: p.result, snaps, ms: performance.now() - t0, issues: p.issues, battles: p.battles };
 }

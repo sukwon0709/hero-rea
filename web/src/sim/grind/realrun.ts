@@ -8,6 +8,7 @@ import { PLAYER_SLOTS, AiMode, loadLearnTable } from '../../engine/battle/types'
 import { factionOf } from '../../native/battle/model';
 import type { BattleScene } from '../../native/battle/scene';
 import { playHooked } from './capture';
+import { branchChoice, storyPicks, type BranchChoice } from './branches';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, makeHeadless } from './sandbox';
 import { searchBattle, SearchRng, type BattleOutcome } from './battle';
@@ -35,7 +36,7 @@ export interface RealRunResult {
 export async function realRun(
   files: Map<string, Uint8Array>,
   params: GrindParams,
-  opts: { variants: number; seed?: number; elites?: Record<number, GrindParams>; log?: (l: string) => void; rescue?: number },
+  opts: { variants: number; seed?: number; elites?: Record<number, GrindParams>; log?: (l: string) => void; rescue?: number; branches?: BranchChoice },
 ): Promise<RealRunResult> {
   const t0 = performance.now();
   const rng = new SearchRng(opts.seed ?? 99);
@@ -45,7 +46,8 @@ export async function realRun(
   const bought: Purchase[] = [];
   const { p } = await playHooked(
     files,
-    { seed: opts.seed ?? 12345, botAttempts: 3 },
+    // the same story branches as the captures the plans were learned on
+    { seed: opts.seed ?? 12345, botAttempts: 3, storyPicks: storyPicks(opts.branches ?? branchChoice()) },
     {
       onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0, params.healers, loadLearnTable(assetsFor(files).main)),
       // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it

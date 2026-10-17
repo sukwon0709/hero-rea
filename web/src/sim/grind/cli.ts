@@ -7,7 +7,9 @@
 //
 // Options: --out DIR (default $GRIND_OUT or /mnt/project-files/grind; $TMPDIR/hero-grind when that is down), --pop N (candidates per generation, 6),
 // --variants N (plans tried per battle, 3), --workers N (parallel campaigns, 2), --limit N (first N
-// battles only), --seed N, --reset (start the learning over).
+// battles only), --seed N, --reset (start the learning over), --branch key=option (story branches,
+// branches.ts; default the walkthroughs' picks, e.g. bowang=박망파; captures along other branches
+// are made again unless --keep-captures).
 // Output (outside the repository; it is generated from the player's game files): cache/captures.v8,
 // state.json (learning state), progress.json + progress.html, results.json + guide.md.
 
@@ -19,6 +21,7 @@ import { spawn } from 'node:child_process';
 import { serialize, deserialize } from 'node:v8';
 import type { BattleSnapshot } from './sandbox';
 import { captureStory } from './capture';
+import { branchDiff, branchLine, capturedBranches, parseBranches } from './branches';
 import { enemyLevel, runCampaign, topLevel, type CampaignResult } from './campaign';
 import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, PARAM_SPECS, type GrindParams } from './policy';
@@ -39,6 +42,10 @@ const sopt = (name: string, def: string): string => {
   return i >= 0 ? argv[i + 1] : def;
 };
 const flag = (name: string) => argv.includes(`--${name}`);
+/** Every value of a repeatable option. */
+const sopts = (name: string): string[] => argv.flatMap((a, i) => (a === `--${name}` && i + 1 < argv.length ? [argv[i + 1]] : []));
+// story branches (branches.ts): the walkthroughs' picks unless --branch key=option (repeatable or comma-separated)
+const BRANCHES = parseBranches(sopts('branch'));
 
 // --out, else $GRIND_OUT, else the shared mount; when the mount is down (EIO, ENOENT, EACCES) and no
 // --out was given, main() falls back to a local directory instead of crashing
@@ -75,6 +82,35 @@ function loadCaptures(): BattleSnapshot[] {
       console.error(`captures: ${capPath()} unreadable (${(e as Error).message}); using the local copy`);
     }
   return applyStoryNames(deserialize(buf ?? readFileSync(existsSync(localCap()) ? localCap() : capPath())) as BattleSnapshot[]);
+}
+
+/**
+ * Captures along the wanted story branches: when the cached captures took other branches (or were
+ * made before the picks: 신야1 instead of 박망파), capture again (about a minute) unless
+ * --keep-captures. The branches 박망파/신야1 sit at the same battle index, so plans learned for the
+ * battles before stay aligned; 여남 inserts a battle and shifts the later indices.
+ */
+async function ensureCaptures(files: Map<string, Uint8Array>): Promise<void> {
+  let have: ReturnType<typeof capturedBranches> | null = null;
+  try {
+    have = capturedBranches(loadCaptures());
+  } catch {
+    have = null;
+  }
+  const diff = have ? branchDiff(have, BRANCHES) : ['(no captures)'];
+  if (!diff.length) {
+    console.error(`captures: story branches ${branchLine(BRANCHES)}`);
+    return;
+  }
+  if (have && flag('keep-captures')) {
+    console.error(`captures: story branches ${branchLine(have)} differ from the wanted ${branchLine(BRANCHES)} (${diff.join(', ')}); kept (--keep-captures)`);
+    return;
+  }
+  console.error(`captures: ${have ? `branches ${diff.join(', ')} differ (${branchLine(have)})` : 'none'}; capturing along ${branchLine(BRANCHES)}`);
+  const r = await captureStory(files, opt('seed', 12345), undefined, BRANCHES);
+  if (r.result !== 'ending') throw new Error(`capture along ${branchLine(BRANCHES)} did not reach the ending (${r.result}); issues: ${r.issues.slice(0, 3).join(' | ')}`);
+  writeFileSync(capPath(), serialize(r.snaps));
+  console.error(`captures: ${r.snaps.length} battles (${(r.ms / 1000).toFixed(0)} s)`);
 }
 
 const statePath = () => join(OUT, 'state.json');
@@ -264,11 +300,16 @@ async function main() {
   }
   if (cmd === 'capture') {
     const files = loadFiles();
-    const r = await captureStory(files, opt('seed', 12345), (l) => {
-      if (/RESTART|ISSUE/.test(l)) console.log(l);
-    });
+    const r = await captureStory(
+      files,
+      opt('seed', 12345),
+      (l) => {
+        if (/RESTART|ISSUE/.test(l)) console.log(l);
+      },
+      BRANCHES,
+    );
     writeFileSync(capPath(), serialize(r.snaps));
-    console.log(`capture: ${r.result}, ${r.snaps.length} battles, ${(r.ms / 1000).toFixed(1)} s, issues ${r.issues.length}`);
+    console.log(`capture: ${r.result}, ${r.snaps.length} battles, ${(r.ms / 1000).toFixed(1)} s, issues ${r.issues.length}, branches ${branchLine(BRANCHES)}`);
     for (const s of r.snaps) console.log(`${s.index} ch${s.chapter} st${s.stage} bl${s.block} map ${s.map} ${s.name} limit ${s.script.battleB}${s.formationInfo ? ' formation' : ''}`);
     return;
   }
@@ -284,6 +325,7 @@ async function main() {
   }
   if (cmd === 'battle') {
     const files = loadFiles();
+    await ensureCaptures(files);
     const snaps = loadCaptures();
     const snap = snaps[opt('index', 0)];
     // hint defaults, and the bench's reference carry for that battle when there is one (realistic levels)
@@ -307,6 +349,7 @@ async function main() {
   }
   if (cmd === 'evolve') {
     const files = loadFiles();
+    await ensureCaptures(files);
     const snaps = loadCaptures();
     const hints = loadHints(snaps);
     const st = loadState(hints.defaults);
@@ -506,6 +549,7 @@ async function main() {
     // several RNG seeds, for the grinding policy and for the game's own AI; written to
     // bench-<label>.json and shown in progress.html (before / after a policy change)
     const files = loadFiles();
+    await ensureCaptures(files);
     const snaps = loadCaptures();
     const list = sopt('battles', '3,6,8,9,11').split(',').map(Number);
     const seeds = opt('seeds', 6);
@@ -555,6 +599,7 @@ async function main() {
   if (cmd === 'speed') {
     // simulation speed: the same battles (bench carry, a few RNG seeds) back to back in one process
     const files = loadFiles();
+    await ensureCaptures(files);
     const snaps = loadCaptures();
     const fx = join(OUT, 'cache', 'bench-carry.v8');
     const carries = existsSync(fx) ? (deserialize(readFileSync(fx)) as Record<number, CarryState | null>) : {};
@@ -579,7 +624,7 @@ async function main() {
     const files = loadFiles();
     const st = loadState();
     const params = st.best?.params ?? { ...defaultParams(), ...(loadHints(null).defaults ?? {}) };
-    const r = await realRun(files, params, { variants: opt('variants', 3), elites: st.elites, rescue: opt('retries', opt('rescue', 10)), log: (l) => console.log(l) });
+    const r = await realRun(files, params, { variants: opt('variants', 3), elites: st.elites, rescue: opt('retries', opt('rescue', 10)), branches: BRANCHES, log: (l) => console.log(l) });
     atomicWrite(join(OUT, 'results.json'), JSON.stringify(resultsJson(r, st), null, 1));
     atomicWrite(join(OUT, 'guide.md'), guideMarkdown(r, st));
     console.log(`real run: ${r.result}, n99 ${r.n99}, top15 ${r.top15}, ${(r.ms / 1000).toFixed(0)} s, ${r.sandboxBattles} sandbox battles`);

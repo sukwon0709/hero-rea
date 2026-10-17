@@ -116,7 +116,20 @@ export interface PlaythroughOptions {
    * can buy here (the grinding simulator spends gold on promotions, heals and bombs).
    */
   onShop?: (game: Game, items: number[]) => void;
+  /** Story branches to take instead of the default answers (see StoryPick). */
+  storyPicks?: StoryPick[];
 }
+
+/**
+ * A story branch to take. The script offers branches in two ways:
+ *  - a CHOOSE menu (신도/광천, 거록/청하, the 소패 bandit hub, 양양/여남): `choose` lists option
+ *    indices in order of preference; the menu in that block (chapter/stage/block) takes the first one
+ *    not yet taken at that menu (an order list visits the hub's targets in that order);
+ *  - talking to one of several characters on the field, each record leading elsewhere (여포토벌
+ *    순욱 -> 하구 / 곽가 -> 팽성, 신야 장비 -> 신야1 / 제갈량 -> 박망파): `talk` is the officer whose
+ *    record is fired first in that block (chapter/stage/block), among records of the same rank.
+ */
+export type StoryPick = { at: [number, number, number]; choose: number[] } | { at: [number, number, number]; talk: number };
 
 export type PlayResult = 'ending' | 'gameOver' | 'quit' | 'stopped' | 'hang' | 'error';
 
@@ -144,7 +157,7 @@ export class Playthrough {
   private current: BattleRecord | null = null;
   /** The outcome of run(), once it returned. */
   result: PlayResult | null = null;
-  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset' | 'onShop'>> & PlaythroughOptions;
+  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset' | 'onShop' | 'storyPicks'>> & PlaythroughOptions;
   private shopsSeen = new Set<string>();
 
   constructor(files: Map<string, Uint8Array>, opts: PlaythroughOptions = {}) {
@@ -316,6 +329,7 @@ export class Playthrough {
   /** Every CHOOSE answer given, in order ("menu key#occurrence=answer"). */
   readonly choices: string[] = [];
   private chooseCount = new Map<string, number>();
+  private chooseTaken = new Map<string, Set<number>>();
 
   /** Answers a button pick: yes / OK / the first enabled entry; shops are left. */
   private answer(buttons: Button[], cancel: boolean): number {
@@ -348,6 +362,17 @@ export class Playthrough {
       const bad = (i: number) => this.chooseUnsafe.has(i) || !!this.opts.avoidChoices?.has(`${this.chooseKey}#${n}=${i}`);
       let k = (n + (this.opts.choiceOffset ?? 0)) % buttons.length;
       for (let j = 0; j < buttons.length && bad(k); j++) k = (k + 1) % buttons.length;
+      // a story pick: the first of its options not taken at this menu yet (and safe)
+      const taken = this.chooseTaken.get(this.chooseKey) ?? new Set<number>();
+      const s = this.game.script;
+      const pick = this.opts.storyPicks?.find((p) => 'choose' in p && p.at[0] === s.chapter && p.at[1] === s.stage && p.at[2] === s.block);
+      if (pick && 'choose' in pick) {
+        // every listed option taken (a hub done): the first option not taken yet
+        const i = pick.choose.find((i) => i < buttons.length && !taken.has(i) && !bad(i)) ?? buttons.findIndex((_, i) => !taken.has(i) && !bad(i));
+        if (i >= 0) k = i;
+      }
+      taken.add(k);
+      this.chooseTaken.set(this.chooseKey, taken);
       this.choices.push(`${this.chooseKey}#${n}=${k}`);
       this.log(`CHOOSE ${k} of ${labels.join(' / ')}${this.chooseUnsafe.size ? ` (avoiding ${[...this.chooseUnsafe].join(',')})` : ''}`);
       return k;
@@ -424,6 +449,13 @@ export class Playthrough {
     return 1;
   }
 
+  /** 1 when a storyPicks entry asks for this talk record to be fired first. */
+  private picked(r: EventRecord): number {
+    if (r.trigger !== 3) return 0;
+    const s = this.game.script;
+    return this.opts.storyPicks?.some((p) => 'talk' in p && p.talk === r.p1 && p.at[0] === s.chapter && p.at[1] === s.stage && p.at[2] === s.block) ? 1 : 0;
+  }
+
   private key(r: EventRecord): string {
     const s = this.game.script;
     return `${s.chapter}/${s.stage}/${s.block}/${s.group}/${r.index}/${Array.from(s.flags).join('.')}`;
@@ -458,9 +490,9 @@ export class Playthrough {
     }
     const cands = this.groupRecords()
       .filter((r) => r.trigger === 2 || r.trigger === 3 || r.trigger === 5)
-      .map((r) => ({ r, score: this.score(stage, r) }))
+      .map((r) => ({ r, score: this.score(stage, r), pick: this.picked(r) }))
       .filter((c) => c.score >= 0)
-      .sort((a, b) => b.score - a.score || a.r.index - b.r.index);
+      .sort((a, b) => b.score - a.score || b.pick - a.pick || a.r.index - b.r.index);
     for (const { r } of cands) {
       const k = this.key(r);
       if (this.attempted.has(k) || this.unreachable.has(`${k}@${ls}`)) continue;
