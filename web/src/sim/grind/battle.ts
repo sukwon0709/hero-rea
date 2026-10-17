@@ -177,7 +177,11 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       const free = recs.length;
       // 회남 plan (with hnWeak): close-combat units and the strongest go out, weak archers stay behind
       const hn = params.hnPlan > 0.5 && Number.isFinite(params.hnWeak) && isHuainanAt(snap.chapter, snap.stage, snap.block);
-      const picks = pickFormation(state, fi.fixed, free, params.strong, params.band > 0, params.healers, learn);
+      // officers the script places itself (a record of their own outside the free ones: 연주's 조운
+      // joins at (29,7) by REINFORCE) are no picks: at FORMATION time the script had them in another
+      // force (SET_FORCE #53, 14 ... FORMATION ... SET_FORCE #53, 0), so the player could not take them
+      const own = script.units.flatMap((u, r) => (!recs.includes(r) && u.officer < 0x100 && !fi.fixed.includes(u.officer) ? [u.officer] : []));
+      const picks = pickFormation(state, [...fi.fixed, ...own], free, params.strong, params.band > 0, params.healers, learn);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
