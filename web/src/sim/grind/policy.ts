@@ -345,6 +345,16 @@ export interface GrindParams {
   yjEscape: number;
   /** 연주 escape plan: RNG samples per option of the rollouts. */
   yjSamples: number;
+  /** The walk to an escape / bonus cell goes in a column, the unit nearest its goal first (above 0.5; else by need). */
+  column: number;
+  /** Troop heals go first to the ally the enemy can bring down this phase: weight of that rescue (0: off). */
+  healRisk: number;
+  /** Cost of a lone cell (no ally next to it) where two or more enemies could bring the unit down, as a share of its future (0: off). */
+  lone: number;
+  /** Damage tactics valued with their chance to land (1cb6:a2aa; a miss still pays the hit exp): above 0.5. */
+  tacHit: number;
+  /** Player phases in a row without exp before the finish starts ('idle'; was 8). */
+  idleFinish: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -476,6 +486,11 @@ export const PARAM_SPECS: ParamSpec[] = [
   // 연주 (battle 16 only): the early escape plan (on by default) and its rollout samples
   { key: 'yjEscape', min: 0, max: 1, def: 0.6 },
   { key: 'yjSamples', min: 1, max: 4, def: 3, int: true },
+  { key: 'column', min: 0, max: 1, def: 1 },
+  { key: 'healRisk', min: 0, max: 3, def: 0 },
+  { key: 'lone', min: 0, max: 2, def: 0 },
+  { key: 'tacHit', min: 0, max: 1, def: 0 },
+  { key: 'idleFinish', min: 3, max: 10, def: 8, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1442,13 +1457,22 @@ export class GrindPolicy {
       // the leader moves last: the enemies' reach is then computed with the others where they ended up
       // (a unit that moves away after the leader opens a path: 거록, a reinforcement reached 유비 through it)
       const feedLast = this.p.feed > 0 && !this.finishing;
+      // the walk to an escape / bonus cell goes in a column: the unit nearest its goal moves first (by
+      // need, 경무 L7 took the head of 회남's one-wide bridge and held up five behind it for turns); not
+      // in the other finishes
+      const column = this.finishing && this.stats.finishReason === 'escape' && paramOr(this.p, 'column') > 0.5;
       let gained = 0;
       const done = new Set<number>();
       for (let guard = 0; guard < PLAYER_SLOTS * 2 && b.info.result === 0; guard++) {
-        const order = sc.units
-          .slice(0, PLAYER_SLOTS)
-          .filter((u) => this.controllable(u) && !(u.flags & (UnitFlag.Acted | UnitFlag.Confused)) && !done.has(u.slot))
-          .sort((x, y) => (feedLast ? (x.officer === 0 ? 1 : 0) - (y.officer === 0 ? 1 : 0) : 0) || this.weight(y.slot) - this.weight(x.slot) || x.slot - y.slot);
+        const list = sc.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u) && !(u.flags & (UnitFlag.Acted | UnitFlag.Confused)) && !done.has(u.slot));
+        const wd = column ? this.walkDists(list) : null;
+        const order = list.sort(
+          (x, y) =>
+            (feedLast ? (x.officer === 0 ? 1 : 0) - (y.officer === 0 ? 1 : 0) : 0) ||
+            (wd ? wd.get(x.slot)! - wd.get(y.slot)! : 0) ||
+            this.weight(y.slot) - this.weight(x.slot) ||
+            x.slot - y.slot,
+        );
         const u = order[0];
         if (!u) break;
         done.add(u.slot);
@@ -1483,6 +1507,19 @@ export class GrindPolicy {
       (this as { p: GrindParams }).p = p0;
       this.altK = 0;
     }
+  }
+
+  /** Walking distance of each unit to its goal in the escape walk (as bestAction: the 회남 fort, the bonus cell, its own goal; else the nearest enemy). */
+  private walkDists(list: Unit[]): Map<number, number> {
+    const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
+    const bonus = !this.exitPlan ? this.bonusCell() : null;
+    const m = new Map<number, number>();
+    for (const u of list) {
+      const mt = moveTypeOf(this.b.s, u);
+      const goal = this.hnEsc() ? this.exitPlan!.cell : bonus ?? this.goalFor(u);
+      m.set(u.slot, goal ? this.pathDist(goal, mt, u.x, u.y) : enemies.length ? this.foeDist(enemies, mt, u.x, u.y) : 0);
+    }
+    return m;
   }
 
   // ---- look-ahead search (GrindParams.search): candidate phases played out against the enemy's reply
@@ -2243,6 +2280,8 @@ export class GrindPolicy {
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
     const needy = this.scene.units.slice(0, PLAYER_SLOTS).some((u) => u.status === Status.Field && this.weight(u.slot) > 0);
+    // phases in a row without exp before the finish starts (idle)
+    const idleN = Math.max(2, paramOr(this.p, 'idleFinish'));
     // going badly (the leader hurt, a third of the units gone)
     // our own officers only: allied armies under the computer (거록: 공손월's men) fall without it meaning much
     const mine = this.scene.units
@@ -2277,7 +2316,7 @@ export class GrindPolicy {
     if (needy && this.stepsLeft() === 0 && !deadlineHit && this.wakeOn()) {
       const need = this.farmNeed();
       if (left > need) {
-        if (this.idleTurns >= 8 || leaderHurt || losses) {
+        if (this.idleTurns >= idleN || leaderHurt || losses) {
           this.stats.wakeTurns = (this.stats.wakeTurns ?? 0) + 1;
           this.log?.(`wake: turn ${b.info.turn + 1}, ${left} turns left, finish needs ${need}`);
         }
@@ -2297,10 +2336,10 @@ export class GrindPolicy {
       this.regroupUntil = turn + 1;
       return;
     }
-    if (deadlineHit || !needy || this.idleTurns >= 8 || leaderHurt || losses) {
+    if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
-      this.stats.finishReason = deadlineHit ? 'deadline' : !needy ? 'done' : this.idleTurns >= 8 ? 'idle' : leaderHurt ? 'leader' : 'losses';
+      this.stats.finishReason = deadlineHit ? 'deadline' : !needy ? 'done' : this.idleTurns >= idleN ? 'idle' : leaderHurt ? 'leader' : 'losses';
       this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
     }
@@ -2527,6 +2566,7 @@ export class GrindPolicy {
     const n = b.width * b.height;
     this.enemyTactics.clear();
     this.targetCount.clear();
+    this.riskMemo.clear();
     const rain = WEATHER_TYPE[b.info.weather] === RAIN;
     const parts: { i: number; r: { threat: number[]; tthreat: number[]; loose: number[] } }[] = [];
     for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
@@ -3168,6 +3208,7 @@ export class GrindPolicy {
       }
       return p * c;
     };
+    const lone = paramOr(this.p, 'lone');
     const lslot = b.slotOfOfficer(0);
     const leaderPos: [number, number] | null = lslot !== NONE && lslot !== slot && this.scene.units[lslot].status === Status.Field ? [this.scene.units[lslot].x, this.scene.units[lslot].y] : null;
     // a healer with MP walks towards the most hurt ally, so heals (useless on full troops) stay possible
@@ -3177,10 +3218,13 @@ export class GrindPolicy {
       let worst = 0.85;
       // 격려/응원/고무 (21..23, 30..32) restore morale: a unit below 100 morale is a target too
       const moraleHeals = tactics.some((t) => (t >= 21 && t <= 23) || (t >= 27 && t <= 29) || (t >= 30 && t <= 32));
+      // (the ally in danger of falling this phase counts as more hurt: healRisk)
+      const troopHeals = tactics.some((t) => healKind(t) & 1);
+      const hr = paramOr(this.p, 'healRisk');
       for (const a of this.scene.units.slice(0, PLAYER_SLOTS)) {
         if (a.slot === slot || a.status !== Status.Field) continue;
         const oa = b.officerOf(a);
-        const f = Math.min(oa.hp / Math.max(1, maxHp(oa)), moraleHeals ? a.morale / 100 + 0.1 : 9);
+        const f = Math.min(oa.hp / Math.max(1, maxHp(oa)), moraleHeals ? a.morale / 100 + 0.1 : 9) - (troopHeals && hr > 0 ? hr * 0.5 * this.healRisk(a) : 0);
         if (f < worst) {
           worst = f;
           healGoal = [a.x, a.y];
@@ -3237,6 +3281,9 @@ export class GrindPolicy {
         if (v !== NONE && v !== slot && sideOf(v)) mates++;
       }
       base += mates * (guarded ? 1.5 : 0.5);
+      // a lone cell (no ally next to it) where two or more enemies together could bring the unit down:
+      // walked out alone, it is ganged up on (회남: 관우 at T21 and T25, the second time to his fall)
+      if (lone > 0 && !guarded && mates === 0 && (dang.n ?? 0) >= 2) base -= lone * this.p.risk * future * Math.min(1, Math.max(0, (dang.worst / hp - 0.9) / 0.6));
       // let a weakened enemy get away to heal (village, its own healers, regeneration) and come back
       // for more hits and tactics: do not stand next to it while grinding
       if (!fin)
@@ -3574,6 +3621,21 @@ export class GrindPolicy {
     return [dmg, dmg + Math.max(0, extra - 1)];
   }
 
+  /**
+   * How near ally T is to falling this enemy phase where it stands: 0 when the expected damage is
+   * under 60% of its troops, rising to 1 at 110% (cached per threat map).
+   */
+  private healRisk(T: Unit): number {
+    let r = this.riskMemo.get(T.slot);
+    if (r === undefined) {
+      const hp = Math.max(1, this.b.officerOf(T).hp);
+      r = Math.min(1, Math.max(0, (this.danger(T, T.x, T.y).expected / hp - 0.6) * 2));
+      this.riskMemo.set(T.slot, r);
+    }
+    return r;
+  }
+  private riskMemo = new Map<number, number>();
+
   private tacticValue(u: Unit, tc: number, x: number, y: number, w: number): { value: number; target: number; exp: number; lethal: boolean } | null {
     const b = this.b;
     const o = b.officerOf(u);
@@ -3591,12 +3653,18 @@ export class GrindPolicy {
             const v = unitAt(b.s, nx, ny);
             if (v !== NONE && !sideOf(v)) hits.push(v);
           }
-        let exp = 0, burn = 0, spent = 0, ok = true, lethal = false;
+        let exp = 0, burn = 0, spent = 0, ok = true, lethal = false, killP = 0;
         let left = this.enemiesOnField();
         for (const h of hits) {
           const H = this.scene.units[h];
           const oh = b.officerOf(H);
           const [lo, hi] = this.tacticDamageRange(o, oh, e, p, terrainAt(b.s, H.x, H.y));
+          // the chance to land (1cb6:a2aa: rand(caster skill) above a quarter of the target's, half
+          // against tactic-resistant classes); a miss does nothing but still pays the hit exp
+          let pt = tacticSkill(oh) >> 2;
+          if (resistsTactics(oh.cls)) pt <<= 1;
+          const pc = tacticSkill(o);
+          const land = paramOr(this.p, 'tacHit') > 0.5 ? (pc > 0 ? Math.max(0, pc - 1 - pt) / pc : 0) : 1;
           if (this.spared(H.officer) && oh.hp - hi * 1.5 < maxHp(oh) * 0.5) ok = false;
           if (hi >= oh.hp) {
             // a duel / persuasion partner is never killed by a tactic either (팽성: 경무's fire took 조하 from 유비)
@@ -3606,15 +3674,16 @@ export class GrindPolicy {
             else if (this.finishing || (!this.know.protect.has(H.officer) && left - 1 >= this.p.keep)) {
               left--;
               lethal = true;
-              if (lo >= oh.hp) exp += combatExp(true, o.level, oh.level, true, h) - combatExp(true, o.level, oh.level, false, h);
+              if (lo >= oh.hp) exp += land * (combatExp(true, o.level, oh.level, true, h) - combatExp(true, o.level, oh.level, false, h));
+              killP = Math.max(killP, land);
             } else ok = false;
           }
           exp += combatExp(true, o.level, oh.level, false, h);
-          burn += (Math.min(oh.hp, (lo + hi) / 2) * 10) / Math.max(1, maxHp(oh));
-          spent += this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
+          burn += (land * Math.min(oh.hp, (lo + hi) / 2) * 10) / Math.max(1, maxHp(oh));
+          spent += land * this.troopCost(h, Math.min(oh.hp, (lo + hi) / 2), hi >= oh.hp, w);
         }
         if (!ok) continue;
-        const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic) + paramOr(this.p, 'hnDmg') * (10 * burn + (lethal ? 50 : 0));
+        const value = w * exp * this.p.tactic - this.p.conserve * burn - Math.min(spent, paramOr(this.p, 'cbCap') * w * exp * this.p.tactic) + paramOr(this.p, 'hnDmg') * (10 * burn + (lethal ? 50 * killP : 0));
         if (!best || value > best.value) best = { value, target: d, exp, lethal };
       }
       return best;
@@ -3652,21 +3721,28 @@ export class GrindPolicy {
     const bonus = tc <= 29 && (o.cls === 12 || o.cls === 18) ? 12 : 8;
     if (tc <= 29) {
       const kind = healKind(tc);
-      let pick = NONE, worst = 2;
+      const hr = kind & 1 ? paramOr(this.p, 'healRisk') : 0;
+      let pick = NONE, worst = 2, rescue = 0;
       for (const s of unitsInRange(b.s, u, p | 0x80, x, y, true)) {
         const T = this.scene.units[s];
         const ot = b.officerOf(T);
         if (!healUseful(kind, ot, T.morale, (T.flags & UnitFlag.Confused) !== 0)) continue;
-        const f = ot.hp / Math.max(1, maxHp(ot)) + T.morale / 1000;
+        // troops: the ally the enemy can bring down this phase first (장비 fell at 회남's front while
+        // the healer topped up a unit behind the lines)
+        const risk = hr > 0 && s !== u.slot ? this.healRisk(T) : 0;
+        const f = ot.hp / Math.max(1, maxHp(ot)) + T.morale / 1000 - hr * 0.5 * risk;
         if (f < worst) {
           worst = f;
           pick = s;
+          rescue = risk;
         }
       }
       if (pick === NONE) return null;
       // the leader first: its troops are the battle
       const lead = this.know.guarded.has(this.scene.units[pick].officer) ? this.p.safe * 30 * Math.max(0, 1 - worst) : 0;
-      return { value: w * bonus * this.p.heal + lead, target: pick, exp: bonus, lethal: false };
+      // a rescue keeps the ally's exp to come (and its blows) in the battle
+      const save = rescue > 0 ? hr * rescue * (10 + this.weight(pick) * Math.min(10, Math.max(1, this.deadline() - b.info.turn)) * 4) * 0.5 : 0;
+      return { value: w * bonus * this.p.heal + lead + save, target: pick, exp: bonus, lethal: false };
     }
     const list = unitsInRange(b.s, u, ((tc - 30) % 3) | 0x80, x, y, true);
     if (!list.length) return null;
