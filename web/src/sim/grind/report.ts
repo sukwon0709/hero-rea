@@ -142,6 +142,7 @@ const PARAM_KO: Record<ParamKey, string> = {
   bfEnd: '군악대 농사: 마무리에 필요한 턴 위에 남겨 둘 여유 턴',
   gate: '조건이 갖춰진 관문 칸(하비 적교)으로 가서 지도를 엶',
   gateLate: '남은 턴이 이만큼이 되면 관문을 엶 (0 = 가까운 적이 없어지는 대로)',
+  farmReach: '가두리·군악대 농사의 안전 판단에 두 턴 안에 우리에게 닿을 수 있는 적만 셈 (닫힌 관문 너머·깨우지 않을 대기 부대는 뺌)',
 };
 
 const f1 = (v: number) => (Math.round(v * 100) / 100).toString();
@@ -331,6 +332,7 @@ const MOVE_KO: Record<ParamKey, [string, string]> = {
   bfEnd: ['군악대 농사를 마지막 턴 가까이까지 하는 게 낫다고 배움', '마무리 턴을 넉넉히 남기는 게 낫다고 배움'],
   gate: ['관문을 그냥 두는 게 낫다고 배움', '관문을 여는 게 낫다고 배움'],
   gateLate: ['관문을 주변 적이 없어지는 대로 여는 게 낫다고 배움', '관문을 정해진 턴에 여는 게 낫다고 배움'],
+  farmReach: ['농사의 안전 판단에 전장의 모든 적을 세는 게 낫다고 배움', '농사의 안전 판단에 가까이 올 수 있는 적만 세는 게 낫다고 배움'],
 };
 
 function fmtP(key: ParamKey, v: number) {

@@ -357,7 +357,7 @@ describe('grind: fish pen params', () => {
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate']);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate', 'farmReach']);
   });
   it('escort exit (escIdle, escWin): appended last; plans without them take the defaults', async () => {
     const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
@@ -387,8 +387,8 @@ describe('grind: band farm params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd'] as const;
-    // the gate keys come after them
-    expect(PARAM_SPECS.slice(-keys.length - 2, -2).map((s) => s.key)).toEqual([...keys]);
+    // the gate keys and farmReach come after them
+    expect(PARAM_SPECS.slice(-keys.length - 3, -3).map((s) => s.key)).toEqual([...keys]);
     expect(d.bandFarm).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
@@ -402,11 +402,11 @@ describe('grind: band farm params', () => {
 });
 
 describe('grind: gate params', () => {
-  it('gate and gateLate are appended last, on (open once no enemy is near) by default, learnable within bounds', async () => {
+  it('gate and gateLate are appended last (before farmReach), on (open once no enemy is near) by default, learnable within bounds', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['gate', 'gateLate'] as const;
-    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 1, -1).map((s) => s.key)).toEqual([...keys]);
     expect(d.gate).toBeGreaterThan(0.5);
     expect(d.gateLate).toBe(0);
     const old = { ...d } as Record<string, number>;
@@ -417,6 +417,21 @@ describe('grind: gate params', () => {
       expect(clampParams({ ...d, [k]: s.max + 500 })[k]).toBe(s.max);
       expect(clampParams({ ...d, [k]: s.min - 500 })[k]).toBe(s.min);
     }
+  });
+});
+
+describe('grind: farm reach param', () => {
+  it('farmReach is appended last, off by default, learnable within bounds; plans made before it read the default', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('farmReach');
+    expect(d.farmReach).toBeLessThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    delete old.farmReach;
+    expect(paramOr(old as unknown as typeof d, 'farmReach')).toBe(d.farmReach);
+    const s = PARAM_SPECS.find((x) => x.key === 'farmReach')!;
+    expect(clampParams({ ...d, farmReach: s.max + 500 }).farmReach).toBe(s.max);
+    expect(clampParams({ ...d, farmReach: s.min - 500 }).farmReach).toBe(s.min);
   });
 });
 

@@ -442,6 +442,17 @@ export interface GrindParams {
   /** Gates: walk to the gate once at most this many turns are left, enemies near or not (0: as soon as none is near). */
   gateLate: number;
   /**
+   * The farms' safety check (penRatio, bfRatio) leaves out the sleeping enemies we would not wake
+   * within about two turns (a 대기 / 부동 unit out of reach of our units and of the farm's cells,
+   * by walking distance over the current terrain), above 0.5; else every enemy on the field
+   * (farmThreats). With it, a farm holds the finish back only while every enemy is within reach
+   * (farmAllNear), and its flat-rate casts do not hold off the idle finish otherwise. Off by
+   * default (learnable): with the ratios tuned on the whole field it let the pen start at turn 3
+   * of battle 2 with a waiting leader left out (bench 60/70 -> 42/70 wins; 하비 12/12 -> 11/12,
+   * its exp the same).
+   */
+  farmReach: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -602,6 +613,9 @@ export const PARAM_SPECS: ParamSpec[] = [
   // gates: walk onto a flag-gated map-changing cell (하비's drawbridge) once nothing is left nearby
   { key: 'gate', min: 0, max: 1, def: 0.6 },
   { key: 'gateLate', min: 0, max: 45, def: 0, int: true },
+  // the farms' safety check: leave out the sleeping enemies we would not wake (off by default:
+  // measured on the bench it cost wins, 60/70 -> 42/70, and 하비 12/12 -> 11/12)
+  { key: 'farmReach', min: 0, max: 1, def: 0.4 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1497,7 +1511,6 @@ export class GrindPolicy {
     if (ours.length < 2) return;
     const left = Math.max(1, this.deadline() - b.info.turn - this.p.finish);
     const so = this.sideStrength(true);
-    const se = this.sideStrength(false);
     const anc = this.holding() ? this.anchorNow() : null;
     let best = NONE, bv = -1e9;
     for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
@@ -1505,8 +1518,9 @@ export class GrindPolicy {
       if (E.status !== Status.Field || E.officer === 0xffff || !(E.flags & UnitFlag.Visible) || E.flags & UnitFlag.Scripted) continue;
       const oe = b.officerOf(E);
       // the others weak next to us
-      const own = (oe.level + 5) * (oe.hp / Math.max(1, maxHp(oe)));
-      if (se - own > so * paramOr(this.p, 'penRatio')) continue;
+      let others = 0;
+      for (const [j, v] of this.farmThreats([[E.x, E.y]])) if (j !== i) others += v;
+      if (others > so * paramOr(this.p, 'penRatio')) continue;
       // harmless enough: its blow on our units, on average, a small share of their troops
       let harm = 0, ev = 0, near = 99;
       for (const u of ours) {
@@ -1518,7 +1532,7 @@ export class GrindPolicy {
         near = Math.min(near, Math.ceil(Math.max(0, this.pathDist([E.x, E.y], moveTypeOf(b.s, u), u.x, u.y) - 1) / mp));
       }
       harm /= ours.length;
-      if (process.env.GRIND_TRACE_PEN) this.log?.(`  pen? ${E.officer} L${oe.level} hp ${oe.hp} harm ${harm.toFixed(2)} near ${near} others ${(se - own).toFixed(0)}/${so.toFixed(0)}`);
+      if (process.env.GRIND_TRACE_PEN) this.log?.(`  pen? ${E.officer} L${oe.level} hp ${oe.hp} harm ${harm.toFixed(2)} near ${near} others ${others.toFixed(0)}/${so.toFixed(0)}`);
       if (harm > paramOr(this.p, 'penHarm')) continue;
       if (near > 4) continue;
       if (anc && Math.abs(anc[0] - E.x) + Math.abs(anc[1] - E.y) > 8) continue;
@@ -1639,7 +1653,6 @@ export class GrindPolicy {
     if (!casters.length) return;
     // emergencies: regrouping, or bracing against a wave that outnumbers us (kill what comes)
     const emergency = this.regroupUntil >= turn || (this.bracing() && this.enemiesOnField() > this.oursOnField());
-    let keptStrength = 0;
     for (const u of this.scene.units) {
       if (u.status !== Status.Field || u.officer === 0xffff || b.officerOf(u).cls !== 12) continue;
       if (u.slot < PLAYER_SLOTS) {
@@ -1648,15 +1661,13 @@ export class GrindPolicy {
       }
       if (!(u.flags & UnitFlag.Visible) || u.flags & UnitFlag.Scripted || this.know.protect.has(u.officer)) continue;
       this.bands.push(u.slot);
-      if (!emergency) {
-        this.bandKeep.add(u.slot);
-        const o = b.officerOf(u);
-        keptStrength += (o.level + 5) * (o.hp / Math.max(1, maxHp(o)));
-      }
+      if (!emergency) this.bandKeep.add(u.slot);
     }
     if (!this.bands.length) return;
     // safe: the other enemies weak next to us, no wave due in the next 2 turns, the guarded officers in shape
-    let safe = !emergency && this.sideStrength(false) - keptStrength <= this.sideStrength(true) * paramOr(this.p, 'bfRatio');
+    let threat = 0;
+    for (const [i, v] of this.farmThreats([...this.bandKeep].map((i): [number, number] => [this.scene.units[i].x, this.scene.units[i].y]))) if (!this.bandKeep.has(i)) threat += v;
+    let safe = !emergency && threat <= this.sideStrength(true) * paramOr(this.p, 'bfRatio');
     if (safe)
       for (const e of this.know.turns) {
         if (e.turn === null || e.turn < turn || e.turn > turn + 2) continue;
@@ -1673,7 +1684,7 @@ export class GrindPolicy {
         const o = b.officerOf(this.scene.units[sl]);
         if (o.hp < maxHp(o) * 0.5) safe = false;
       }
-    if (process.env.GRIND_TRACE_BAND) this.log?.(`  band? turn ${turn} se ${this.sideStrength(false).toFixed(0)} kept ${keptStrength.toFixed(0)} so ${this.sideStrength(true).toFixed(0)} safe ${safe ? 1 : 0} bands ${this.bands.map((s) => `${this.scene.units[s].officer}@${this.scene.units[s].x},${this.scene.units[s].y} m${this.scene.units[s].mode}`).join(' ')}`);
+    if (process.env.GRIND_TRACE_BAND) this.log?.(`  band? turn ${turn} se ${this.sideStrength(false).toFixed(0)} threat ${threat.toFixed(0)} so ${this.sideStrength(true).toFixed(0)} safe ${safe ? 1 : 0} bands ${this.bands.map((s) => `${this.scene.units[s].officer}@${this.scene.units[s].x},${this.scene.units[s].y} m${this.scene.units[s].mode}`).join(' ')}`);
     if (!safe && paramOr(this.p, 'bfSpare') <= 0.5) this.bandKeep.clear();
     this.bandFarming = safe;
     if (safe && !this.inRollout) this.stats.bandTurns = (this.stats.bandTurns ?? 0) + 1;
@@ -1868,6 +1879,14 @@ export class GrindPolicy {
         const L = sc.units[ls];
         this.log?.(`  enemies near leader: ${sc.units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && Math.abs(e.x - L.x) + Math.abs(e.y - L.y) <= 99).map((e) => `${e.officer}@${e.x},${e.y} m${e.mode} L${this.b.officerOf(e).level} c${this.b.officerOf(e).cls} hp${this.b.officerOf(e).hp}`).join(' ')}`);
       }
+    }
+    // a map change (a gate opened, 하비's drawbridge lowered) makes the walking-distance maps stale
+    let th = 0x811c9dc5;
+    for (let c = 0; c < b.s.terrain.length; c++) th = Math.imul(th ^ b.s.terrain[c], 0x01000193);
+    if (th !== this.terrainHash) {
+      this.terrainHash = th;
+      this.distMaps.clear();
+      this.foeMaps.clear();
     }
     this.updateHold();
     this.updateBrace();
@@ -2785,9 +2804,10 @@ export class GrindPolicy {
     // while its turns last; the finish starts when the turns left just cover it (as the farm phase)
     // (never past the plan's own finish turns: `finish` is the push the battle's end needs, 하비's
     // castle took 15 turns where the estimate said 5 and the holds ran into the time limit)
-    if (this.penning() && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.farmNeed()) return;
+    const allNear = (this.penning() || this.bandFarming) && this.farmAllNear();
+    if (this.penning() && allNear && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.farmNeed()) return;
     // ... and so does the band farm (the casters earn every turn on the bands' MP)
-    if (this.bandFarming && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.bandNeed()) return;
+    if (this.bandFarming && allNear && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.bandNeed()) return;
     if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -2896,6 +2916,83 @@ export class GrindPolicy {
       v += (o.level + 5) * (o.hp / Math.max(1, maxHp(o)));
     }
     return v;
+  }
+
+  /**
+   * The enemy side's strength (sideStrength's measure) for the farms' go / no-go (penRatio,
+   * bfRatio), per enemy slot. With farmReach on, a sleeping enemy counts only when we would wake
+   * it within about two turns: a 대기 unit (it sits until one of ours comes in its reach) when one of
+   * ours, or a cell the farm takes us to (`at`: the pen's pick, the kept bands), is within its move
+   * plus its attack / damage-tactic reach plus 2 by walking distance over the terrain as it is now;
+   * a 부동 unit (it never moves) within its reach plus 1. Awake enemies always count (a 2-turn
+   * horizon on them let the pen walk the party into the main body: 유비 fell in all 6 seeds of
+   * battle 8), and so do the shut-in ones (no walk from us: a closed gate or a raised drawbridge
+   * opens by its own event, and a farm that runs meanwhile keeps the party from the cells that
+   * lead there: 하비 timed out in 10 of 12 seeds). `all`: every enemy within that reach, awake or
+   * not, attacker or not (farmAllNear). Off: every enemy on the field.
+   */
+  private farmThreats(at: [number, number][] = [], all = false): Map<number, number> {
+    const b = this.b;
+    const out = new Map<number, number>();
+    const reach = paramOr(this.p, 'farmReach') > 0.5;
+    const cells = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff).map((u): [number, number] => [u.x, u.y]);
+    cells.push(...at);
+    const rain = WEATHER_TYPE[b.info.weather] === RAIN;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      const oe = b.officerOf(E);
+      const st = (oe.level + 5) * (oe.hp / Math.max(1, maxHp(oe)));
+      if (!reach) {
+        out.set(i, st);
+        continue;
+      }
+      const range = CLASS_RANGE[oe.cls];
+      const tacs = castableTactics(oe, E.mp, b.learn).filter((t) => t <= 14 && !(rain && t < 5));
+      if (!all && (E.mode === AiMode.MoveNoAttack || (range === NONE && !tacs.length))) continue;
+      // awake (chasing us or marching): it comes whatever the distance (farmThreats' note)
+      if (!all && E.mode !== AiMode.Hold && E.mode !== AiMode.Wait) {
+        out.set(i, st);
+        continue;
+      }
+      let rad = all ? 1 : 0;
+      if (range !== NONE) for (const [x, y] of rangeCells(b.s, E.x, E.y, range, false)) rad = Math.max(rad, Math.abs(x - E.x) + Math.abs(y - E.y));
+      if (tacs.length) {
+        const area = Math.max(...tacs.map((t) => TACTIC_POWER[t])) | 0x80;
+        for (const [x, y] of rangeCells(b.s, E.x, E.y, area, false)) rad = Math.max(rad, Math.abs(x - E.x) + Math.abs(y - E.y));
+      }
+      const mp = movePoints(oe, b.s.items);
+      const lim = E.mode === AiMode.Hold ? rad + 1 : E.mode === AiMode.Wait ? mp + rad + 2 : 2 * mp + rad;
+      const mt = moveTypeOf(b.s, E);
+      const near = cells.some(([x, y]) => {
+        if (Math.abs(x - E.x) + Math.abs(y - E.y) <= Math.min(lim, rad + 1)) return true;
+        return E.mode !== AiMode.Hold && this.pathDist([x, y], mt, E.x, E.y) <= lim;
+      });
+      // shut in (a closed gate, a raised drawbridge: no walk from us to it): it still counts, the
+      // gate opens by an event of its own and the farm would keep us from the cells that open it
+      // (하비: the farm kept the party around its band from turn 11, the castle opened at turn 40
+      // and 10 of 12 seeds ran out of time)
+      const shut = !all && !near && !cells.some(([x, y]) => this.reaches([x, y], mt, E.x, E.y));
+      if (near || shut) out.set(i, st);
+    }
+    if (process.env.GRIND_TRACE_REACH && !this.inRollout && !all) this.log?.(`  reach: turn ${b.info.turn + 1}${at.length ? ` +${at.map((c) => c.join(',')).join(' ')}` : ''} ${reach ? 'near' : 'all'} ${[...out].map(([i, v]) => `${this.scene.units[i].officer}:${v.toFixed(0)}`).join(' ')} / all ${this.sideStrength(false).toFixed(0)}`);
+    return out;
+  }
+
+  /**
+   * Every enemy on the field is within farmThreats' reach of our units (nothing behind a closed gate,
+   * no group far off): only then may a farm hold the finish back, since the finish's turns are
+   * estimated for the enemies near (하비 with the drawbridge raised: the band farm held to turn 35
+   * and 10 of 12 seeds ran out of time storming the castle). Off: always.
+   */
+  private farmAllNear(): boolean {
+    if (paramOr(this.p, 'farmReach') <= 0.5) return true;
+    let n = 0;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status === Status.Field && E.officer !== 0xffff) n++;
+    }
+    return this.farmThreats([], true).size >= n;
   }
 
   /**
@@ -3346,6 +3443,8 @@ export class GrindPolicy {
 
   /** Steps from (x, y) to `goal` over cells this move type can enter (terrain only; cached). */
   private distMaps = new Map<string, Uint16Array>();
+  /** Hash of the terrain the distance maps were built on (cleared at a player phase when it changed). */
+  private terrainHash = 0;
   /** Walking distance to the nearest enemy (multi-source flood over passable terrain, cached per enemy layout). */
   private foeMaps = new Map<string, Uint16Array>();
   private foeDist(enemies: Unit[], mt: number, x: number, y: number): number {
@@ -4408,6 +4507,7 @@ export class GrindPolicy {
     const st = this.stats.byOfficer.get(officer) ?? { hits: 0, kills: 0, tactics: 0, heals: 0 };
     this.stats.byOfficer.set(officer, st);
     let kind = a.kind;
+    let flat = false;
     this.log?.(`T${b.info.turn + 1}${this.finishing ? 'F' : ''} ${o.level}:${officer}@${u.x},${u.y} ${a.kind} ${a.tactic === NONE ? '' : 't' + a.tactic} ${a.target === NONE ? '' : '->' + sc.units[a.target].officer + '(' + b.officerOf(sc.units[a.target]).hp + ')'} v=${a.value.toFixed(1)} hp=${o.hp} mp=${u.mp} dw=${a.danger ?? ''}`);
     if (a.kind === 'attack') {
       const t = sc.units[a.target];
