@@ -463,6 +463,24 @@ export interface GrindParams {
   /** 총퇴각s at turn 1 while the wakers shut every way round them to what wins (GrindPolicy.wakeRerolls). */
   wakeReroll: number;
   /**
+   * Captures (BattleKnowledge.captures), above 0.5: cells that win only all together (공안: the four
+   * forts, each sets a flag and the last one, seeing the other three, makes 주유 retreat). Units are
+   * sent to them in time to take every one before the wave turn that drops them (turn 15), they keep
+   * out of the trap areas that would wake the army (the middle, 21..39 x 8..17), and the last fort
+   * waits for the last turns (capLast) so the turns before it are still farmed.
+   */
+  capture: number;
+  /** Captures: a unit sets out for its cell once the turns left before the wave are at most its walk plus this many. */
+  capSlack: number;
+  /** Captures: the last cell is taken this many turns before the last turn that still counts (the turn before the wave). */
+  capLast: number;
+  /**
+   * Loot, above 0.5: while captures are on (공안), the nearest free unit walks to each treasure cell not
+   * stepped on yet (r14: 고취구 at (21,7), r15: 해일서 at (14,1)), unless an enemy is close to it; a
+   * treasure was only taken when a unit happened to stand next to it.
+   */
+  capLoot: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -632,6 +650,12 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'wakeKill', min: 0, max: 4, def: 1.5 },
   // ... and the 총퇴각s at turn 1 while they shut every way round (wakeRerolls)
   { key: 'wakeReroll', min: 0, max: 6, def: 3, int: true },
+  // captures: cells that win only all together (공안's four forts), taken before the wave turn,
+  // keeping out of the trap areas; the last one waits for the last turns
+  { key: 'capture', min: 0, max: 1, def: 0.6 },
+  { key: 'capSlack', min: 0, max: 8, def: 3, int: true },
+  { key: 'capLast', min: 0, max: 6, def: 1, int: true },
+  { key: 'capLoot', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -679,7 +703,7 @@ export interface BattleKnowledge {
   /** Officers whose loss loses the battle (유비, the defeat officer). */
   guarded: Set<number>;
   /** Cells (y*width+x per officer, 0x400 = any) whose arrival event wins the battle. */
-  winCells: { officer: number; x0: number; y0: number; x1: number; y1: number; group?: number }[];
+  winCells: { officer: number; x0: number; y0: number; x1: number; y1: number; group?: number; record?: number }[];
   /** Adjacency events (trigger 4) that end the battle: `actor` acting next to `other`. */
   winAdj: { actor: number; other: number; group?: number }[];
   /** A turn event ends the game at this turn (deadline before the limit). */
@@ -713,6 +737,14 @@ export interface BattleKnowledge {
    * r4..r7: next to 양안 / 오조, or either falling, sends eight units at us). The officers each wakes.
    */
   wakers: { officer: number; wakes: number[] }[];
+  /**
+   * Captures: arrival records (trigger 6 / 11) that each set a flag and win only once the flags of
+   * the others are set too (공안 r4..r7: the four forts; the one taken last, seeing the other three
+   * flags, makes 주유 retreat). They are not win cells on their own. `by`: the turn event of their
+   * group that moves the script on without them (r13, turn 15: the wave and LEAVE_GROUP); `traps`:
+   * the areas of their group whose arrival does the same (r9: 21..39 x 8..17).
+   */
+  captures: { group: number; cells: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; flag: number }[]; by: number | null; traps: { x0: number; y0: number; x1: number; y1: number }[] } | null;
   stage?: Stage;
   block?: number;
 }
@@ -731,9 +763,49 @@ function winning(stage: Stage, code: number, victory: number | null, block?: num
   return cmds[i + 1]?.name !== 'GAME_OVER';
 }
 
+/**
+ * Captures of a block (BattleKnowledge.captures): among its winning arrival records, those that set
+ * a flag and test (IF) flags only the others set, two or more in one group; with the group's turn
+ * event and arrival areas that move the script on without them (LEAVE_GROUP / GOTO_BLOCK, no end).
+ */
+export function scriptCaptures(stage: Stage, block: number, winCells: BattleKnowledge['winCells']): BattleKnowledge['captures'] {
+  const recs = stage.blocks[block]?.records ?? [];
+  type Cmd = { name: string; flag?: number; clear?: number; set?: number[] };
+  const cand: { record: number; group: number; actor: number; x0: number; y0: number; x1: number; y1: number; flag: number; need: number[] }[] = [];
+  for (const w of winCells) {
+    const r = w.record !== undefined ? recs[w.record] : undefined;
+    if (!r || (r.trigger !== 6 && r.trigger !== 11)) continue;
+    const cmds = recordCommands(stage, r.code) as unknown as Cmd[];
+    const sets = cmds.filter((c) => c.name === 'SET_FLAG' && !c.clear && c.flag !== undefined).map((c) => c.flag!);
+    const need = cmds.filter((c) => c.name === 'IF' && c.set?.length).flatMap((c) => c.set!);
+    if (sets.length !== 1 || !need.length) continue;
+    cand.push({ record: r.index, group: r.group, actor: r.p1, x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1, flag: sets[0], need });
+  }
+  for (const g of [...new Set(cand.map((c) => c.group))]) {
+    const cs = cand.filter((c) => c.group === g);
+    const flags = new Set(cs.map((c) => c.flag));
+    const cells = cs.filter((c) => c.need.every((f) => flags.has(f) && f !== c.flag));
+    if (cells.length < 2 || cells.length !== cs.length) continue;
+    let by: number | null = null;
+    const traps: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    for (const r of recs) {
+      if (r.group !== g || (r.trigger !== 9 && r.trigger !== 11)) continue;
+      const cmds = recordCommands(stage, r.code);
+      if (!cmds.some((c) => c.name === 'LEAVE_GROUP' || c.name === 'GOTO_BLOCK') || cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER')) continue;
+      if (r.trigger === 9 && r.p1 > 0) by = Math.min(by ?? 999, r.p1);
+      if (r.trigger === 11 && (r.p1 === 0x400 || r.p1 < 0x100)) {
+        const [x0, y0] = cellOf(r.p2), [x1, y1] = cellOf(r.p3);
+        traps.push({ x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+      }
+    }
+    return { group: g, cells: cells.map(({ record, actor, x0, y0, x1, y1, flag }) => ({ record, actor, x0, y0, x1, y1, flag })), by, traps };
+  }
+  return null;
+}
+
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], captures: null, stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -745,7 +817,7 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     if ((r.trigger === 6 || r.trigger === 11) && winning(stage, r.code, k.victory, script.block, r.group) && !cmds.some((c) => c.name === 'GAME_OVER')) {
       const [x0, y0] = cellOf(r.p2);
       const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
-      k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), group: r.group });
+      k.winCells.push({ officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), group: r.group, record: r.index });
     }
     if (r.trigger === 4 && winning(stage, r.code, k.victory, script.block, r.group)) k.winAdj.push({ actor: r.p1, other: r.p2, group: r.group });
     if (r.trigger === 6 && cmds.some((c) => c.name === 'ADD_ITEM') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER'))
@@ -770,6 +842,11 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     }
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+  }
+  k.captures = scriptCaptures(stage, script.block, k.winCells);
+  if (k.captures) {
+    const cap = new Set(k.captures.cells.map((c) => c.record));
+    k.winCells = k.winCells.filter((c) => c.record === undefined || !cap.has(c.record));
   }
   // steps: non-resident groups (done when their one event ends) of a single defeat / arrival event
   // that neither ends nor loses the battle, before the group holding the winning records
@@ -1064,6 +1141,7 @@ export class GrindPolicy {
     let v = 0;
     for (const g of this.know.gains) {
       if (g.actor !== u.officer && !(g.actor === 0x400 && u.slot < PLAYER_SLOTS)) continue;
+      if (this.capRecord(g.record)) continue;
       if (g.trigger === 4 && g.other !== null) {
         const s = b.slotOfOfficer(g.other);
         if (s === NONE || this.scene.units[s].status !== Status.Field) continue;
@@ -1084,6 +1162,7 @@ export class GrindPolicy {
     let best: { at: [number, number]; value: number } | null = null;
     for (const g of this.know.gains) {
       if (g.actor !== u.officer && !(g.actor === 0x400 && u.slot < PLAYER_SLOTS && g.trigger !== 4)) continue;
+      if (this.capRecord(g.record)) continue;
       const v = this.gainValue(g);
       if (v <= 0) continue;
       let at: [number, number] | null = null;
@@ -1116,6 +1195,216 @@ export class GrindPolicy {
       return [(g.x0 + g.x1) >> 1, (g.y0 + g.y1) >> 1];
     }
     return null;
+  }
+
+  // ---- captures (GrindParams.capture): cells that win only all together (공안's four forts)
+
+  /** The capture cells not taken yet, while they can still win (their group runs, before the wave turn). */
+  private capPending(): NonNullable<BattleKnowledge['captures']>['cells'] {
+    const c = this.know.captures;
+    if (!c || paramOr(this.p, 'capture') <= 0.5) return [];
+    if (this.activeGroup() !== c.group) return [];
+    if (c.by !== null && this.b.info.turn + 1 >= c.by) return [];
+    const st = this.scene.ctx.vm.state;
+    return c.cells.filter((x) => !getFlag(st, x.flag));
+  }
+
+  /** The last turn (1-based) a capture still counts: the turn before the wave, else the deadline. */
+  private capLastTurn(): number {
+    const c = this.know.captures;
+    return c && c.by !== null ? c.by - 1 : this.deadline();
+  }
+
+  /** The trap areas of the captures' group (21..39 x 8..17 at 공안): no unit stands in them while the captures are on. */
+  private capBanMemo: Uint8Array | null = null;
+  private capBan(): Uint8Array | null {
+    const c = this.know.captures;
+    if (!c || !c.traps.length || !this.capPending().length) return null;
+    if (!this.capBanMemo) {
+      const b = this.b;
+      const m = new Uint8Array(b.width * b.height);
+      for (const t of c.traps)
+        for (let y = t.y0; y <= t.y1 && y < b.height; y++) for (let x = t.x0; x <= t.x1 && x < b.width; x++) m[y * b.width + x] = 1;
+      // (a capture cell inside a trap stays open: taking it is the point)
+      for (const x of c.cells) for (let y = x.y0; y <= x.y1 && y < b.height; y++) for (let xx = x.x0; xx <= x.x1 && xx < b.width; xx++) m[y * b.width + xx] = 0;
+      this.capBanMemo = m;
+    }
+    return this.capBanMemo;
+  }
+
+  /** The cells no walk enters: next to the live wakers (wakeTrap) and the capture traps (capBan). */
+  private banMemo: { key: string; v: { sig: string; cells: Uint8Array | null } } | null = null;
+  private walkBan(): { sig: string; cells: Uint8Array | null } {
+    const wt = this.wakeTrap();
+    const cap = this.capBan();
+    if (!cap) return wt;
+    const key = wt.sig;
+    if (this.banMemo?.key === key) return this.banMemo.v;
+    let cells = cap;
+    if (wt.cells) {
+      cells = new Uint8Array(cap.length);
+      for (let i = 0; i < cap.length; i++) cells[i] = cap[i] | wt.cells[i];
+    }
+    const v = { sig: `${wt.sig}|cap`, cells };
+    this.banMemo = { key, v };
+    return v;
+  }
+
+  /** Walking cost (terrain move costs, round the banned cells) from (x, y) to `goal`, 0xffff when none. */
+  private costMaps = new Map<string, Uint16Array>();
+  private costDist(goal: [number, number], mt: number, x: number, y: number): number {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const ban = this.walkBan();
+    const key = `${goal[0]},${goal[1]},${mt}|${ban.sig}`;
+    let m = this.costMaps.get(key);
+    if (!m) {
+      if (this.costMaps.size > 64) this.costMaps.clear();
+      m = new Uint16Array(W * H).fill(0xffff);
+      const g = goal[1] * W + goal[0];
+      m[g] = 0;
+      // walking from k into c costs c's terrain (costs 1..3: a bucket queue)
+      const buckets: number[][] = [[g]];
+      for (let d = 0; d < buckets.length; d++) {
+        for (const c of buckets[d] ?? []) {
+          if (m[c] !== d) continue;
+          const cost = moveCost(mt, b.s.terrain[c]);
+          if (cost === 0xff) continue;
+          const cx = c % W, cy = (c - cx) / W;
+          for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+            const k = ny * W + nx;
+            if (moveCost(mt, b.s.terrain[k]) === 0xff || (ban.cells && ban.cells[k])) continue;
+            const nd = d + cost;
+            if (nd < m[k]) {
+              m[k] = nd;
+              (buckets[nd] ??= []).push(k);
+            }
+          }
+        }
+      }
+      this.costMaps.set(key, m);
+    }
+    return m[y * W + x];
+  }
+
+  /** Turns for unit u to stand on `cell` (its move points over the terrain costs), 99 when it cannot. */
+  private capTurns(u: Unit, cell: [number, number]): number {
+    const d = this.costDist(cell, moveTypeOf(this.b.s, u), u.x, u.y);
+    if (d === 0xffff) return 99;
+    return Math.ceil(d / Math.max(1, movePoints(this.b.officerOf(u), this.b.s.items)));
+  }
+
+  /** Slot -> the capture cell it walks to (nearest pairs first; the leader only when no one else can), per turn and pending set. */
+  private capMemo: { key: string; map: Map<number, { cell: [number, number]; turns: number; record: number }> } | null = null;
+  /** Slot -> the capture record it was sent to (kept across turns, capAssign). */
+  private capSticky = new Map<number, number>();
+  private capAssign(): Map<number, { cell: [number, number]; turns: number; record: number }> {
+    const pend = this.capPending();
+    const key = `${this.b.info.turn}|${pend.map((c) => c.record).join(',')}`;
+    if (this.capMemo?.key === key) return this.capMemo.map;
+    const map = new Map<number, { cell: [number, number]; turns: number; record: number }>();
+    const units = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    const pairs: { slot: number; i: number; t: number; lead: boolean }[] = [];
+    pend.forEach((c, i) => {
+      const cell: [number, number] = [(c.x0 + c.x1) >> 1, (c.y0 + c.y1) >> 1];
+      for (const u of units) {
+        if (c.actor !== 0x400 && c.actor !== u.officer) continue;
+        const t = this.capTurns(u, cell);
+        if (t < 99) pairs.push({ slot: u.slot, i, t, lead: this.know.guarded.has(u.officer) });
+      }
+    });
+    pairs.sort((a, b) => Number(a.lead) - Number(b.lead) || a.t - b.t || a.slot - b.slot);
+    const done = new Set<number>();
+    // (sticky: a unit keeps the cell it was sent to while it can still make it in time; re-pairing
+    // every turn swapped the north forts between two units and the last one arrived on the last turn)
+    const lastT = this.capLastTurn() - this.b.info.turn;
+    for (const [slot, rec] of this.capSticky) {
+      const i = pend.findIndex((c) => c.record === rec);
+      const q = i >= 0 ? pairs.find((x) => x.slot === slot && x.i === i) : undefined;
+      if (!q || q.t > lastT || done.has(i) || map.has(slot)) continue;
+      const c = pend[i];
+      map.set(slot, { cell: [(c.x0 + c.x1) >> 1, (c.y0 + c.y1) >> 1], turns: q.t, record: c.record });
+      done.add(i);
+    }
+    for (const q of pairs) {
+      if (map.has(q.slot) || done.has(q.i)) continue;
+      const c = pend[q.i];
+      map.set(q.slot, { cell: [(c.x0 + c.x1) >> 1, (c.y0 + c.y1) >> 1], turns: q.t, record: c.record });
+      done.add(q.i);
+    }
+    this.capMemo = { key, map };
+    this.capSticky = new Map([...map].map(([slot, v]) => [slot, v.record]));
+    return map;
+  }
+
+  /** The last pending capture may be taken now: the last turns (capLast), or the battle going badly. */
+  private capTime(): boolean {
+    const now = this.b.info.turn + 1;
+    if (now >= this.capLastTurn() - paramOr(this.p, 'capLast')) return true;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (u.officer >= 0x100 || u.status === Status.Empty || u.status === Status.Reserve) continue;
+      if (u.status !== Status.Field) return true;
+      if (this.know.guarded.has(u.officer) && this.b.officerOf(u).hp * 2 < maxHp(this.b.officerOf(u))) return true;
+    }
+    return false;
+  }
+
+  /** Where this unit walks for the captures now, and whether it may step on the cell; null when it has none. */
+  private capGoal(u: Unit): { cell: [number, number]; step: boolean } | null {
+    const pend = this.capPending();
+    if (!pend.length) return null;
+    const a = this.capAssign().get(u.slot);
+    if (!a) return null;
+    // turns left that still count, this one included
+    const left = this.capLastTurn() - this.b.info.turn;
+    if (a.turns + paramOr(this.p, 'capSlack') < left) return null;
+    return { cell: a.cell, step: pend.length > 1 || this.capTime() };
+  }
+
+  /** (x, y) is the last capture cell left and it is not time for it yet: no unit stands on it. */
+  private capHeld(x: number, y: number): boolean {
+    const pend = this.capPending();
+    if (pend.length !== 1 || this.capTime()) return false;
+    const c = pend[0];
+    return x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
+  }
+
+  /**
+   * The treasure cell this unit walks to while the captures are on (GrindParams.capLoot): each one not
+   * stepped on, away from the enemies (none awake within 8 steps, no waiting one within its move + 2),
+   * goes to the nearest unit with no capture to walk to (the leader last). Per turn.
+   */
+  private lootMemo: { turn: number; map: Map<number, [number, number]> } | null = null;
+  private lootGoal(u: Unit): [number, number] | null {
+    if (paramOr(this.p, 'capLoot') <= 0.5 || !this.know.treasure.length || !this.capPending().length) return null;
+    const b = this.b;
+    if (this.lootMemo?.turn !== b.info.turn) {
+      const map = new Map<number, [number, number]>();
+      const ban = this.walkBan();
+      const caps = this.capAssign();
+      const enemies = this.scene.units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && e.officer !== 0xffff);
+      const units = this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v) && !caps.has(v.slot));
+      for (const t of this.know.treasure) {
+        const k = t.y * b.width + t.x;
+        if (this.looted.has(k) || (ban.cells && ban.cells[k])) continue;
+        if (enemies.some((e) => Math.abs(e.x - t.x) + Math.abs(e.y - t.y) <= (e.mode === AiMode.Wait || e.mode === AiMode.Hold ? movePoints(b.officerOf(e), b.s.items) + 2 : 8))) continue;
+        let best: Unit | null = null, bd = 1e9;
+        for (const v of units) {
+          if ((t.officer !== 0x400 && t.officer !== v.officer) || map.has(v.slot)) continue;
+          const d = this.pathDist([t.x, t.y], moveTypeOf(b.s, v), v.x, v.y) + (this.know.guarded.has(v.officer) ? 100 : 0);
+          if (d < bd) [bd, best] = [d, v];
+        }
+        if (best && bd < 60) map.set(best.slot, [t.x, t.y]);
+      }
+      this.lootMemo = { turn: b.info.turn, map };
+    }
+    return this.lootMemo.map.get(u.slot) ?? null;
+  }
+
+  /** A gain record that is one of the captures (the capture plan walks to those, not the gain pull). */
+  private capRecord(record: number): boolean {
+    return !!this.know.captures?.cells.some((c) => c.record === record);
   }
 
   /**
@@ -2745,6 +3034,8 @@ export class GrindPolicy {
     if (this.finishing) return;
     const b = this.b;
     this.farmOn = this.farmSafe();
+    // captures pending: no finish (the victory officer sits behind the trap; taking the cells wins)
+    if (this.capPending().length) return;
     if (this.bonusCell() && this.bonusOn()) {
       const left = this.deadline() - b.info.turn;
       const need = this.exitTurns(this.bonusCell()!);
@@ -3196,7 +3487,7 @@ export class GrindPolicy {
     const mt = moveTypeOf(b.s, actor);
     const goal: [number, number] = [target.x, target.y];
     this.pathDist(goal, mt, actor.x, actor.y);
-    const sig = this.wakeTrap().sig;
+    const sig = this.walkBan().sig;
     const m = this.distMaps.get(`${goal[0]},${goal[1]},${mt}${sig ? `|${sig}` : ''}`)!;
     let c = actor.y * W + actor.x;
     if (m[c] === 0xffff) return this.finishEstimate();
@@ -3564,7 +3855,7 @@ export class GrindPolicy {
   private foeDist(enemies: Unit[], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
-    const wt = this.wakeTrap();
+    const wt = this.walkBan();
     const key = `${mt}|${enemies.map((e) => e.y * W + e.x).join(',')}${wt.sig ? `|${wt.sig}` : ''}`;
     let m = this.foeMaps.get(key);
     if (!m) {
@@ -3599,7 +3890,7 @@ export class GrindPolicy {
   /** (x, y) is reachable from `goal` over the terrain (pathDist's map). */
   private reaches(goal: [number, number], mt: number, x: number, y: number): boolean {
     this.pathDist(goal, mt, x, y);
-    const sig = this.wakeTrap().sig;
+    const sig = this.walkBan().sig;
     return this.distMaps.get(`${goal[0]},${goal[1]},${mt}${sig ? `|${sig}` : ''}`)![y * this.b.width + x] !== 0xffff;
   }
 
@@ -3690,7 +3981,7 @@ export class GrindPolicy {
   private pathDist(goal: [number, number], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
-    const wt = this.wakeTrap();
+    const wt = this.walkBan();
     const key = `${goal[0]},${goal[1]},${mt}${wt.sig ? `|${wt.sig}` : ''}`;
     let m = this.distMaps.get(key);
     if (!m) {
@@ -4131,12 +4422,18 @@ export class GrindPolicy {
     const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
     const pk = this.parkCellOf(slot);
     const wake = this.wakeTrap();
+    const ban = this.walkBan();
+    // captures: the cell this unit walks to (공안's forts), and whether it may step on it yet
+    const capAt = this.capGoal(u);
+    const lootAt = !fin && !capAt ? this.lootGoal(u) : null;
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
       if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
       if (wake.cells && wake.cells[y * b.width + x]) continue;
+      if (ban.cells && ban.cells[y * b.width + x]) continue;
+      if (this.capHeld(x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
@@ -4248,6 +4545,14 @@ export class GrindPolicy {
       base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
       // an open gate: its officer walks onto the cell
       if (gateAt) base += gateAt[0] === x && gateAt[1] === y ? 200 : -4 * Math.min(this.pathDist(gateAt, moveTypeOf(b.s, u), x, y), 40);
+      // a capture: its unit walks to the cell (by the terrain costs), steps on it when it may, else waits next to it
+      if (capAt) {
+        const on = capAt.cell[0] === x && capAt.cell[1] === y;
+        const cd = this.costDist(capAt.cell, moveTypeOf(b.s, u), x, y);
+        base += on && capAt.step ? 300 : -20 * Math.min(Math.max(0, (cd === 0xffff ? 99 : cd) - (capAt.step ? 0 : 2)), 60);
+      }
+      // ... and a free unit to a treasure nobody has stepped on
+      if (lootAt) base -= 2 * Math.min(this.pathDist(lootAt, moveTypeOf(b.s, u), x, y), 40);
       // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
