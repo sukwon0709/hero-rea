@@ -357,7 +357,7 @@ describe('grind: fish pen params', () => {
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate', 'farmReach', 'wakeAvoid', 'wakeKill', 'wakeReroll', 'capture', 'capSlack', 'capLast', 'capLoot']);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate', 'farmReach', 'wakeAvoid', 'wakeKill', 'wakeReroll', 'capture', 'capSlack', 'capLast', 'capLoot', 'fireRing', 'sleeper']);
   });
   it('escort exit (escIdle, escWin): appended last; plans without them take the defaults', async () => {
     const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
@@ -387,8 +387,8 @@ describe('grind: band farm params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd'] as const;
-    // the gate keys, farmReach, the waker keys and the capture keys come after them
-    expect(PARAM_SPECS.slice(-keys.length - 10, -10).map((s) => s.key)).toEqual([...keys]);
+    // the gate keys, farmReach, the waker keys, the capture keys, fireRing and sleeper come after them
+    expect(PARAM_SPECS.slice(-keys.length - 12, -12).map((s) => s.key)).toEqual([...keys]);
     expect(d.bandFarm).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
@@ -402,11 +402,11 @@ describe('grind: band farm params', () => {
 });
 
 describe('grind: gate params', () => {
-  it('gate and gateLate are appended last (before farmReach, the waker keys and the capture keys), on (open once no enemy is near) by default, learnable within bounds', async () => {
+  it('gate and gateLate are appended last (before farmReach, the waker keys, the capture keys, fireRing and sleeper), on (open once no enemy is near) by default, learnable within bounds', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['gate', 'gateLate'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 8, -8).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 10, -10).map((s) => s.key)).toEqual([...keys]);
     expect(d.gate).toBeGreaterThan(0.5);
     expect(d.gateLate).toBe(0);
     const old = { ...d } as Record<string, number>;
@@ -421,10 +421,10 @@ describe('grind: gate params', () => {
 });
 
 describe('grind: farm reach param', () => {
-  it('farmReach is appended last (before the waker keys and the capture keys), off by default, learnable within bounds; plans made before it read the default', async () => {
+  it('farmReach is appended last (before the waker keys, the capture keys, fireRing and sleeper), off by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 8].key).toBe('farmReach');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 10].key).toBe('farmReach');
     expect(d.farmReach).toBeLessThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.farmReach;
@@ -436,11 +436,11 @@ describe('grind: farm reach param', () => {
 });
 
 describe('grind: waker params', () => {
-  it('wakeAvoid, wakeKill and wakeReroll are appended last (before the capture keys), on by default, learnable within bounds; plans made before them read the defaults', async () => {
+  it('wakeAvoid, wakeKill and wakeReroll are appended last (before the capture keys, fireRing and sleeper), on by default, learnable within bounds; plans made before them read the defaults', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['wakeAvoid', 'wakeKill', 'wakeReroll'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 4, -4).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 6, -6).map((s) => s.key)).toEqual([...keys]);
     expect(d.wakeAvoid).toBeGreaterThan(0.5);
     expect(d.wakeKill).toBeGreaterThan(0);
     expect(d.wakeReroll).toBeGreaterThan(0);
@@ -477,11 +477,11 @@ describe.skipIf(!hasGame)('grind: wakers read from the script', () => {
 });
 
 describe('grind: capture params', () => {
-  it('capture, capSlack, capLast and capLoot are appended last, on by default, learnable within bounds; plans made before them read the defaults', async () => {
+  it('capture, capSlack, capLast and capLoot are appended last (before fireRing and sleeper), on by default, learnable within bounds; plans made before them read the defaults', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['capture', 'capSlack', 'capLast', 'capLoot'] as const;
-    expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 2, -2).map((s) => s.key)).toEqual([...keys]);
     expect(d.capture).toBeGreaterThan(0.5);
     expect(d.capLoot).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
@@ -514,6 +514,72 @@ describe.skipIf(!hasGame)('grind: captures read from the script', () => {
     expect(k.winCells.some((w) => c.cells.some((x) => x.x0 === w.x0 && x.y0 === w.y0))).toBe(false);
     expect(analyseBattle(a.chapter(3).stages[0], script(9)).captures).toBeNull();
     expect(analyseBattle(a.chapter(1).stages[0], script(13)).captures).toBeNull();
+  });
+});
+
+describe('grind: fire ring param', () => {
+  it('fireRing is appended last (before sleeper), on by default, learnable within bounds; plans made before it read the default', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('fireRing');
+    expect(d.fireRing).toBeGreaterThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    delete old.fireRing;
+    expect(paramOr(old as unknown as typeof d, 'fireRing')).toBe(d.fireRing);
+    const s = PARAM_SPECS.find((x) => x.key === 'fireRing')!;
+    expect(clampParams({ ...d, fireRing: s.max + 500 }).fireRing).toBe(s.max);
+    expect(clampParams({ ...d, fireRing: s.min - 500 }).fireRing).toBe(s.min);
+  });
+});
+
+describe('grind: sleeper param', () => {
+  it('sleeper is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('sleeper');
+    expect(d.sleeper).toBeGreaterThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    delete old.sleeper;
+    expect(paramOr(old as unknown as typeof d, 'sleeper')).toBe(d.sleeper);
+    const s = PARAM_SPECS.find((x) => x.key === 'sleeper')!;
+    expect(clampParams({ ...d, sleeper: s.max + 500 }).sleeper).toBe(s.max);
+    expect(clampParams({ ...d, sleeper: s.min - 500 }).sleeper).toBe(s.min);
+  });
+});
+
+describe.skipIf(!hasGame)('grind: sleepers read from the script', () => {
+  it('부 2nd (chapter 3 stage 2 block 10): one of ours on the eastern path (20..28 x 6..10) before turn 8 sends the wave to stand around the castle; 부 1st and 무릉 have none', async () => {
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const a = new DevAssets(files);
+    const script = (block: number, victory = 0, on = false) => ({ block, victory: { enabled: on, officer: victory }, defeat: { enabled: false, officer: 0 } }) as unknown as Parameters<typeof analyseBattle>[1];
+    const k = analyseBattle(a.chapter(3).stages[2], script(10, 193, true));
+    expect(k.sleepers.length).toBe(1);
+    const z = k.sleepers[0];
+    expect([z.record, z.x0, z.y0, z.x1, z.y1, z.until]).toEqual([9, 20, 6, 28, 10, 8]);
+    expect([...z.calms].sort((p, q) => p - q)).toEqual([197, 198, 199, 253, 254, 274, 340]);
+    expect(analyseBattle(a.chapter(3).stages[2], script(6, 193, true)).sleepers).toEqual([]);
+    expect(analyseBattle(a.chapter(3).stages[0], script(9)).sleepers).toEqual([]);
+  });
+});
+
+describe.skipIf(!hasGame)('grind: deaths read from the script', () => {
+  it('부 1st (chapter 3 stage 2 block 6): 방통 falling is his death (UNIT_FORCE #132, 14), no gain and no enemy to spare; the turn-8 supply raid ends the battle', async () => {
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const a = new DevAssets(files);
+    const script = (block: number, victory = 0, on = false) => ({ block, victory: { enabled: on, officer: victory }, defeat: { enabled: false, officer: 0 } }) as unknown as Parameters<typeof analyseBattle>[1];
+    const k = analyseBattle(a.chapter(3).stages[2], script(6, 193, true));
+    expect(k.deaths).toEqual([{ officer: 132, record: 3 }]);
+    expect(k.protect.has(132)).toBe(false);
+    expect(k.gains.some((g) => g.record === 3)).toBe(false);
+    // r4: turn 8, LEAVE_GROUP into the group whose auto record is BATTLE_END
+    expect(k.endsAt).toBe(8);
+    // 부 2nd (block 10) and 무릉 have no death records
+    expect(analyseBattle(a.chapter(3).stages[2], script(10, 193, true)).deaths).toEqual([]);
+    expect(analyseBattle(a.chapter(3).stages[0], script(9)).deaths).toEqual([]);
   });
 });
 

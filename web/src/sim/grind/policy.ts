@@ -481,6 +481,20 @@ export interface GrindParams {
    */
   capLoot: number;
   /**
+   * Fire ring, above 0.5: a target no walk reaches (its flood stays in a pocket under 40 cells: 부
+   * 2nd's 유괴 at (23,1) in the castle, the gate (23,2) shut for good) is walked to by the cells
+   * within range shape 3 of it (pathDist / ringMap: the manhattan fallback left the finish stuck
+   * against the mountains until the turn limit), and only by the units that can hit it from there
+   * (goalFor): bows, crossbows and catapults, and the damage tactics.
+   */
+  fireRing: number;
+  /**
+   * Sleepers (BattleKnowledge.sleepers), above 0.5: while a sleeper area is open, the unit of ours
+   * that gets there soonest (in time) walks into it (부 2nd: one on the eastern mountain path before
+   * turn 8 sends the turn-13 wave and three of the attackers to stand around the castle).
+   */
+  sleeper: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -656,6 +670,11 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'capSlack', min: 0, max: 8, def: 3, int: true },
   { key: 'capLast', min: 0, max: 6, def: 1, int: true },
   { key: 'capLoot', min: 0, max: 1, def: 0.6 },
+  // fire ring: a walled-in target (부 2nd's 유괴 in the castle) is walked to by the cells within
+  // shooting range of it, by the units that can hit it from there
+  { key: 'fireRing', min: 0, max: 1, def: 0.6 },
+  // sleepers: a scout walks into an area that sends the coming wave to stand still (부 2nd's mountain path)
+  { key: 'sleeper', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -745,6 +764,24 @@ export interface BattleKnowledge {
    * the areas of their group whose arrival does the same (r9: 21..39 x 8..17).
    */
   captures: { group: number; cells: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; flag: number }[]; by: number | null; traps: { x0: number; y0: number; x1: number; y1: number }[] } | null;
+  /**
+   * Deaths: defeat records (trigger 12) that move the fallen officer to another force for good
+   * (부 1st r3: 방통 falls, "방통이 죽었다", UNIT_FORCE #132, 14 and flag 38, which later blocks
+   * read). The battle ends there too (LEAVE_GROUP into the BATTLE_END group, with a victory bonus),
+   * but the officer is lost for the rest of the game: one of ours named here is guarded like 유비
+   * (the policy resolves the side), its record is no gain, and its fall counts as a lost try.
+   */
+  deaths: { officer: number; record: number }[];
+  /**
+   * Sleepers: arrival areas (trigger 11, any of ours or one officer) behind an IF on flags a turn
+   * event sets (the time they are open), that send three or more enemy officers to stand somewhere
+   * (SET_AI to a waiting / holding / position order) and fewer to attack (부 2nd r9: a unit of ours
+   * on the eastern mountain path, 20..28 x 6..10, before turn 8 (r6 sets flag 161) brings the
+   * turn-13 reinforcements early and sends them, 오의, the archers and an 이민족 to stand around the
+   * castle; r7, the turn-13 wave that turns all of them and the castle's guards on us, is then
+   * skipped (flag 158)). `until`: the turn whose event shuts it.
+   */
+  sleepers: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; set: number[]; clear: number[]; until: number; calms: number[] }[];
   stage?: Stage;
   block?: number;
 }
@@ -803,9 +840,41 @@ export function scriptCaptures(stage: Stage, block: number, winCells: BattleKnow
   return null;
 }
 
+/** Sleepers of a block (BattleKnowledge.sleepers). */
+export function scriptSleepers(stage: Stage, block: number): BattleKnowledge['sleepers'] {
+  type Cmd = { name: string; officer?: number; algo?: number; flag?: number; clear?: number | number[]; set?: number[] };
+  const recs = stage.blocks[block]?.records ?? [];
+  const out: BattleKnowledge['sleepers'] = [];
+  for (const r of recs) {
+    if (r.trigger !== 11 || !(r.p1 === 0x400 || r.p1 < 0x100)) continue;
+    const cmds = recordCommands(stage, r.code) as unknown as Cmd[];
+    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'LEAVE_GROUP' || c.name === 'GOTO_BLOCK')) continue;
+    const cond = cmds.find((c) => c.name === 'IF');
+    const clear = Array.isArray(cond?.clear) ? cond.clear : [];
+    const set = cond?.set ?? [];
+    if (!clear.length) continue;
+    // order codes through ORDER_TO_MODE: 1 attacks, 3 heads for a unit; 0 / 2 / 4..6 wait, hold or walk to a cell
+    const ai = cmds.filter((c) => c.name === 'SET_AI' && c.officer !== undefined);
+    const calms = [...new Set(ai.filter((c) => c.algo !== 1 && c.algo !== 3).map((c) => c.officer!))];
+    const wakes = new Set(ai.filter((c) => c.algo === 1).map((c) => c.officer!));
+    if (calms.length < 3 || calms.length <= wakes.size) continue;
+    // open until a turn event sets one of the flags it needs clear
+    let until = 999;
+    for (const t of recs) {
+      if (t.trigger !== 9 || t.p1 <= 0) continue;
+      const tc = recordCommands(stage, t.code) as unknown as Cmd[];
+      if (tc.some((c) => c.name === 'SET_FLAG' && !c.clear && c.flag !== undefined && clear.includes(c.flag))) until = Math.min(until, t.p1);
+    }
+    if (until === 999) continue;
+    const [x0, y0] = cellOf(r.p2), [x1, y1] = cellOf(r.p3);
+    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), set: [...set], clear: [...clear], until, calms });
+  }
+  return out;
+}
+
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], captures: null, stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], captures: null, deaths: [], sleepers: [], stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -813,7 +882,9 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
   if (script.defeat.enabled) k.guarded.add(script.defeat.officer);
   for (const r of stage.blocks[script.block]?.records ?? []) {
     const cmds = recordCommands(stage, r.code);
-    if (r.trigger === 12 && winning(stage, r.code, k.victory, script.block, r.group)) k.protect.add(r.p1);
+    const dies = r.trigger === 12 && r.p1 < 0x100 && !cmds.some((c) => c.name === 'GAME_OVER') && (cmds as unknown as { name: string; officer?: number; force?: number }[]).some((c) => (c.name === 'UNIT_FORCE' || c.name === 'SET_FORCE') && c.officer === r.p1 && c.force !== 0);
+    if (dies) k.deaths.push({ officer: r.p1, record: r.index });
+    else if (r.trigger === 12 && winning(stage, r.code, k.victory, script.block, r.group)) k.protect.add(r.p1);
     if ((r.trigger === 6 || r.trigger === 11) && winning(stage, r.code, k.victory, script.block, r.group) && !cmds.some((c) => c.name === 'GAME_OVER')) {
       const [x0, y0] = cellOf(r.p2);
       const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
@@ -841,7 +912,13 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
       }
     }
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
-    else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+    // (or through a LEAVE_GROUP into the group that ends it: 부 1st r4, the turn-8 supply raid)
+    else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'LEAVE_GROUP') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+  }
+  k.sleepers = scriptSleepers(stage, script.block);
+  if (k.deaths.length) {
+    const dead = new Set(k.deaths.map((d) => d.record));
+    k.gains = k.gains.filter((g) => !dead.has(g.record));
   }
   k.captures = scriptCaptures(stage, script.block, k.winCells);
   if (k.captures) {
@@ -1046,6 +1123,13 @@ export class GrindPolicy {
     });
     // sides of the turn events' officers: a defeat event that loses names one of ours to keep alive
     // (or an enemy never to kill); a big enemy wave late in the battle is a soft deadline
+    // a death record of one of ours: keep that officer alive like 유비 (an enemy's is ignored)
+    know.deaths = know.deaths.filter((d) => {
+      const s = scene.b.slotOfOfficer(d.officer);
+      if (s === NONE || s >= PLAYER_SLOTS) return false;
+      know.guarded.add(d.officer);
+      return true;
+    });
     for (const e of know.turns) {
       if (e.officer !== null && e.gameOver) {
         const s = scene.b.slotOfOfficer(e.officer);
@@ -2218,10 +2302,12 @@ export class GrindPolicy {
     if (th !== this.terrainHash) {
       this.terrainHash = th;
       this.distMaps.clear();
+      this.ringMaps.clear();
       this.foeMaps.clear();
     }
     this.updateHold();
     this.updateBrace();
+    this.updateScout();
     this.decideFinish();
     this.updatePark();
     this.buildThreat();
@@ -3076,7 +3162,8 @@ export class GrindPolicy {
     // with wakers about, the finish walks the long way round them to what wins (the enemy sleeps:
     // nothing comes to us), so it starts once the turns left just cover that walk (farmNeed), not
     // `finish` turns before the end (무릉: 2 turns left for a 40-step walk, lost on time)
-    const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells ? this.farmNeed() : 0) + stepTurns;
+    // (and so does a walk to the cells in range of a walled-in victory officer: 부 2nd's castle)
+    const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells || this.victoryWalled() ? this.farmNeed() : 0) + stepTurns;
     // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
@@ -3554,7 +3641,9 @@ export class GrindPolicy {
       const ot = b.officerOf(T);
       let near = 99;
       const dmgs: number[] = [];
-      for (const u of ours) {
+      // walled in (fireRing): only the units that can hit it from the ring count, if any
+      const sh = ours.filter((u) => !this.walledIn(T, moveTypeOf(b.s, u), u.x, u.y) || this.shoots(u));
+      for (const u of sh.length ? sh : ours) {
         const o = b.officerOf(u);
         const range = CLASS_RANGE[o.cls];
         near = Math.min(near, turnsTo(u, [T.x, T.y], range === 0 || range === NONE ? 1 : 2));
@@ -3578,6 +3667,24 @@ export class GrindPolicy {
       dmgSum += dmgs.reduce((a, c) => a + c, 0);
     }
     kill = Math.max(kill, Math.ceil(hpSum / Math.max(1, dmgSum)));
+    // a walled-in victory officer (fireRing): the enemies standing by the cells in range of it (부
+    // 2nd: the guards a sleeper area sent round the castle) are fought through first
+    if (vs !== NONE && targets.length === 1 && this.victoryWalled()) {
+      const T = targets[0];
+      const ring = rangeCells(b.s, T.x, T.y, 3).filter(([cx, cy]) => moveCost(0, terrainAt(b.s, cx, cy)) !== 0xff);
+      let guardHp = 0, allDmg = 0;
+      for (const E of this.scene.units.slice(PLAYER_SLOTS)) {
+        if (E.status !== Status.Field || E === T) continue;
+        if (!ring.some(([cx, cy]) => Math.abs(cx - E.x) + Math.abs(cy - E.y) <= 5)) continue;
+        if (ring.every(([cx, cy]) => this.walledIn(E, 0, cx, cy))) continue;
+        guardHp += b.officerOf(E).hp;
+      }
+      for (const u of ours) {
+        const o = b.officerOf(u);
+        allDmg += physicalDamage({ attack: attackPower(o, u.morale, b.s.items), defence: defencePower(b.officerOf(T), 100, b.s.items), attackerClass: o.cls, defenderClass: b.officerOf(T).cls, defenderTerrain: 0, defenderHp: 0xffff, counter: false });
+      }
+      kill += Math.ceil(guardHp / Math.max(1, allDmg));
+    }
     return walk + kill;
   }
 
@@ -3598,6 +3705,8 @@ export class GrindPolicy {
     // the bonus arrival still possible: no charge at the leader; the walk-in comes when it is time
     if (this.bonusOn()) return false;
     if (this.lateThird() || this.enemiesOnField() <= 3) return true;
+    // the victory officer walled in (fireRing): the shooters set out once the turns just cover their way
+    if (this.victoryWalled() && this.deadline() - this.b.info.turn <= this.farmNeed()) return true;
     const stepTurns = this.stepsLeft() * 12;
     return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
   }
@@ -4001,7 +4110,159 @@ export class GrindPolicy {
       this.distMaps.set(key, m);
     }
     const d = m[y * W + x];
-    return d === 0xffff ? Math.abs(goal[0] - x) + Math.abs(goal[1] - y) + 20 : d;
+    if (d !== 0xffff) return d;
+    // a goal no walk reaches (walled in: 부 2nd's 유괴 in the castle behind its shut gate): the steps
+    // to the cells within shooting range of it, plus that range (the manhattan fallback stalls
+    // against the mountains on the way)
+    const r = this.ringMap(goal, mt);
+    if (r && r[y * W + x] !== 0xffff) return r[y * W + x] + 2;
+    return Math.abs(goal[0] - x) + Math.abs(goal[1] - y) + 20;
+  }
+
+  /**
+   * Fire ring (GrindParams.fireRing): steps from the cells this move type can stand on within range
+   * shape 3 of `goal` (2 cells straight, the knight's moves: what bows, crossbows and most tactics
+   * reach), when the goal's own flood stays in a small pocket (a castle: under 40 cells); else null.
+   */
+  private ringMaps = new Map<string, Uint16Array | null>();
+  private ringMap(goal: [number, number], mt: number): Uint16Array | null {
+    if (paramOr(this.p, 'fireRing') <= 0.5) return null;
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const wt = this.walkBan();
+    const key = `${goal[0]},${goal[1]},${mt}${wt.sig ? `|${wt.sig}` : ''}`;
+    if (this.ringMaps.has(key)) return this.ringMaps.get(key)!;
+    const pocket = this.distMaps.get(key);
+    let n = 0;
+    if (pocket) for (let i = 0; i < pocket.length; i++) if (pocket[i] !== 0xffff) n++;
+    let m: Uint16Array | null = null;
+    if (pocket && n < 40) {
+      m = new Uint16Array(W * H).fill(0xffff);
+      const q: number[] = [];
+      for (const [cx, cy] of rangeCells(b.s, goal[0], goal[1], 3)) {
+        const k = cy * W + cx;
+        if (pocket[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff || (wt.cells && wt.cells[k])) continue;
+        m[k] = 0;
+        q.push(k);
+      }
+      for (let h = 0; h < q.length; h++) {
+        const c = q[h], cx = c % W, cy = (c - cx) / W;
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = ny * W + nx;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff || (wt.cells && wt.cells[k])) continue;
+          m[k] = m[c] + 1;
+          q.push(k);
+        }
+      }
+      if (!q.length) m = null;
+    }
+    if (this.ringMaps.size > 64) this.ringMaps.clear();
+    this.ringMaps.set(key, m);
+    return m;
+  }
+
+  // ---- sleepers (GrindParams.sleeper): an area whose arrival sends the coming wave to stand still
+
+  /** Slot of the unit sent into the open sleeper area, NONE when none. */
+  private scout = NONE;
+
+  /** The sleeper area still open now (its flags as its IF needs them, before the turn that shuts it), or null. */
+  private sleeperOpen(): BattleKnowledge['sleepers'][number] | null {
+    if (paramOr(this.p, 'sleeper') <= 0.5 || !this.know.sleepers?.length) return null;
+    const st = this.scene.ctx.vm.state;
+    const turn = this.b.info.turn + 1;
+    for (const z of this.know.sleepers) {
+      if (turn >= z.until) continue;
+      if (!z.set.every((f) => getFlag(st, f)) || z.clear.some((f) => getFlag(st, f))) continue;
+      return z;
+    }
+    return null;
+  }
+
+  /** Steps from (x, y) into the area (0 inside), over the cells this move type can enter (cached). */
+  private areaMaps = new Map<string, Uint16Array>();
+  private areaDist(z: { x0: number; y0: number; x1: number; y1: number }, mt: number, x: number, y: number): number {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const key = `${z.x0},${z.y0},${z.x1},${z.y1},${mt},${this.terrainHash}`;
+    let m = this.areaMaps.get(key);
+    if (!m) {
+      if (this.areaMaps.size > 16) this.areaMaps.clear();
+      m = new Uint16Array(W * H).fill(0xffff);
+      const q: number[] = [];
+      for (let cy = z.y0; cy <= Math.min(z.y1, H - 1); cy++)
+        for (let cx = z.x0; cx <= Math.min(z.x1, W - 1); cx++) {
+          const k = cy * W + cx;
+          if (moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          m[k] = 0;
+          q.push(k);
+        }
+      for (let h = 0; h < q.length; h++) {
+        const c = q[h], cx = c % W, cy = (c - cx) / W;
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = ny * W + nx;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          m[k] = m[c] + 1;
+          q.push(k);
+        }
+      }
+      this.areaMaps.set(key, m);
+    }
+    const d = m[y * W + x];
+    return d === 0xffff ? 999 : d;
+  }
+
+  /**
+   * Picks the scout for the open sleeper area: the unit of ours (the area's own officer, else any
+   * but the guarded ones) that gets there in the fewest turns, if it can before the turn that shuts
+   * it; kept while it lives and the area stays open.
+   */
+  private updateScout() {
+    const z = this.sleeperOpen();
+    if (!z) {
+      this.scout = NONE;
+      return;
+    }
+    const b = this.b;
+    const turnsTo = (u: Unit) => this.areaDist(z, moveTypeOf(b.s, u), u.x, u.y) / Math.max(1, movePoints(b.officerOf(u), b.s.items));
+    const cur = this.scout !== NONE ? this.scene.units[this.scout] : null;
+    if (cur && this.controllable(cur)) return;
+    const left = z.until - (b.info.turn + 1);
+    let best = NONE, bt = 1e9;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (!this.controllable(u) || this.know.guarded.has(u.officer)) continue;
+      if (z.actor !== 0x400 && u.officer !== z.actor) continue;
+      const t = turnsTo(u);
+      if (t <= left && t < bt) {
+        bt = t;
+        best = u.slot;
+      }
+    }
+    this.scout = best;
+    if (best !== NONE) this.log?.(`sleeper: ${this.scene.units[best].officer} to ${z.x0}..${z.x1} x ${z.y0}..${z.y1} (${bt.toFixed(1)} turns, shut at turn ${z.until})`);
+  }
+
+  /** The victory officer is on the field, walled in (walledIn) from where 유비 (else any unit of ours) stands. */
+  private victoryWalled(): boolean {
+    if (paramOr(this.p, 'fireRing') <= 0.5) return false;
+    const b = this.b;
+    const v = this.victoryNow();
+    const vs = v !== null ? b.slotOfOfficer(v) : NONE;
+    if (vs === NONE || this.scene.units[vs].status !== Status.Field) return false;
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    const u = ours.find((x) => x.officer === 0) ?? ours[0];
+    return !!u && this.walledIn(this.scene.units[vs], moveTypeOf(b.s, u), u.x, u.y);
+  }
+
+  /** `T` stands where no walk reaches it from (x, y) (a walled-in target: ringMap), for this move type. */
+  private walledIn(T: Unit, mt: number, x: number, y: number): boolean {
+    const goal: [number, number] = [T.x, T.y];
+    this.pathDist(goal, mt, x, y);
+    const wt = this.walkBan();
+    const key = `${goal[0]},${goal[1]},${mt}${wt.sig ? `|${wt.sig}` : ''}`;
+    return this.distMaps.get(key)![y * this.b.width + x] === 0xffff && this.ringMap(goal, mt) !== null;
   }
 
   /**
@@ -4075,9 +4336,36 @@ export class GrindPolicy {
     const target = adj ? adj.other : this.victoryNow();
     if (target !== null && target !== undefined) {
       const s = this.b.slotOfOfficer(target);
-      if (s !== NONE && this.scene.units[s].status === Status.Field) return [this.scene.units[s].x, this.scene.units[s].y];
+      if (s !== NONE && this.scene.units[s].status === Status.Field) {
+        const T = this.scene.units[s];
+        // walled in (fireRing): only a unit that can hit it from two cells away walks there (the
+        // others would stand on the few cells in range and keep the shooters out); the others go
+        // for the nearest enemy they can reach (the guards by the castle)
+        const mt = moveTypeOf(this.b.s, u);
+        if (!adj && this.walledIn(T, mt, u.x, u.y) && !this.shoots(u)) {
+          let best: [number, number] | null = null, bd = 1e9;
+          for (const E of this.scene.units.slice(PLAYER_SLOTS)) {
+            if (E.status !== Status.Field || E === T || this.walledIn(E, mt, u.x, u.y)) continue;
+            const d = this.pathDist([E.x, E.y], mt, u.x, u.y);
+            if (d < bd) {
+              bd = d;
+              best = [E.x, E.y];
+            }
+          }
+          return best;
+        }
+        return [T.x, T.y];
+      }
     }
     return null;
+  }
+
+  /** u can hit a target two cells straight away: a bow / crossbow / catapult, or a damage tactic of power 1+ it has the MP for. */
+  private shoots(u: Unit): boolean {
+    const o = this.b.officerOf(u);
+    const r = CLASS_RANGE[o.cls];
+    if (r !== NONE && r >= 2) return true;
+    return castableTactics(o, u.mp, this.b.learn).some((t) => t <= 14 && TACTIC_POWER[t] >= 1);
   }
 
   /** An adjacency event that ends the battle fires when this unit acts next to its partner. */
@@ -4426,6 +4714,8 @@ export class GrindPolicy {
     // captures: the cell this unit walks to (공안's forts), and whether it may step on it yet
     const capAt = this.capGoal(u);
     const lootAt = !fin && !capAt ? this.lootGoal(u) : null;
+    // a sleeper area (부 2nd's eastern mountain path): the scout walks into it while it is open
+    const sleepAt = this.scout === slot ? this.sleeperOpen() : null;
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -4553,6 +4843,10 @@ export class GrindPolicy {
       }
       // ... and a free unit to a treasure nobody has stepped on
       if (lootAt) base -= 2 * Math.min(this.pathDist(lootAt, moveTypeOf(b.s, u), x, y), 40);
+      if (sleepAt) {
+        const sd = this.areaDist(sleepAt, moveTypeOf(b.s, u), x, y);
+        base += sd === 0 ? 300 : -20 * Math.min(sd, 60);
+      }
       // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;

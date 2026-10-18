@@ -297,14 +297,19 @@ export async function runGrindBattle(
     // need-weighted: exp below level 99 counts, more for officers further away
     score += g * (1 + (99 - Math.min(99, b0.level)) / 99) * (off === 0 ? liuMul : 1);
   }
-  const won = result === 2;
+  // one of ours whose fall is a death in the story (BattleKnowledge.deaths: 부 1st's 방통) ends the
+  // battle as a win in the engine, but he is gone for good: a lost try (the captured story keeps him)
+  // (his record moves him to another force: UNIT_FORCE)
+  const force = (off: number) => (ctx.state.officers[off]?.dyn.flags ?? 0) & 0x1f;
+  const died = (pol?.know.deaths ?? []).map((d) => d.officer).find((off) => force(off) !== force(0));
+  const won = result === 2 && died === undefined;
   // why a try was lost (for the report): the leader / defeat officer gone, the time limit, a
   // scripted game over (a turn deadline), or the whole side gone
   let loss: string | undefined;
   if (!won) {
     const sv = ctx.vm.state;
     const leaders = [0, ...(sv.defeat.enabled ? [sv.defeat.officer] : [])];
-    const fallen = leaders.find((off) => {
+    const fallen = died ?? leaders.find((off) => {
       const sl = scene.b.slotOfOfficer(off);
       return sl !== NONE_SLOT && scene.units[sl].status !== Status.Field;
     });
