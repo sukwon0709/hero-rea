@@ -47,6 +47,7 @@ import {
 import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import { isYeonjuAt } from './yeonju';
+import { YY, isXiangyangAt, yyAnchor, yyBanned, yyHoldFinish, yyInit, yyPull, yySpring, yyUpdate, type YyCtx, type YyState } from './xiangyang';
 import { YP, isYangpyeongAt, ypAnchor, ypBan, ypHoldFinish, ypInit, ypPull, ypSpring, ypUpdate, ypWestBank, type YpCtx, type YpState } from './yangpyeong';
 import {
   AiMode,
@@ -597,6 +598,12 @@ export interface GrindParams {
    */
   wakeShut: number;
   /**
+   * 양양 plan (xiangyang.ts), above 0.5: the party waits in the wood south-east of the start (the
+   * horsemen of r6, an ambush the allies walk into sooner or later, cannot enter it) and springs
+   * r6 from there, holds the wood until the wave is spent, then the finish takes 조인.
+   */
+  yyPlan: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -808,6 +815,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'holdWalk', min: 0, max: 1, def: 0.6 },
   // wakers that shut every way: kept off until the finish walks through them (무릉 as the game places it)
   { key: 'wakeShut', min: 0, max: 1, def: 0.6 },
+  // 양양 plan: r6 sprung with the party in the wood its horsemen cannot enter, then 조인
+  { key: 'yyPlan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Phases in a row without a fight after which the hold before shut wakers ends (wakeShut). */
@@ -931,7 +940,7 @@ export interface BattleKnowledge {
    * at 7..9 x 15..19; the old bot walked in during its finish, strung out, and 유비 fell to them).
    * `clear`: the flags its IF needs clear (it fires once).
    */
-  ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[]; wake?: boolean }[];
+  ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[]; wake?: boolean; leaves?: boolean }[];
   stage?: Stage;
   block?: number;
 }
@@ -1029,7 +1038,13 @@ export function scriptAmbushes(stage: Stage, block: number): BattleKnowledge['am
   for (const r of stage.blocks[block]?.records ?? []) {
     if ((r.trigger !== 11 && r.trigger !== 6) || !(r.p1 === 0x400 || r.p1 < 0x100)) continue;
     const cmds = recordCommands(stage, r.code) as unknown as Cmd[];
-    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'LEAVE_GROUP' || c.name === 'GOTO_BLOCK')) continue;
+    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'GOTO_BLOCK')) continue;
+    // (a LEAVE_GROUP into a group that does not end the battle: 양양 r6, the area inside the walls
+    // brings 만총, 우금 and five horsemen in behind the gate and moves on to the duel group)
+    // (only an area any of ours walks into, that changes no map: 박망파 r6 is 하후돈 walking into
+    // our fire, 허창2 r6 the gate 황충 opens)
+    const leaves = cmds.some((c) => c.name === 'LEAVE_GROUP');
+    if (leaves && (r.trigger !== 11 || r.p1 !== 0x400 || cmds.some((c) => c.name === 'MAP_CHIP') || leaveWins(stage, block, r.group))) continue;
     let officers = [...new Set(cmds.filter((c) => c.name === 'REINFORCE' && c.officer !== undefined).map((c) => c.officer!))];
     const cond = cmds.find((c) => c.name === 'IF');
     const clear = Array.isArray(cond?.clear) ? cond.clear : [];
@@ -1043,7 +1058,8 @@ export function scriptAmbushes(stage: Stage, block: number): BattleKnowledge['am
     if (officers.length < 3) continue;
     const [x0, y0] = cellOf(r.p2);
     const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
-    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), clear: [...clear], officers, ...(wake ? { wake } : {}) });
+    if (leaves && wake) continue;
+    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), clear: [...clear], officers, ...(wake ? { wake } : {}), ...(leaves ? { leaves } : {}) });
   }
   return out;
 }
@@ -1635,10 +1651,45 @@ export class GrindPolicy {
     }
   }
 
-  /** The plan's anchor for this unit (null: none). */
+  /** The plan's anchor for this unit (null: none): 양평관's, else 양양's. */
   private ypAnchorOf(u: Unit): [number, number] | null {
-    return this.yp ? ypAnchor(this.yp, u, moveTypeOf(this.b.s, u)) : null;
+    return this.yp ? ypAnchor(this.yp, u, moveTypeOf(this.b.s, u)) : this.yy ? yyAnchor(this.yy, moveTypeOf(this.b.s, u)) : null;
   }
+
+  // ---- 양양 plan (GrindParams.yyPlan, xiangyang.ts)
+
+  /** The plan's state (null: not 양양 or the plan off). */
+  private yy: YyState | null = null;
+  private yyCtx(): YyCtx {
+    const b = this.b;
+    const wave = (record: number) => {
+      const z = this.know.ambushes.find((a) => a.record === record);
+      return z ? z.officers.map((o) => b.slotOfOfficer(o)).filter((sl) => sl !== NONE && sl >= PLAYER_SLOTS && this.scene.units[sl].status === Status.Field).length : 0;
+    };
+    return {
+      turn: b.info.turn + 1,
+      units: this.scene.units,
+      know: this.know,
+      waveLeft: wave,
+      controllable: (u) => this.controllable(u),
+      log: this.inRollout ? null : this.log,
+    };
+  }
+  /** A wood cell (cavalry cannot enter it). */
+  private yyWood(x: number, y: number): boolean {
+    const b = this.b;
+    return x >= 0 && y >= 0 && x < b.width && y < b.height && b.s.terrain[y * b.width + x] === TERRAIN_FOREST;
+  }
+  /** A wood cell next to open ground (passable, not wood): where a horseman reaches it from. */
+  private yyEdge(x: number, y: number): boolean {
+    const b = this.b;
+    for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
+      if (nx < 0 || ny < 0 || nx >= b.width || ny >= b.height) continue;
+      if (!this.yyWood(nx, ny) && moveCost(1, b.s.terrain[ny * b.width + nx]) !== 0xff) return true;
+    }
+    return false;
+  }
+
   /**
    * Wakers that shut every way (wakeShut), before the finish: the cell a few steps short of the
    * first banned cell on 유비's way to what wins (무릉: the middle way's mouth west of 오조). The party
@@ -1876,6 +1927,8 @@ export class GrindPolicy {
       let go = (still && (this.finishing || late || dry)) || left <= Math.max(2, this.p.finish);
       // 양평관 plan: r4 once the party stands in the forest, r5 once it stands formed on the west bank
       if (this.yp && z.wake) go = ypSpring(this.yp, this.ypCtx(), z.record) || left <= 2;
+      // 양양 plan: r6 from woodSpring on (the party walks into the wood its horsemen cannot enter)
+      if (this.yy && !z.wake) go = yySpring(this.yy, this.yyCtx(), z.record) || left <= 2;
       // (while it waits on a still field the scout already walks up to the edge: the ban stops it there)
       if (!go && !still) {
         this.ambScout = NONE;
@@ -2736,6 +2789,7 @@ export class GrindPolicy {
   private holdBroken = false;
   private holding(): boolean {
     if (this.yp && !this.finishing && ypAnchor(this.yp, this.scene.units[0], 0)) return true;
+    if (this.yy && !this.finishing && yyAnchor(this.yy, 0)) return true;
     if (this.wakeMouth()) return true;
     return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
   }
@@ -2939,6 +2993,11 @@ export class GrindPolicy {
       this.log?.('yp: 양평관 plan on');
     }
     if (this.yp) ypUpdate(this.yp, this.ypCtx());
+    if (this.yy === null && paramOr(this.p, 'yyPlan') > 0.5 && this.know.stage && isXiangyangAt(this.know.stage.chapter, this.know.stage.index, this.know.block) && this.know.ambushes.some((z) => z.record === YY.r6)) {
+      this.yy = yyInit();
+      this.log?.('yy: 양양 plan on');
+    }
+    if (this.yy) yyUpdate(this.yy, this.yyCtx());
     this.updateAmbush();
     this.updateBrace();
     this.updateScout();
@@ -3765,6 +3824,7 @@ export class GrindPolicy {
     const b = this.b;
     // 양평관 plan: no finish before the camp (the deadline's last two turns still finish)
     if (this.yp && ypHoldFinish(this.yp) && this.deadline() - b.info.turn > 2) return;
+    if (this.yy && yyHoldFinish(this.yy) && this.deadline() - b.info.turn > 2) return;
     this.farmOn = this.farmSafe();
     // captures pending: no finish (the victory officer sits behind the trap; taking the cells wins)
     if (this.capPending().length) return;
@@ -5672,6 +5732,8 @@ export class GrindPolicy {
       if (ban.cells && ban.cells[y * b.width + x]) continue;
       // (양평관 plan, r5's wave: who is back over the bridge stays there)
       if (ypHome && ypWestBank(x, y)) continue;
+      // (양양 plan, the wave by the wood: who is in it stays in it, 유비 off its edge)
+      if (this.yy && yyBanned(this.yy, (cx, cy) => this.yyWood(cx, cy), (cx, cy) => this.yyEdge(cx, cy), [u.x, u.y], guarded, x, y)) continue;
       if (this.capHeld(x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
@@ -5751,7 +5813,7 @@ export class GrindPolicy {
         const da = this.bracing() || ypA || this.wakeMouth() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east
         // corner away from the wave and was cut off there, 3 of 10 seeds lost at turn 14)
-        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.yp ? ypPull(this.yp) : 4) * Math.max(0, da - (guarded ? 1 : 2));
+        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.yp ? ypPull(this.yp) : ypA && this.yy ? yyPull(this.yy) : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else if (mend) {
