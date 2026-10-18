@@ -590,6 +590,13 @@ export interface GrindParams {
    */
   holdWalk: number;
   /**
+   * Wakers that shut every way (wakeAvoid), above 0.5: the cells next to them stay banned and they
+   * are not hit until the finish (the 대기 units by them are drawn out and fought one at a time,
+   * the army sleeping on); the finish walks through, counting the turns to fight the army it wakes
+   * (wakeNeed), and no 총퇴각 is spent on them (a retry places every unit as before).
+   */
+  wakeShut: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -799,7 +806,18 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'farmHold', min: 0, max: 1, def: 0.6 },
   // walk to a holding enemy: on a quiet field the approach pulls by the walking distance
   { key: 'holdWalk', min: 0, max: 1, def: 0.6 },
+  // wakers that shut every way: kept off until the finish walks through them (무릉 as the game places it)
+  { key: 'wakeShut', min: 0, max: 1, def: 0.6 },
 ];
+
+/** Phases in a row without a fight after which the hold before shut wakers ends (wakeShut). */
+const WAKE_IDLE = 2;
+/** Steps short of the cells next to a shut waker the party holds at (wakeMouth). */
+const WAKE_MOUTH = 2;
+/** Steps 유비 keeps off shut wakers in the finish while their army sleeps (wakeShut). */
+const WAKE_LEAD = 3;
+/** Turns at most the party takes to form up at the first mouth before going through (wakeShut). */
+const WAKE_REGROUP = 3;
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
 export const BOMBS_PER_BATTLE = 1;
@@ -1621,8 +1639,132 @@ export class GrindPolicy {
   private ypAnchorOf(u: Unit): [number, number] | null {
     return this.yp ? ypAnchor(this.yp, u, moveTypeOf(this.b.s, u)) : null;
   }
+  /**
+   * Wakers that shut every way (wakeShut), before the finish: the cell a few steps short of the
+   * first banned cell on 유비's way to what wins (무릉: the middle way's mouth west of 오조). The party
+   * holds there: the 대기 units by the wakers come out to it one or two at a time and are fought
+   * there while the army sleeps on.
+   */
+  private wakeMouthMemo: { sig: string; at: [number, number][] } = { sig: '', at: [] };
+  /** The mouth the party holds at now (wakeMouths). */
+  private wakeMouthIdx = 0;
+  /** A few steps behind the first mouth: 유비 waits there in the finish while the army is about. */
+  private wakeRear: [number, number] | null = null;
+  /** Turn the party went back to the first mouth to go through from there (-1: not yet). */
+  private wakeRegroup = -1;
+  /** The party stands at the mouth: all but one of ours within 3 steps of it. */
+  private wakeFormed(): boolean {
+    const m = this.wakeMouth();
+    if (!m) return true;
+    const us = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    const far = us.filter((u) => this.pathDist(m, moveTypeOf(this.b.s, u), u.x, u.y) > 3).length;
+    return far <= 1;
+  }
+  private wakeMouth(): [number, number] | null {
+    if (this.finishing || paramOr(this.p, 'wakeShut') <= 0.5) return null;
+    const w = this.wakeTrap();
+    if (!w.shut || !w.cells) return null;
+    if (this.wakeMouthMemo.sig !== w.sig) {
+      this.wakeMouthMemo = { sig: w.sig, at: this.wakeMouths(w.slots) };
+      if (!this.inRollout) this.log?.(`wake: shut, the party holds at ${this.wakeMouthMemo.at.map((a) => a.join(',')).join(' then ') || 'nowhere'}`);
+    }
+    return this.wakeMouthMemo.at[this.wakeMouthIdx] ?? null;
+  }
+  /**
+   * The mouths before shut wakers (wakeMouth), nearest first: for each, the cell a few steps short of
+   * the first cell next to it on 유비's way to what wins that keeps off the others.
+   */
+  private wakeMouths(live: Set<number>): [number, number][] {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const units = this.scene.units;
+    const ls = b.slotOfOfficer(0);
+    if (ls === NONE || units[ls].status !== Status.Field) return [];
+    let target: Unit | null = null;
+    for (const a of this.wadj()) {
+      if (a.actor !== 0 && a.actor !== 0x400) continue;
+      const s2 = b.slotOfOfficer(a.other);
+      if (s2 !== NONE && units[s2].status === Status.Field) target = units[s2];
+    }
+    if (!target) {
+      const v = this.know.victory;
+      const vs = v !== null ? b.slotOfOfficer(v) : NONE;
+      if (vs !== NONE && units[vs].status === Status.Field) target = units[vs];
+    }
+    if (!target) return [];
+    const L = units[ls];
+    const mt = moveTypeOf(b.s, L);
+    const near = (s: number) => {
+      const E = units[s];
+      const m = new Uint8Array(W * H);
+      for (const [nx, ny] of [[E.x, E.y - 1], [E.x + 1, E.y], [E.x, E.y + 1], [E.x - 1, E.y]]) if (nx >= 0 && ny >= 0 && nx < W && ny < H) m[ny * W + nx] = 1;
+      return m;
+    };
+    const out: { at: [number, number]; rear: [number, number]; d: number }[] = [];
+    for (const s of live) {
+      const mine = near(s);
+      const ban = new Uint8Array(W * H);
+      for (const o of live) if (o !== s) near(o).forEach((v, k) => (ban[k] |= v));
+      // breadth-first from 유비 to a cell next to the target, keeping off the other wakers
+      const prev = new Int32Array(W * H).fill(-1);
+      const start = L.y * W + L.x;
+      prev[start] = start;
+      const q = [start];
+      let end = -1;
+      for (let h = 0; h < q.length && end < 0; h++) {
+        const c = q[h], cx = c % W, cy = (c - cx) / W;
+        if (Math.abs(cx - target.x) + Math.abs(cy - target.y) <= 1) {
+          end = c;
+          break;
+        }
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = ny * W + nx;
+          if (prev[k] >= 0 || ban[k] || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          prev[k] = c;
+          q.push(k);
+        }
+      }
+      if (end < 0) continue;
+      const path: number[] = [];
+      for (let c = end; ; c = prev[c]) {
+        path.unshift(c);
+        if (c === start) break;
+      }
+      const i = path.findIndex((k) => mine[k]);
+      if (i <= 0) continue;
+      const k = path[Math.max(0, i - WAKE_MOUTH)];
+      const r = path[Math.max(0, i - WAKE_MOUTH - WAKE_LEAD)];
+      out.push({ at: [k % W, Math.trunc(k / W)], rear: [r % W, Math.trunc(r / W)], d: i });
+    }
+    out.sort((x, y) => x.d - y.d);
+    if (out.length) this.wakeRear = out[0].rear;
+    return out.map((o) => o.at);
+  }
+  /** Wakers about: avoided (wakeTrap's cells), or shutting every way and walked through in the finish (wakeShut). */
+  private wakeWay(): boolean {
+    const w = this.wakeTrap();
+    // (once shut, for good: the finish walks on to what wins after the wakers fall)
+    return !!w.cells || ((!!w.shut || this.wakeMouthMemo.at.length > 0) && paramOr(this.p, 'wakeShut') > 0.5);
+  }
+  /**
+   * Walking through shut wakers (wakeShut), 유비 keeps back with the party (no walk of his own to
+   * what wins) while they sleep and while the army they woke is still about.
+   */
+  private wakeLeadWait(): boolean {
+    if (paramOr(this.p, 'wakeShut') <= 0.5 || !this.wakeMouthMemo.at.length) return false;
+    if (this.wakeTrap().shut) return true;
+    return this.scene.units.slice(PLAYER_SLOTS).some((e) => e.status === Status.Field && e.officer !== 0xffff && e.mode === AiMode.AttackNearest);
+  }
+  /** Officers woken by shut wakers (wakeShut) still on the field and after us. */
+  private wakeArmyUp(): boolean {
+    if (paramOr(this.p, 'wakeShut') <= 0.5 || !this.wakeMouthMemo.at.length || this.wakeTrap().shut) return false;
+    return this.scene.units.slice(PLAYER_SLOTS).some((e) => e.status === Status.Field && e.officer !== 0xffff && e.mode === AiMode.AttackNearest);
+  }
+  /** wakeNeed's walk through shut wakers (wakeShut): the cells next to them are not banned. */
+  private noWakeBan = false;
   private walkBan(): { sig: string; cells: Uint8Array | null } {
-    const wt = this.wakeTrap();
+    const wt = this.noWakeBan ? { sig: '', cells: null } : this.wakeTrap();
     const cap = this.capBan();
     const amb = this.ambBan();
     const yp = this.yp ? (this.ypMemo = ypBan(this.yp, this.b.width, this.b.height, this.ypMemo)) : null;
@@ -2594,6 +2736,7 @@ export class GrindPolicy {
   private holdBroken = false;
   private holding(): boolean {
     if (this.yp && !this.finishing && ypAnchor(this.yp, this.scene.units[0], 0)) return true;
+    if (this.wakeMouth()) return true;
     return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
   }
   /** The cell the formation gathers around: the brace anchor while bracing, else the hold anchor. */
@@ -2756,7 +2899,7 @@ export class GrindPolicy {
     if (b.info.turn === 0) await sc.victoryWindow(true);
     await sc.say(S.playerPhase);
     for (const u of sc.units) tryCure(b.rng, u, u.officer === 0xffff ? 0 : b.officerOf(u).lead);
-    if (b.info.turn === 0 && !this.retreatNow && !b.formation && this.wakeRerolls && this.wakeRerolls.left > 0 && this.wakeTrap().shut) {
+    if (b.info.turn === 0 && !this.retreatNow && !b.formation && this.wakeRerolls && this.wakeRerolls.left > 0 && this.wakeTrap().shut && paramOr(this.p, 'wakeShut') <= 0.5) {
       this.wakeRerolls.left--;
       this.retreatNow = true;
       this.log?.(`wake: every way round the wakers shut, 총퇴각 (${this.wakeRerolls.left} left)`);
@@ -3669,6 +3812,38 @@ export class GrindPolicy {
     // (finNeed: so does any battle won on one enemy officer on the field: the plan's `finish` of 2
     // turns left 가맹관1's party at the start with 장노 15 steps off behind his guards)
     const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells || this.victoryWalled() ? this.farmNeed() : this.finNeed()) + stepTurns;
+    // shut wakers (wakeShut): the party holds at the mouth while the 대기 units by the wakers come
+    // out to it; the finish (through the wakers) starts on its deadline or once nothing comes
+    if (this.wakeMouth()) {
+      const turn = b.info.turn + 1;
+      if (this.wakeRegroup < 0) {
+        // (the last mouth holds to the deadline: the turns are farmed there)
+        const last = this.wakeMouthIdx + 1 >= this.wakeMouthMemo.at.length;
+        if (!deadlineHit && (this.fightIdle < WAKE_IDLE || last)) return;
+        if (!deadlineHit) {
+          this.wakeMouthIdx++;
+          this.fightIdle = 0;
+          const m = this.wakeMouth();
+          this.log?.(`wake: nothing more comes out, the party moves to ${m ? m.join(',') : '-'} at turn ${turn}`);
+          return;
+        }
+        // the deadline: the party forms up again at the first mouth (the way to what wins) and
+        // wakes the army from there together (one unit waking it at another mouth was cut off)
+        if (this.wakeMouthIdx !== 0) {
+          this.wakeMouthIdx = 0;
+          this.wakeRegroup = turn;
+          const m = this.wakeMouth();
+          this.log?.(`wake: the party forms up at ${m ? m.join(',') : '-'} to go through at turn ${turn}`);
+          return;
+        }
+      } else if (turn - this.wakeRegroup < WAKE_REGROUP && !this.wakeFormed()) return;
+      this.finishing = true;
+      this.stats.finishTurn = b.info.turn + 1;
+      this.stats.finishReason = deadlineHit ? 'deadline' : 'idle';
+      this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1}, through the wakers (deadline ${this.deadline()})`);
+      this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      return;
+    }
     // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
@@ -4119,6 +4294,16 @@ export class GrindPolicy {
    * there: 무릉's north way meets 310, then 257, 332, 275 and the two in the castle).
    */
   private wakeNeed(): number {
+    // (wakers that shut every way, wakeShut: the walk goes through them)
+    if (!this.wakeTrap().shut || this.noWakeBan) return this.wakeNeedOf();
+    this.noWakeBan = true;
+    try {
+      return this.wakeNeedOf();
+    } finally {
+      this.noWakeBan = false;
+    }
+  }
+  private wakeNeedOf(): number {
     const b = this.b;
     const W = b.width;
     const units = this.scene.units;
@@ -4165,11 +4350,25 @@ export class GrindPolicy {
       c = nxt;
       path.push(c);
     }
-    const wk = this.wakeTrap().slots;
+    const wt = this.wakeTrap();
+    const wk = wt.slots;
+    // (walking through shut wakers wakes their army: each officer they wake that still sleeps is
+    // fought, wherever it stands, and so are they)
+    const army = new Set<number>();
+    if (wt.shut) {
+      for (const s of wk) army.add(units[s].officer);
+      for (const w of this.know.wakers) if (wk.has(b.slotOfOfficer(w.officer))) for (const off of w.wakes) army.add(off);
+    }
     let n = 0;
     for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
       const E = units[i];
-      if (E.status !== Status.Field || E.officer === 0xffff || E === target || wk.has(i) || this.know.protect.has(E.officer)) continue;
+      if (E.status !== Status.Field || E.officer === 0xffff || E === target || this.know.protect.has(E.officer)) continue;
+      if (army.has(E.officer)) {
+        // (it comes to us, the others with it: half the turns of one met on the way)
+        if (E.mode !== AiMode.AttackNearest) n += 0.5;
+        continue;
+      }
+      if (wk.has(i)) continue;
       const rad = (E.mode === AiMode.Hold ? 0 : movePoints(b.officerOf(E), b.s.items)) + 2;
       if (path.some((k) => Math.abs((k % W) - E.x) + Math.abs(Math.trunc(k / W) - E.y) <= rad)) n++;
     }
@@ -4182,6 +4381,16 @@ export class GrindPolicy {
    * target, physical damage 1cb6:df14).
    */
   private finishEstimate(): number {
+    // (wakers that shut every way, wakeShut: the finish walks through them)
+    if (!this.wakeTrap().shut || this.noWakeBan) return this.finishEstimateOf();
+    this.noWakeBan = true;
+    try {
+      return this.finishEstimateOf();
+    } finally {
+      this.noWakeBan = false;
+    }
+  }
+  private finishEstimateOf(): number {
     const b = this.b;
     const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
     if (!ours.length) return 0;
@@ -4585,8 +4794,8 @@ export class GrindPolicy {
    * 오조 at the fort on the only middle way, or 양안 in the north). Units keep off those cells, never
    * hit a waker (its fall wakes them too), and walk round them (pathDist, foeDist).
    */
-  private wakeMemo: { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean } = { sig: '', slots: new Set(), cells: null };
-  private wakeTrap(): { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean } {
+  private wakeMemo: { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean; lead?: { slots: Set<number>; cells: Uint8Array } } = { sig: '', slots: new Set(), cells: null };
+  private wakeTrap(): { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean; lead?: { slots: Set<number>; cells: Uint8Array } } {
     const k = this.know.wakers;
     if (!k?.length || paramOr(this.p, 'wakeAvoid') <= 0.5) return this.wakeMemo;
     const b = this.b;
@@ -4603,24 +4812,42 @@ export class GrindPolicy {
       if (asleep >= 2) live.push(s);
     }
     const sig = live.map((s) => `${s}@${units[s].x},${units[s].y}`).join(' ');
-    if (sig === this.wakeMemo.sig) return this.wakeMemo;
+    const fsig = live.length && this.finishing && paramOr(this.p, 'wakeShut') > 0.5 ? `${sig}|F` : sig;
+    if (fsig === this.wakeMemo.sig) return this.wakeMemo;
     let cells: Uint8Array | null = null;
     let shut = false;
+    let lead: { slots: Set<number>; cells: Uint8Array } | undefined;
     if (live.length) {
       cells = new Uint8Array(b.width * b.height);
       for (const s of live) {
         const E = units[s];
         for (const [nx, ny] of [[E.x, E.y - 1], [E.x + 1, E.y], [E.x, E.y + 1], [E.x - 1, E.y]]) if (nx >= 0 && ny >= 0 && nx < b.width && ny < b.height) cells[ny * b.width + nx] = 1;
       }
-      // no way round them to what wins (the enemies are placed at random: 무릉 with 양안 in the north
-      // narrows and 오조 on the middle way shuts both): the wakers are not avoided (the old play)
+      // no way round them to what wins (무릉 as the game places it, every try alike: 양안 by the
+      // north way's one cell, 오조 on the middle way; the ways round seen before came from retries
+      // started on a stale unit map, which displaced the units): with wakeShut the cells stay
+      // banned until the finish (the party holds at the mouths, wakeMouth); without, the wakers
+      // are not avoided (the old play)
       if (!this.wakeWayOpen(cells)) {
-        live.length = 0;
-        cells = null;
         shut = true;
+        // (wakeShut: kept off until the finish, which walks through and fights the army it wakes)
+        if (this.finishing || paramOr(this.p, 'wakeShut') <= 0.5) {
+          // (유비 keeps WAKE_LEAD steps off them: the army they wake goes for who stands nearest)
+          if (paramOr(this.p, 'wakeShut') > 0.5) {
+            const lc = new Uint8Array(b.width * b.height);
+            for (const s of live) {
+              const E = units[s];
+              for (let y = Math.max(0, E.y - WAKE_LEAD); y <= Math.min(b.height - 1, E.y + WAKE_LEAD); y++)
+                for (let x = Math.max(0, E.x - WAKE_LEAD); x <= Math.min(b.width - 1, E.x + WAKE_LEAD); x++) if (Math.abs(x - E.x) + Math.abs(y - E.y) <= WAKE_LEAD) lc[y * b.width + x] = 1;
+            }
+            lead = { slots: new Set(live), cells: lc };
+          }
+          live.length = 0;
+          cells = null;
+        }
       }
     }
-    this.wakeMemo = { sig, slots: new Set(live), cells, shut };
+    this.wakeMemo = { sig: fsig, slots: new Set(live), cells, shut, lead };
     return this.wakeMemo;
   }
 
@@ -5287,14 +5514,14 @@ export class GrindPolicy {
     // (with wakers about, the finish walks the long way round them from its start, fighting what it
     // meets, but ends nothing before the last third: 무릉's finish lingered at the nearest enemy, in
     // the middle dead end by 오조, until turn 24 and ran out of time on the way)
-    const wakeWalk = fin && !chg && !!this.wakeTrap().cells;
+    const wakeWalk = fin && !chg && this.wakeWay();
     // ... and 유비, the one whose arrival wins, walks in earnest once the turns left barely cover his
     // way (he stayed back healing, 3 turns short at the limit)
-    const leadWalk = guarded && fin && !!adjAt && !!this.wakeTrap().cells && (() => {
+    const leadWalk = guarded && fin && !!adjAt && this.wakeWay() && (() => {
       const mp = Math.max(1, movePoints(o, b.s.items));
       return turnsLeft <= Math.ceil(this.pathDist(adjAt, moveTypeOf(b.s, u), u.x, u.y) / mp) + 3;
     })();
-    const goal = wakeWalk ? (guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    const goal = wakeWalk ? (guarded ? (this.wakeLeadWait() && !leadWalk && !own ? this.wakeRear : own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.wakeArmyUp() ? this.wakeMouthMemo.at[0] : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -5424,7 +5651,9 @@ export class GrindPolicy {
     const idleWalk = !fin && !guarded && hp * 2 >= max && (this.unitIdle.get(slot) ?? 0) >= 2 ? paramOr(this.p, 'idleAp') : 0;
     const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
     const pk = this.parkCellOf(slot);
-    const wake = this.wakeTrap();
+    const wake0 = this.wakeTrap();
+    // (walking through shut wakers, wakeShut: 유비 still keeps off them while their army sleeps)
+    const wake = guarded && wake0.lead ? wake0.lead : wake0;
     const ban = this.walkBan();
     const ypHome = this.yp?.phase === 'hold5' && !ypWestBank(u.x, u.y);
     // captures: the cell this unit walks to (공안's forts), and whether it may step on it yet
@@ -5514,12 +5743,12 @@ export class GrindPolicy {
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       const ypA = this.ypAnchorOf(u);
-      const anc = !fin && this.holding() ? (hnAnc ?? ypA ?? this.anchorNow()) : null;
+      const anc = !fin && this.holding() ? (hnAnc ?? ypA ?? this.wakeMouth() ?? this.anchorNow()) : null;
       if (mend && quietMend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
       } else if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
-        const da = this.bracing() || ypA ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
+        const da = this.bracing() || ypA || this.wakeMouth() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east
         // corner away from the wave and was cut off there, 3 of 10 seeds lost at turn 14)
         base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.yp ? ypPull(this.yp) : 4) * Math.max(0, da - (guarded ? 1 : 2));
@@ -5540,7 +5769,7 @@ export class GrindPolicy {
         const apW = fin && goal ? (leadWalk ? 12 : 3) : (hw && hp >= max * 0.5) || this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
-        else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeTrap().cells) ? 200 : 40);
+        else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeWay()) ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
