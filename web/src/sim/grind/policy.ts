@@ -47,6 +47,7 @@ import {
 import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import { isYeonjuAt } from './yeonju';
+import { YP, isYangpyeongAt, ypAnchor, ypBan, ypHoldFinish, ypInit, ypPull, ypSpring, ypUpdate, ypWestBank, type YpCtx, type YpState } from './yangpyeong';
 import {
   AiMode,
   CLASS_ATTACK_TYPE,
@@ -563,6 +564,13 @@ export interface GrindParams {
    */
   ambWake: number;
   /**
+   * 양평관 plan (yangpyeong.ts), above 0.5: the party forms up in the forest west of the start, springs
+   * r4 there and fights it in the forest, gathers by the bridge's east end and shoots the guards
+   * across the river (the bridge and the west bank banned), crosses once the bridgehead is clear,
+   * forms up on the west bank and springs r5 from there; 조조 last (the general policy's finish).
+   */
+  ypPlan: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -766,6 +774,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   // wake ambushes: an area that turns 3+ waiting officers on us is kept out of until it is time (ambush)
   // (on: checked on 거록, 계교, 북해, 박망파, 장판파 and 장사, the same or more exp, 장사 +40%)
   { key: 'ambWake', min: 0, max: 1, def: 0.6 },
+  // 양평관 plan: r4 fought in the forest, the bridge's guards shot across the river, r5 from the west bank
+  { key: 'ypPlan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1464,17 +1474,126 @@ export class GrindPolicy {
 
   /** The cells no walk enters: next to the live wakers (wakeTrap) and the capture traps (capBan). */
   private banMemo: { key: string; v: { sig: string; cells: Uint8Array | null } } | null = null;
+
+  // ---- 양평관 plan (GrindParams.ypPlan, yangpyeong.ts)
+
+  /** The plan's state (null: not 양평관 or the plan off). */
+  private yp: YpState | null = null;
+  private ypMemo: { sig: string; cells: Uint8Array } | null = null;
+  private ypCtx(): YpCtx {
+    const b = this.b;
+    const st = this.scene.ctx.vm.state;
+    return {
+      turn: b.info.turn + 1,
+      units: this.scene.units,
+      know: this.know,
+      fired: (record) => {
+        const z = this.know.ambushes.find((a) => a.record === record);
+        return !!z && z.clear.some((f) => getFlag(st, f));
+      },
+      controllable: (u) => this.controllable(u),
+      cls: (u) => b.officerOf(u).cls,
+      hpShare: (u) => b.officerOf(u).hp / Math.max(1, maxHp(b.officerOf(u))),
+      fightIdle: this.fightIdle,
+      log: this.inRollout ? null : this.log,
+    };
+  }
+  /** A heal / morale cast with nobody in need around (the 양평관 plan keeps the MP for the fights). */
+  private ypIdleCast(u: Unit, tc: number, x: number, y: number, target: number): boolean {
+    const b = this.b;
+    const need = (T: Unit) => {
+      const ot = b.officerOf(T);
+      return ot.hp < maxHp(ot) * 0.8 || T.morale < 80 || (T.flags & UnitFlag.Confused) !== 0;
+    };
+    if (target !== NONE) return !need(this.scene.units[target]);
+    for (const s of unitsInRange(b.s, u, (tc >= 30 ? (tc - 30) % 3 : TACTIC_POWER[tc]) | 0x80, x, y, true)) if (need(this.scene.units[s])) return false;
+    return true;
+  }
+  /** The 양평관 plan's bait this phase: a sturdy unit on a cell one or two waiting guards reach. */
+  private ypBait: { slot: number; x: number; y: number; for: number[] } | null = null;
+  /**
+   * Picks the bait (bridge and cross phases): while nothing awake is near, a sturdy unit (not the
+   * leader, troops above 70%) stands on a cell it reaches this phase, outside the banned cells, that
+   * one or two waiting enemies (not the victory officer) can hit, their worst case under 70% of its
+   * troops; the fewest guards first, then the least worst case, then the nearest to the anchor.
+   * They come out to it (over the bridge) and the party, held back by its anchor, kills them.
+   */
+  private ypPickBait() {
+    this.ypBait = null;
+    const yp = this.yp;
+    if (!yp || (yp.phase !== 'bridge' && yp.phase !== 'cross' && yp.phase !== 'hold5') || this.finishing) return;
+    const b = this.b, W = b.width;
+    const units = this.scene.units;
+    if (yp.phase === 'hold5') {
+      // r5's wave: the sturdiest unit in shape plugs the bridge's east end (the one cell the wave
+      // crosses by; it is hit there by one melee unit at a time)
+      const [px, py] = YP.plug;
+      let bs = NONE, bv = -1e9;
+      for (const u of units.slice(0, PLAYER_SLOTS)) {
+        if (!this.controllable(u) || this.know.guarded.has(u.officer)) continue;
+        const o = b.officerOf(u);
+        if (o.hp < maxHp(o) * 0.6) continue;
+        const d = this.pathDist([px, py], moveTypeOf(b.s, u), u.x, u.y);
+        if (d > movePoints(o, b.s.items) && !(u.x === px && u.y === py)) continue;
+        const v = o.hp + 1.5 * defencePower(o, u.morale, b.s.items) + (u.x === px && u.y === py ? 500 : 0);
+        if (v > bv) [bv, bs] = [v, u.slot];
+      }
+      const occ = b.s.unitAt[py * W + px];
+      if (bs !== NONE && (occ === NONE || occ === bs)) this.ypBait = { slot: bs, x: px, y: py, for: [] };
+      return;
+    }
+    const foes = units.slice(PLAYER_SLOTS).filter((e) => e.status === Status.Field && e.officer !== 0xffff);
+    const sleeping = (e: Unit) => e.mode === AiMode.Wait || e.mode === AiMode.Hold;
+    const mine = units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    if (!mine.length) return;
+    // something awake near: fight it first
+    for (const e of foes) if (!sleeping(e) && mine.some((u) => Math.abs(u.x - e.x) + Math.abs(u.y - e.y) <= 8)) return;
+    const ban = this.walkBan();
+    let best: { slot: number; x: number; y: number; for: number[]; v: number } | null = null;
+    for (const u of mine) {
+      if (this.know.guarded.has(u.officer) || u.flags & UnitFlag.Acted) continue;
+      const o = b.officerOf(u);
+      if (o.hp < maxHp(o) * 0.7) continue;
+      const anc = this.ypAnchorOf(u);
+      const at = u.y * W + u.x;
+      b.s.unitAt[at] = NONE;
+      for (const [x, y] of this.reachable(u)) {
+        const k = y * W + x;
+        if (ban.cells && ban.cells[k]) continue;
+        const by = new Set<number>([...(this.threat[k] ?? []), ...(this.tthreat[k] ?? [])]);
+        const g = [...by].filter((s2) => units[s2].status === Status.Field && sleeping(units[s2]));
+        if (!g.length || g.length > 2 || g.some((s2) => units[s2].officer === this.know.victory)) continue;
+        // (every enemy that reaches the cell counts, awake or not)
+        let worst = 0;
+        for (const s2 of by) worst += Math.max(this.hitOn(units[s2], u, x, y), this.tacticOn(units[s2], u, x, y));
+        if (worst >= o.hp * 0.7) continue;
+        const v = -g.length * 40 - (worst / o.hp) * 60 - (anc ? 2 * (Math.abs(anc[0] - x) + Math.abs(anc[1] - y)) : 0) + (o.hp / 100) * 0.5;
+        if (!best || v > best.v) best = { slot: u.slot, x, y, for: g.map((s2) => units[s2].officer), v };
+      }
+      b.s.unitAt[at] = u.slot;
+    }
+    if (best) {
+      this.ypBait = { slot: best.slot, x: best.x, y: best.y, for: best.for };
+      if (!this.inRollout) this.log?.(`yp: bait ${units[best.slot].officer} at ${best.x},${best.y} for ${best.for.join(',')}`);
+    }
+  }
+
+  /** The plan's anchor for this unit (null: none). */
+  private ypAnchorOf(u: Unit): [number, number] | null {
+    return this.yp ? ypAnchor(this.yp, u, moveTypeOf(this.b.s, u)) : null;
+  }
   private walkBan(): { sig: string; cells: Uint8Array | null } {
     const wt = this.wakeTrap();
     const cap = this.capBan();
     const amb = this.ambBan();
-    if (!cap && !amb) return wt;
-    const key = `${wt.sig}|${cap ? 1 : 0}|${amb ? amb.sig : ''}`;
+    const yp = this.yp ? (this.ypMemo = ypBan(this.yp, this.b.width, this.b.height, this.ypMemo)) : null;
+    if (!cap && !amb && !yp) return wt;
+    const key = `${wt.sig}|${cap ? 1 : 0}|${amb ? amb.sig : ''}|${yp ? yp.sig : ''}`;
     if (this.banMemo?.key === key) return this.banMemo.v;
     const n = this.b.width * this.b.height;
     const cells = new Uint8Array(n);
-    for (let i = 0; i < n; i++) cells[i] = (cap ? cap[i] : 0) | (wt.cells ? wt.cells[i] : 0) | (amb ? amb.cells[i] : 0);
-    const v = { sig: `${wt.sig}${cap ? '|cap' : ''}${amb ? `|${amb.sig}` : ''}`, cells };
+    for (let i = 0; i < n; i++) cells[i] = (cap ? cap[i] : 0) | (wt.cells ? wt.cells[i] : 0) | (amb ? amb.cells[i] : 0) | (yp ? yp.cells[i] : 0);
+    const v = { sig: `${wt.sig}${cap ? '|cap' : ''}${amb ? `|${amb.sig}` : ''}${yp ? `|${yp.sig}` : ''}`, cells };
     this.banMemo = { key, v };
     return v;
   }
@@ -1573,7 +1692,9 @@ export class GrindPolicy {
       const dry = this.fightIdle >= 1 && fit;
       // (never while enemies are on their way: the attackers of 가맹관1's turn 3 first; at the very
       // end, the finish goes in whatever comes)
-      const go = (still && (this.finishing || late || dry)) || left <= Math.max(2, this.p.finish);
+      let go = (still && (this.finishing || late || dry)) || left <= Math.max(2, this.p.finish);
+      // 양평관 plan: r4 once the party stands in the forest, r5 once it stands formed on the west bank
+      if (this.yp && z.wake) go = ypSpring(this.yp, this.ypCtx(), z.record) || left <= 2;
       // (while it waits on a still field the scout already walks up to the edge: the ban stops it there)
       if (!go && !still) {
         this.ambScout = NONE;
@@ -1600,9 +1721,13 @@ export class GrindPolicy {
     for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
       if (!this.controllable(u) || this.know.guarded.has(u.officer) || this.duelKept(u.officer)) continue;
       if (z.actor !== 0x400 && u.officer !== z.actor) continue;
+      // (양평관 plan: not our cavalry into r4, its area's edge is forest)
+      if (this.yp && z.record === 4 && moveTypeOf(b.s, u) === 1) continue;
       const o = b.officerOf(u);
       if (o.hp < maxHp(o) * 0.6) continue;
-      const t = this.areaDist(z, moveTypeOf(b.s, u), u.x, u.y) / Math.max(1, movePoints(o, b.s.items));
+      let t = this.areaDist(z, moveTypeOf(b.s, u), u.x, u.y) / Math.max(1, movePoints(o, b.s.items));
+      // (양평관 plan: r5's scout springs it and runs back over the bridge: the fastest goes)
+      if (this.yp && z.record === 5) t = t * 0.5 - movePoints(o, b.s.items);
       if (t < bt) [bt, best] = [t, u.slot];
     }
     this.ambScout = best;
@@ -2383,6 +2508,7 @@ export class GrindPolicy {
   private quietTurns = 0;
   private holdBroken = false;
   private holding(): boolean {
+    if (this.yp && !this.finishing && ypAnchor(this.yp, this.scene.units[0], 0)) return true;
     return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
   }
   /** The cell the formation gathers around: the brace anchor while bracing, else the hold anchor. */
@@ -2580,6 +2706,11 @@ export class GrindPolicy {
       this.foeMaps.clear();
     }
     this.updateHold();
+    if (this.yp === null && paramOr(this.p, 'ypPlan') > 0.5 && this.know.stage && isYangpyeongAt(this.know.stage.chapter, this.know.stage.index, this.know.block)) {
+      this.yp = ypInit();
+      this.log?.('yp: 양평관 plan on');
+    }
+    if (this.yp) ypUpdate(this.yp, this.ypCtx());
     this.updateAmbush();
     this.updateBrace();
     this.updateScout();
@@ -2592,6 +2723,7 @@ export class GrindPolicy {
     this.buildNurse();
     this.buildPen();
     this.buildLeaderKills();
+    this.ypPickBait();
     const gained = !this.inRollout && paramOr(this.p, 'search') > 0.5 && !this.quietField() ? await this.searchPhase() : await this.actLoop(null);
     if (b.info.result) return;
     // counted in the finish too: frozen there, a finish begun right after a kill kept the weak pull
@@ -3403,6 +3535,8 @@ export class GrindPolicy {
     this.farmOn = false;
     if (this.finishing) return;
     const b = this.b;
+    // 양평관 plan: no finish before the camp (the deadline's last two turns still finish)
+    if (this.yp && ypHoldFinish(this.yp) && this.deadline() - b.info.turn > 2) return;
     this.farmOn = this.farmSafe();
     // captures pending: no finish (the victory officer sits behind the trap; taking the cells wins)
     if (this.capPending().length) return;
@@ -4913,7 +5047,8 @@ export class GrindPolicy {
    */
   private buildPrice() {
     this.price.clear();
-    if (!(paramOr(this.p, 'cbPrice') > 0) || this.finishing) return;
+    // (양평관 plan: outnumbered by stronger units all the way, every blow is safety: no price)
+    if (!(paramOr(this.p, 'cbPrice') > 0) || this.finishing || this.yp) return;
     const b = this.b;
     const reach = paramOr(this.p, 'cbReach');
     // only while we have the upper hand: against a stronger side every kill is safety first
@@ -5206,6 +5341,7 @@ export class GrindPolicy {
     const pk = this.parkCellOf(slot);
     const wake = this.wakeTrap();
     const ban = this.walkBan();
+    const ypHome = this.yp?.phase === 'hold5' && !ypWestBank(u.x, u.y);
     // captures: the cell this unit walks to (공안's forts), and whether it may step on it yet
     const capAt = this.capGoal(u);
     const lootAt = !fin && !capAt ? this.lootGoal(u) : null;
@@ -5220,6 +5356,8 @@ export class GrindPolicy {
       if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
       if (wake.cells && wake.cells[y * b.width + x]) continue;
       if (ban.cells && ban.cells[y * b.width + x]) continue;
+      // (양평관 plan, r5's wave: who is back over the bridge stays there)
+      if (ypHome && ypWestBank(x, y)) continue;
       if (this.capHeld(x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
@@ -5288,15 +5426,16 @@ export class GrindPolicy {
       else if (this.p.walk > 0.5) dist = this.foeDist(enemies, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
-      const anc = !fin && this.holding() ? (hnAnc ?? this.anchorNow()) : null;
+      const ypA = this.ypAnchorOf(u);
+      const anc = !fin && this.holding() ? (hnAnc ?? ypA ?? this.anchorNow()) : null;
       if (mend && quietMend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
       } else if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
-        const da = this.bracing() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
+        const da = this.bracing() || ypA ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east
         // corner away from the wave and was cut off there, 3 of 10 seeds lost at turn 14)
-        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : 4) * Math.max(0, da - (guarded ? 1 : 2));
+        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.yp ? ypPull(this.yp) : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else if (mend) {
@@ -5351,6 +5490,8 @@ export class GrindPolicy {
         const sd = this.areaDist(ambAt, moveTypeOf(b.s, u), x, y);
         base += sd === 0 ? 300 : -20 * Math.min(sd, 60);
       }
+      // 양평관 plan: the bait stands where one or two of the waiting guards reach it
+      if (this.ypBait && this.ypBait.slot === slot && this.ypBait.x === x && this.ypBait.y === y) base += 300;
       // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
@@ -5450,6 +5591,9 @@ export class GrindPolicy {
         if (!a) continue;
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
         let v = (farming || (fin && endHeld) || penT || this.bandFarming) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
+        // 양평관 plan: MP is kept for the fights (the flat-rate casts on a healthy party emptied the
+        // healers before r4 came)
+        if (this.yp && tc >= 21 && this.ypIdleCast(u, tc, x, y, a.target)) v -= 200;
         if (chg && a.target === vslot && tc <= 14) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
