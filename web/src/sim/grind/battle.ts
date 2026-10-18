@@ -8,7 +8,8 @@ import { battleNameLines } from '../../engine/battle/map';
 import type { BattleScene } from '../../native/battle/scene';
 import { shopVisit, type Purchase } from './shop';
 import { assetsFor, buildSandbox, type BattleSnapshot } from './sandbox';
-import { describeGain } from './events';
+import { describeGain, scriptGains } from './events';
+import type { Stage } from '../../formats/scenario';
 import { HuainanStrike } from './huainan';
 import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
 import { YeonjuEscape, isYeonjuAt } from './yeonju';
@@ -157,7 +158,7 @@ export interface CarryState {
 const dec = new TextDecoder('euc-kr');
 
 /** Applies carried levels and the formation picks to a cloned state. */
-export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams, bought?: Purchase[], shopping = true, learn?: Uint8Array) {
+export function prepareState(snap: BattleSnapshot, carry: CarryState | null, params: GrindParams, bought?: Purchase[], shopping = true, learn?: Uint8Array, stage?: Stage) {
   return (state: GameState, script: ScriptState, extras: { formation: number[] | undefined }) => {
     if (carry?.officers)
       carry.officers.forEach((c, i) => {
@@ -185,7 +186,10 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // joins at (29,7) by REINFORCE) are no picks: at FORMATION time the script had them in another
       // force (SET_FORCE #53, 14 ... FORMATION ... SET_FORCE #53, 0), so the player could not take them
       const own = script.units.flatMap((u, r) => (!recs.includes(r) && u.officer < 0x100 && !fi.fixed.includes(u.officer) ? [u.officer] : []));
-      const picks = pickFormation(state, [...fi.fixed, ...own], free, params.strong, params.band > 0, params.healers, learn);
+      // (gainPick: the named actors of the block's duels and persuasions go out first: 가맹관2's 엄안
+      // ends the battle in a duel with 하후덕, 정군산's 황충 with 하후연)
+      const actors = paramOr(params, 'gainPick') > 0.5 && stage ? gainActors(stage, script.block) : [];
+      const picks = pickFormation(state, [...fi.fixed, ...own], free, params.strong, params.band > 0, params.healers, learn, actors);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
@@ -194,6 +198,20 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
         });
     } else if (script.hexFlag & 1 && carry?.formation) extras.formation = [...carry.formation];
   };
+}
+
+/**
+ * Officers named as the actor of a duel or persuasion in the block (trigger 4: acting next to the
+ * other officer) that gives levels or a recruit, in record order (유비 goes out anyway): the sortie takes them first
+ * (GrindParams.gainPick), as a player would bring 엄안 to 가맹관2.
+ */
+export function gainActors(stage: Stage, block: number): number[] {
+  const out: number[] = [];
+  for (const g of scriptGains(stage, block)) {
+    if (g.trigger !== 4 || (g.kind !== 'duel' && g.kind !== 'persuade') || g.actor >= 0x100 || g.actor === 0 || g.automatic) continue;
+    if (!out.includes(g.actor)) out.push(g.actor);
+  }
+  return out;
 }
 
 /** Dev hooks run on each new battle scene after the policy is installed (scratch scripts: map dumps). */
@@ -272,7 +290,7 @@ export async function runGrindBattle(
       for (const h of sceneHooks) h(scene);
       before = scene.ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));
     },
-    prepareState(snap, carry, p, purchases, true, loadLearnTable(assetsFor(files).main)),
+    prepareState(snap, carry, p, purchases, true, loadLearnTable(assetsFor(files).main), assetsFor(files).chapter(snap.script.chapter).stages[snap.script.stage]),
   );
   const { scene, ctx } = run;
   // a battle that never ends (should not happen: the turn limit ends every battle) is cut off

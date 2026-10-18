@@ -495,6 +495,59 @@ export interface GrindParams {
    */
   sleeper: number;
   /**
+   * Band end, above 0.5: the band farm (bandFarm) starts the finish itself once the turns left just
+   * cover it (bandNeed), as the farm phase does; without it only the deadline (`finish`) or idle
+   * phases ended a band farm with more enemies about than the farm phase allows (가맹관1: six at
+   * the gate, the finish began 2 turns before the limit, every try lost on time).
+   */
+  bandEnd: number;
+  /**
+   * Cast idle: after this many player phases in a row with no exp from fighting (hits, damage
+   * tactics, scrolls at an enemy), the party walks up to the enemy as after two phases without any
+   * exp (idleTurns); the flat-rate casts on each other (heals, morale) no longer keep it waiting
+   * while the enemy sits in its positions (와구관2: 40 turns at the start, not one enemy fought).
+   * 0: off.
+   */
+  castIdle: number;
+  /**
+   * Finish need: with an enemy officer on the field whose defeat wins (the victory officer), the
+   * finish starts no later than this many times the estimated turns it needs (finishEstimate:
+   * walking up and killing it) before the deadline, on top of the plan's `finish` turns (가맹관1's
+   * 장노 sits 15 steps off behind five guards; `finish` 2 began the push at turn 29 of 30). 0: off.
+   */
+  finNeed: number;
+  /** Finish need: turns added to the estimate per enemy near the way to the victory officer (pathFoes). */
+  finPath: number;
+  /**
+   * Gain picks, above 0.5: the sortie takes the named actors of the block's duels and persuasions
+   * (trigger 4 records that give levels or a recruit) right after 유비 (가맹관2: 엄안 ends the battle
+   * in a duel with 하후덕 and was left at home; 정군산: 황충 and 하후연; 가맹관1: 장비 and 마초).
+   */
+  gainPick: number;
+  /**
+   * Ambushes (BattleKnowledge.ambushes), above 0.5: nobody walks into an area that brings an army
+   * in until it is time to spring it (updateAmbush: in shape with nothing else to fight, or when the
+   * turns run short); then the party braces round 유비 and one unit walks in.
+   */
+  ambush: number;
+  /** Ambushes: turns the fight with the ambush's army is given before the finish (when to spring it at the latest). */
+  ambTurns: number;
+  /**
+   * Duel keep: weight of keeping the actor of a duel still to come (one that gives levels: 장비 with
+   * 마초 at 가맹관1, 황충 with 하후연 at 정군산) out of a worst case that could take it off. 0: off.
+   */
+  duelKeep: number;
+  /**
+   * Finish charge, above 0.5: the finish goes for the victory officer (not the nearest enemies, the
+   * leader spared) as soon as the turns left come down to finNeed, not only in the last third.
+   */
+  finCharge: number;
+  /**
+   * Duel out, above 0.5: the actor of an ending duel takes it as soon as the battle turns on us
+   * (유비 below 60% troops, or the enemies on the field 3 to 2), not only in the finish.
+   */
+  duelOut: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -675,6 +728,24 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'fireRing', min: 0, max: 1, def: 0.6 },
   // sleepers: a scout walks into an area that sends the coming wave to stand still (부 2nd's mountain path)
   { key: 'sleeper', min: 0, max: 1, def: 0.6 },
+  // band end: the band farm hands over to the finish once its turns just remain (bandNeed)
+  { key: 'bandEnd', min: 0, max: 1, def: 0.6 },
+  // cast idle: phases without a fight (flat-rate casts only) after which the party walks up (0: off)
+  { key: 'castIdle', min: 0, max: 10, def: 3, int: true },
+  // finish need: the push at the victory officer starts by this many times its estimated turns
+  { key: 'finNeed', min: 0, max: 3, def: 1.5 },
+  { key: 'finPath', min: 0, max: 2, def: 0.5 },
+  // gain picks: the duel / persuasion actors go out
+  { key: 'gainPick', min: 0, max: 1, def: 0.6 },
+  // ambushes: keep out of an area that brings an army in until it is time; then brace and send one in
+  { key: 'ambush', min: 0, max: 1, def: 0.6 },
+  { key: 'ambTurns', min: 0, max: 12, def: 6, int: true },
+  // duel keep: the actor of a duel to come keeps out of a lethal worst case
+  { key: 'duelKeep', min: 0, max: 3, def: 1 },
+  // finish charge: the push at the victory officer starts with the finish that finNeed starts
+  { key: 'finCharge', min: 0, max: 1, def: 0.6 },
+  // duel out: the ending duel ends a battle that turns on us
+  { key: 'duelOut', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -782,6 +853,14 @@ export interface BattleKnowledge {
    * skipped (flag 158)). `until`: the turn whose event shuts it.
    */
   sleepers: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; set: number[]; clear: number[]; until: number; calms: number[] }[];
+  /**
+   * Ambushes: arrival areas (trigger 11 / 6, any of ours or one officer) whose record brings three
+   * or more officers onto the field (REINFORCE) without ending the battle (가맹관1 r5: one of ours
+   * in 14..17 x 1..17, the band in front of 장노, brings 마초 and five horsemen in behind the party
+   * at 7..9 x 15..19; the old bot walked in during its finish, strung out, and 유비 fell to them).
+   * `clear`: the flags its IF needs clear (it fires once).
+   */
+  ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[] }[];
   stage?: Stage;
   block?: number;
 }
@@ -872,9 +951,28 @@ export function scriptSleepers(stage: Stage, block: number): BattleKnowledge['sl
   return out;
 }
 
+/** Ambushes of a block (BattleKnowledge.ambushes). */
+export function scriptAmbushes(stage: Stage, block: number): BattleKnowledge['ambushes'] {
+  type Cmd = { name: string; officer?: number; clear?: number | number[]; set?: number[] };
+  const out: BattleKnowledge['ambushes'] = [];
+  for (const r of stage.blocks[block]?.records ?? []) {
+    if ((r.trigger !== 11 && r.trigger !== 6) || !(r.p1 === 0x400 || r.p1 < 0x100)) continue;
+    const cmds = recordCommands(stage, r.code) as unknown as Cmd[];
+    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'LEAVE_GROUP' || c.name === 'GOTO_BLOCK')) continue;
+    const officers = [...new Set(cmds.filter((c) => c.name === 'REINFORCE' && c.officer !== undefined).map((c) => c.officer!))];
+    if (officers.length < 3) continue;
+    const cond = cmds.find((c) => c.name === 'IF');
+    const clear = Array.isArray(cond?.clear) ? cond.clear : [];
+    const [x0, y0] = cellOf(r.p2);
+    const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
+    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), clear: [...clear], officers });
+  }
+  return out;
+}
+
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], captures: null, deaths: [], sleepers: [], stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], captures: null, deaths: [], sleepers: [], ambushes: [], stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -916,6 +1014,11 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'LEAVE_GROUP') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
   }
   k.sleepers = scriptSleepers(stage, script.block);
+  // (a sleeper area brings its wave in too, to stand still: the scout walks into it, no ban: 부 2nd
+  // r9; and an area that only brings a turn event's wave in early is no ambush either: it comes
+  // anyway, 부 2nd r8 with the turn-13 wave)
+  const timed = new Set(k.turns.flatMap((e) => (e.turn !== null ? e.reinforce : [])));
+  k.ambushes = scriptAmbushes(stage, script.block).filter((z) => !k.sleepers.some((x) => x.record === z.record) && !z.officers.every((o) => timed.has(o)));
   if (k.deaths.length) {
     const dead = new Set(k.deaths.map((d) => d.record));
     k.gains = k.gains.filter((g) => !dead.has(g.record));
@@ -952,7 +1055,7 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
  * Picks for a FORMATION: the officers already placed by the setup, 유비, then `strong` of the
  * highest-level officers (to keep battles winnable), then the lowest levels below 99.
  */
-export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false, healers = 0, learn?: Uint8Array): number[] {
+export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false, healers = 0, learn?: Uint8Array, actors: number[] = []): number[] {
   const faction = state.officers[0].dyn.flags & 0x1f;
   const pool = state.officers
     .map((o, i) => ({ i, lv: o.dyn.level, ok: (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction && i < 0x100 }))
@@ -962,6 +1065,8 @@ export function pickFormation(state: GameState, fixed: number[], free: number, s
     if (picks.length < free && !picks.includes(i)) picks.push(i);
   };
   if (!fixed.includes(0) && pool.some((o) => o.i === 0)) take(0);
+  // the actors of the block's duels / persuasions (GrindParams.gainPick)
+  for (const a of actors) if (pool.some((o) => o.i === a)) take(a);
   // 군악대 officers: their neighbours regain MP every turn (heals and support tactics keep flowing)
   if (band) for (const o of pool) if (state.officers[o.i].dyn.cls === 12) take(o.i);
   // healers (heal / morale tactics 21..35 learned at their level): troops stay up, and every heal
@@ -1093,6 +1198,9 @@ export class GrindPolicy {
   };
   private finishing = false;
   private idleTurns = 0;
+  /** Player phases in a row without exp from fighting (GrindParams.castIdle), and whether this one had some. */
+  private fightIdle = 0;
+  private fought = false;
   private threat: number[][] = [];
   /** Trace sink (one line per command). */
   log: ((line: string) => void) | null = null;
@@ -1197,6 +1305,17 @@ export class GrindPolicy {
   }
 
   private fired = new Set<number>();
+
+  /**
+   * Duel keep (GrindParams.duelKeep): officer -> record of an unfired duel of ours that gives levels
+   * (가맹관1's 장비 with 마초, 정군산's 황충 with 하후연, 가맹관2's 엄안 with 하후덕): kept out of a
+   * lethal worst case while the duel is to come (the old bot sent L26 장비 into the turn-3 attackers
+   * and he was gone before 마초 came for him).
+   */
+  private duelKept(off: number): boolean {
+    if (paramOr(this.p, 'duelKeep') <= 0 || this.know.guarded.has(off)) return false;
+    return this.know.gains.some((g) => g.kind === 'duel' && g.trigger === 4 && g.actor === off && g.levels.length > 0 && !this.fired.has(g.record));
+  }
 
   /** What a gain not yet had is worth now (0 when fired, automatic, or a way to win: the finish takes those). */
   private gainValue(g: ScriptGain): number {
@@ -1321,17 +1440,130 @@ export class GrindPolicy {
   private walkBan(): { sig: string; cells: Uint8Array | null } {
     const wt = this.wakeTrap();
     const cap = this.capBan();
-    if (!cap) return wt;
-    const key = wt.sig;
+    const amb = this.ambBan();
+    if (!cap && !amb) return wt;
+    const key = `${wt.sig}|${cap ? 1 : 0}|${amb ? amb.sig : ''}`;
     if (this.banMemo?.key === key) return this.banMemo.v;
-    let cells = cap;
-    if (wt.cells) {
-      cells = new Uint8Array(cap.length);
-      for (let i = 0; i < cap.length; i++) cells[i] = cap[i] | wt.cells[i];
-    }
-    const v = { sig: `${wt.sig}|cap`, cells };
+    const n = this.b.width * this.b.height;
+    const cells = new Uint8Array(n);
+    for (let i = 0; i < n; i++) cells[i] = (cap ? cap[i] : 0) | (wt.cells ? wt.cells[i] : 0) | (amb ? amb.cells[i] : 0);
+    const v = { sig: `${wt.sig}${cap ? '|cap' : ''}${amb ? `|${amb.sig}` : ''}`, cells };
     this.banMemo = { key, v };
     return v;
+  }
+
+  // ---- ambushes (GrindParams.ambush): an area whose arrival brings an army in
+
+  /** The ambush is to be sprung now (ambushOpen): its cells are open and the scout walks in. */
+  private ambGo = false;
+  /** Slot of the unit sent into the ambush area, NONE when none. */
+  private ambScout = NONE;
+  private ambMemo: { sig: string; cells: Uint8Array } | null = null;
+
+  /** The first ambush not sprung yet (none of its officers on the field, its IF flags clear), or null. */
+  private ambushOpen(): BattleKnowledge['ambushes'][number] | null {
+    if (paramOr(this.p, 'ambush') <= 0.5 || !this.know.ambushes?.length) return null;
+    const st = this.scene.ctx.vm.state;
+    const b = this.b;
+    for (const z of this.know.ambushes) {
+      if (z.clear.some((f) => getFlag(st, f))) continue;
+      const foes = z.officers.map((o) => b.slotOfOfficer(o)).filter((sl) => sl !== NONE && sl >= PLAYER_SLOTS);
+      if (foes.length < 3 || foes.some((sl) => this.scene.units[sl].status === Status.Field)) continue;
+      return z;
+    }
+    return null;
+  }
+
+  /** The open ambush's area while it is not to be sprung yet: no walk enters it. */
+  private ambBan(): { sig: string; cells: Uint8Array } | null {
+    if (this.ambGo) return null;
+    const z = this.ambushOpen();
+    if (!z) return null;
+    const sig = `amb${z.record}`;
+    if (this.ambMemo?.sig === sig) return this.ambMemo;
+    const b = this.b;
+    const cells = new Uint8Array(b.width * b.height);
+    for (let y = z.y0; y <= z.y1 && y < b.height; y++) for (let x = z.x0; x <= z.x1 && x < b.width; x++) cells[y * b.width + x] = 1;
+    this.ambMemo = { sig, cells };
+    return this.ambMemo;
+  }
+
+  /** Where the open ambush's officers come in (their records' cells). */
+  private ambSpawns(z: BattleKnowledge['ambushes'][number]): [number, number][] {
+    const b = this.b;
+    const at: [number, number][] = [];
+    for (const off of z.officers) {
+      const rec = this.scene.ctx.vm.state.units.find((d) => d.officer === off);
+      if (rec && rec.x < b.width && rec.y < b.height) at.push([rec.x, rec.y]);
+    }
+    return at;
+  }
+
+  /**
+   * Decides when to spring the open ambush (once per ambush): in the finish, when the turns left
+   * come down to what the finish needs plus ambTurns, or once a phase passed without a fight with
+   * the party in shape (유비 / the guarded above 60%, the troops share above half),
+   * each only while every enemy on the field waits where it stands (or in the plan's last `finish`
+   * turns whatever comes); then the unit of ours that gets there soonest walks in.
+   */
+  private updateAmbush() {
+    const z = this.ambushOpen();
+    if (!z) {
+      this.ambGo = false;
+      this.ambScout = NONE;
+      return;
+    }
+    const b = this.b;
+    const turn = b.info.turn + 1;
+    if (!this.ambGo) {
+      const left = this.deadline() - b.info.turn;
+      let fit = true, share = 0, n = 0;
+      for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+        if (!this.controllable(u)) continue;
+        const o = b.officerOf(u);
+        if (this.know.guarded.has(u.officer) && o.hp < maxHp(o) * 0.6) fit = false;
+        share += o.hp / Math.max(1, maxHp(o));
+        n++;
+      }
+      if (!n || share / n < 0.5) fit = false;
+      const late = left <= this.finNeed() + paramOr(this.p, 'ambTurns') + 1;
+      // (dry: every enemy on the field waits where it stands, nothing comes at us)
+      const still = this.scene.units.slice(PLAYER_SLOTS).every((e) => e.status !== Status.Field || e.officer === 0xffff || e.mode === AiMode.Wait || e.mode === AiMode.Hold);
+      const dry = this.fightIdle >= 1 && fit;
+      // (never while enemies are on their way: the attackers of 가맹관1's turn 3 first; at the very
+      // end, the finish goes in whatever comes)
+      const go = (still && (this.finishing || late || dry)) || left <= Math.max(2, this.p.finish);
+      // (while it waits on a still field the scout already walks up to the edge: the ban stops it there)
+      if (!go && !still) {
+        this.ambScout = NONE;
+        return;
+      }
+      if (!go) {
+        this.pickAmbScout(z);
+        return;
+      }
+      this.ambGo = true;
+      const at = this.ambSpawns(z);
+      this.log?.(`ambush: spring r${z.record} at turn ${turn} (${this.finishing ? 'finish' : late ? 'late' : 'dry'}), ${at.length} coming in at ${at.map((c) => c.join(',')).join(' ')}`);
+    }
+    this.pickAmbScout(z);
+  }
+
+  /** The unit of ours (in shape, not guarded, not a duel actor) that gets into the ambush area soonest; kept while it can act. */
+  private pickAmbScout(z: BattleKnowledge['ambushes'][number]) {
+    const b = this.b;
+    const cur = this.ambScout !== NONE ? this.scene.units[this.ambScout] : null;
+    if (cur && this.controllable(cur)) return;
+    let best = NONE, bt = 1e9;
+    for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) {
+      if (!this.controllable(u) || this.know.guarded.has(u.officer) || this.duelKept(u.officer)) continue;
+      if (z.actor !== 0x400 && u.officer !== z.actor) continue;
+      const o = b.officerOf(u);
+      if (o.hp < maxHp(o) * 0.6) continue;
+      const t = this.areaDist(z, moveTypeOf(b.s, u), u.x, u.y) / Math.max(1, movePoints(o, b.s.items));
+      if (t < bt) [bt, best] = [t, u.slot];
+    }
+    this.ambScout = best;
   }
 
   /** Walking cost (terrain move costs, round the banned cells) from (x, y) to `goal`, 0xffff when none. */
@@ -2306,6 +2538,7 @@ export class GrindPolicy {
       this.foeMaps.clear();
     }
     this.updateHold();
+    this.updateAmbush();
     this.updateBrace();
     this.updateScout();
     this.decideFinish();
@@ -2323,6 +2556,12 @@ export class GrindPolicy {
     // towards the enemy for good (태산: three units waited 12 turns out of reach of the last two)
     if (gained === 0 && b.info.turn >= 2) this.idleTurns++;
     else this.idleTurns = 0;
+    // phases in a row with no exp from fighting (castIdle): the flat-rate casts on each other keep
+    // idleTurns at 0 while the enemy sits in its positions
+    if (!this.inRollout) {
+      this.fightIdle = !this.fought && b.info.turn >= 2 && this.enemiesOnField() > 0 ? this.fightIdle + 1 : 0;
+      this.fought = false;
+    }
   }
 
   // ---- one pass of commands over the controllable units (the greedy phase, or a search candidate)
@@ -2473,6 +2712,8 @@ export class GrindPolicy {
         // a guarded officer gone loses the battle (the defeat event may not have run in the rollout)
         if (guarded && was.status === Status.Field) return -1e6;
         if (was.status !== Status.Field) continue;
+        // a duel actor gone before its duel (duelKeep)
+        if (this.duelKept(u.officer)) v -= 2000 * paramOr(this.p, 'duelKeep');
       }
       const w = u.officer < 0x100 ? this.weight(i) * (guarded ? 2 : 1) : 0.5;
       if (u.officer < 0x100) {
@@ -3163,7 +3404,9 @@ export class GrindPolicy {
     // nothing comes to us), so it starts once the turns left just cover that walk (farmNeed), not
     // `finish` turns before the end (무릉: 2 turns left for a 40-step walk, lost on time)
     // (and so does a walk to the cells in range of a walled-in victory officer: 부 2nd's castle)
-    const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells || this.victoryWalled() ? this.farmNeed() : 0) + stepTurns;
+    // (finNeed: so does any battle won on one enemy officer on the field: the plan's `finish` of 2
+    // turns left 가맹관1's party at the start with 장노 15 steps off behind his guards)
+    const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells || this.victoryWalled() ? this.farmNeed() : this.finNeed()) + stepTurns;
     // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
@@ -3232,10 +3475,13 @@ export class GrindPolicy {
     if (this.penning() && allNear && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.farmNeed()) return;
     // ... and so does the band farm (the casters earn every turn on the bands' MP)
     if (this.bandFarming && allNear && needy && this.stepsLeft() === 0 && !leaderHurt && !losses && !deadlineHit && left > this.bandNeed()) return;
-    if (deadlineHit || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
+    // the band farm's own end: its turns run out (the farm phase's end above needs farmOn: 가맹관1's
+    // six enemies at the gate kept it off, and the band held the finish until 2 turns were left)
+    const bandOver = this.bandFarming && paramOr(this.p, 'bandEnd') > 0.5 && left <= this.bandNeed();
+    if (deadlineHit || bandOver || !needy || this.idleTurns >= idleN || leaderHurt || losses) {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
-      this.stats.finishReason = deadlineHit ? 'deadline' : !needy ? 'done' : this.idleTurns >= idleN ? 'idle' : leaderHurt ? 'leader' : 'losses';
+      this.stats.finishReason = deadlineHit ? 'deadline' : bandOver ? 'band' : !needy ? 'done' : this.idleTurns >= idleN ? 'idle' : leaderHurt ? 'leader' : 'losses';
       this.log?.(`finish: ${this.stats.finishReason} at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
     }
@@ -3530,6 +3776,69 @@ export class GrindPolicy {
     return this.wakeActive || this.quiet;
   }
 
+  /**
+   * Turns the finish needs before the deadline when an enemy officer on the field wins the battle
+   * (GrindParams.finNeed times finishEstimate, rounded up), 0 when off or when nothing such stands.
+   */
+  private finNeed(): number {
+    const f = paramOr(this.p, 'finNeed');
+    if (f <= 0) return 0;
+    const v = this.victoryNow();
+    const vs = v !== null ? this.b.slotOfOfficer(v) : NONE;
+    if (vs === NONE || vs < PLAYER_SLOTS || this.scene.units[vs].status !== Status.Field) return 0;
+    return Math.ceil((this.finishEstimate() + paramOr(this.p, 'finPath') * this.pathFoes(this.scene.units[vs])) * f);
+  }
+
+  /**
+   * Enemies the walk to `target` meets (finPath): the way of our unit nearest to it (walking
+   * distance, round the banned cells), and every other enemy on the field that waits where it
+   * stands (대기 / 부동; not kept by the script) within its move + 2 of a cell of it (부동: 2), as
+   * wakeNeed counts them. 가맹관2: twelve between
+   * the party and 하후덕 at the far end, where finishEstimate saw a 6-turn walk.
+   */
+  private pathFoes(target: Unit): number {
+    const b = this.b;
+    const W = b.width;
+    const units = this.scene.units;
+    const goal: [number, number] = [target.x, target.y];
+    let actor: Unit | null = null, bd = 0xffff;
+    for (const u of units.slice(0, PLAYER_SLOTS)) {
+      if (!this.controllable(u)) continue;
+      const d = this.pathDist(goal, moveTypeOf(b.s, u), u.x, u.y);
+      if (d < bd) [bd, actor] = [d, u];
+    }
+    if (!actor) return 0;
+    const sig = this.walkBan().sig;
+    const m = this.distMaps.get(`${goal[0]},${goal[1]},${moveTypeOf(b.s, actor)}${sig ? `|${sig}` : ''}`);
+    let c = actor.y * W + actor.x;
+    if (!m || m[c] === 0xffff) return 0;
+    const path: number[] = [c];
+    while (m[c] > 1 && path.length < 400) {
+      const cx = c % W, cy = (c - cx) / W;
+      let nxt = -1;
+      for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= b.height) continue;
+        if (m[ny * W + nx] === m[c] - 1) {
+          nxt = ny * W + nx;
+          break;
+        }
+      }
+      if (nxt < 0) break;
+      c = nxt;
+      path.push(c);
+    }
+    let n = 0;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff || E === target || this.know.protect.has(E.officer)) continue;
+      // (only the ones that wait where they stand: the others come to us and are fought meanwhile)
+      if (E.mode !== AiMode.Wait && E.mode !== AiMode.Hold) continue;
+      const rad = (E.mode === AiMode.Hold ? 0 : movePoints(b.officerOf(E), b.s.items)) + 2;
+      if (path.some((k) => Math.abs((k % W) - E.x) + Math.abs(Math.trunc(k / W) - E.y) <= rad)) n++;
+    }
+    return n;
+  }
+
   /** Turns the finish needs from here, doubled for safety half again, plus farmEnd. */
   /** Turns the finish needs while the band farm runs (to the last turns: bfEnd spare). */
   private bandNeed(): number {
@@ -3707,6 +4016,10 @@ export class GrindPolicy {
     if (this.lateThird() || this.enemiesOnField() <= 3) return true;
     // the victory officer walled in (fireRing): the shooters set out once the turns just cover their way
     if (this.victoryWalled() && this.deadline() - this.b.info.turn <= this.farmNeed()) return true;
+    // ... and so does any finish once the turns left just cover the push at the victory officer
+    // (finNeed with finCharge: 가맹관2's rout of the nearest enemies until the last third left the
+    // party 3 cells short of 하후덕 at the time limit)
+    if (paramOr(this.p, 'finCharge') > 0.5 && this.deadline() - this.b.info.turn <= this.finNeed()) return true;
     const stepTurns = this.stepsLeft() * 12;
     return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
   }
@@ -4407,8 +4720,34 @@ export class GrindPolicy {
     const mine = this.wadj().filter((a) => a.actor === u.officer && this.know.gains.some((g) => g.trigger === 4 && g.actor === u.officer && g.other === a.other && g.levels.length && !this.fired.has(g.record)));
     if (!mine.length) return false;
     if ((this.finishing && !this.endHeld()) || this.deadline() - this.b.info.turn <= 2) return true;
+    // (duelOut: the battle turning on us, 유비 hurt or the enemies 3 to 2: 정군산's whole army
+    // came at turn 8 and 유비 fell at turn 27 with 황충 three cells from 하후연)
+    if (paramOr(this.p, 'duelOut') > 0.5 && this.goingBad()) return true;
     if (hp < max * 0.4 && (this.enemiesOnField() <= 1 || this.lateThird()) && this.danger(u, u.x, u.y).worst >= hp) return true;
     return false;
+  }
+
+  /** Where the partner of u's ending duel (winAdj) stands, if on the field. */
+  private duelPartnerAt(u: Unit): [number, number] | null {
+    for (const a of this.wadj()) {
+      if (a.actor !== u.officer) continue;
+      const s2 = this.b.slotOfOfficer(a.other);
+      if (s2 === NONE || this.scene.units[s2].status !== Status.Field) continue;
+      return [this.scene.units[s2].x, this.scene.units[s2].y];
+    }
+    return null;
+  }
+
+  /** 유비 (or a guarded officer) below 60% troops, or the enemies on the field at least 1.5 times ours. */
+  private goingBad(): boolean {
+    const b = this.b;
+    for (const off of this.know.guarded) {
+      const sl = b.slotOfOfficer(off);
+      if (sl === NONE || sl >= PLAYER_SLOTS || this.scene.units[sl].status !== Status.Field) continue;
+      const o = b.officerOf(this.scene.units[sl]);
+      if (o.hp < maxHp(o) * 0.6) return true;
+    }
+    return this.enemiesOnField() >= 1.5 * Math.max(1, this.oursOnField());
   }
 
   /** u is the actor of an unfired duel / persuasion (ending or not) with enemy officer `off`: acting next to it fires the event, killing it would waste it. */
@@ -4630,6 +4969,8 @@ export class GrindPolicy {
     // (not on the bonus walk-in itself: it waits for its way to open, and is given up when it stalls)
     const alone = guarded && fin && this.stats.finishReason !== 'escape' && this.leaderAlone(u);
     if (alone) guardEff = Math.max(guardEff, 1);
+    const kept = this.duelKept(u.officer);
+    const keptEnds = kept && this.wadj().some((a) => a.actor === u.officer);
     const deathCost = (d: { worst: number; expected: number; n?: number }, p: number) => {
       const r = d.expected / hp;
       const lethal = Math.min(1.5, Math.max(0, r - 0.6));
@@ -4637,6 +4978,11 @@ export class GrindPolicy {
       if (guarded) {
         const rw = d.worst / hp;
         c += 10000 * Math.min(1, Math.max(0, rw - guardEff) * 3) + (alone ? 0 : 100 * Math.min(rw, 1.5) ** 2 + this.p.safe * 60 * (d.n ?? 0));
+      } else if (kept) {
+        // a duel actor (duelKeep): no worst case that takes it off before its duel
+        const rw = d.worst / hp;
+        // (an ending duel's actor is the way to win: four times the weight, 정군산's 황충)
+        c += paramOr(this.p, 'duelKeep') * (keptEnds ? 4 : 1) * (1000 * Math.min(1, Math.max(0, rw - 0.9) * 3) + 50 * Math.min(rw, 1.5) ** 2);
       }
       return p * c;
     };
@@ -4683,6 +5029,7 @@ export class GrindPolicy {
     // an ending duel / persuasion of this unit's own is taken once nothing is left to grind (or the
     // actor is about to fall): the battle ends on a level instead of a kill (호로관: 장비-여포)
     const dn = this.duelNow(u, hp, max);
+    const dnAt = dn && paramOr(this.p, 'duelOut') > 0.5 ? this.duelPartnerAt(u) : null;
     // badly hurt: walk to a healing cell instead of waiting at the front (not in the small early
     // battles: three units, one gone to heal, left the others to 여포 at 호로관)
     // (any party size while regrouping on a quiet field: 태산, 유비 sat at 164 troops for 15 turns)
@@ -4716,6 +5063,8 @@ export class GrindPolicy {
     const lootAt = !fin && !capAt ? this.lootGoal(u) : null;
     // a sleeper area (부 2nd's eastern mountain path): the scout walks into it while it is open
     const sleepAt = this.scout === slot ? this.sleeperOpen() : null;
+    // ... and the ambush scout into the area once it is to be sprung
+    const ambAt = this.ambScout === slot ? this.ambushOpen() : null;
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
@@ -4811,7 +5160,10 @@ export class GrindPolicy {
         // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
         // walking and sat out the whole push in the north-east)
         // (the wake phase walks up too: flat-rate casts kept idleTurns at 0 and the party sat at the start)
-        const apW = fin && goal ? (leadWalk ? 12 : 3) : this.idleTurns >= 2 || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
+        // (and so do phases without a fight (castIdle): 와구관2's party healed each other for 40 turns
+        // while the 14 enemies waited in their positions)
+        const ci = paramOr(this.p, 'castIdle');
+        const apW = fin && goal ? (leadWalk ? 12 : 3) : this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
         else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeTrap().cells) ? 200 : 40);
@@ -4847,9 +5199,15 @@ export class GrindPolicy {
         const sd = this.areaDist(sleepAt, moveTypeOf(b.s, u), x, y);
         base += sd === 0 ? 300 : -20 * Math.min(sd, 60);
       }
+      if (ambAt) {
+        const sd = this.areaDist(ambAt, moveTypeOf(b.s, u), x, y);
+        base += sd === 0 ? 300 : -20 * Math.min(sd, 60);
+      }
       // escort exit: the unit holding it stands on the cell (the 백성's arrival there ends the battle)
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
+      // (duelOut, out of the finish: an ending duel taken now walks up to its partner when it is out of reach this phase)
+      else if (dnAt && !fin) base -= 3 * Math.max(0, this.pathDist(dnAt, moveTypeOf(b.s, u), x, y) - 1);
       // leave the cells next to an ending duel / persuasion target to its actor once it is close
       if (chg && this.blocksActor(u, x, y)) base -= 15;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
@@ -5353,6 +5711,8 @@ export class GrindPolicy {
     u.flags |= UnitFlag.Acted;
     const gained = o.level * 100 + o.exp - before;
     this.unitIdle.set(a.slot, gained > 0 ? 0 : (this.unitIdle.get(a.slot) ?? 0) + 1);
+    // exp from fighting (a hit, a damage tactic, a scroll at an enemy), not a flat-rate cast (castIdle)
+    if (gained > 0 && !this.inRollout && (a.kind === 'attack' || (kind === 'item' && a.target !== NONE && a.target >= PLAYER_SLOTS) || (kind === 'tactic' && a.tactic < 15))) this.fought = true;
     if (this.log && gained > 0) this.log(`  +${gained} exp`);
     if (a.kind === 'attack' || a.kind === 'item') {
       if (a.lethal) st.kills += Math.max(0, gained);
