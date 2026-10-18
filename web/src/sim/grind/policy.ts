@@ -764,7 +764,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   // duel reach: the ending duel taken now goes first, walks up boldly, and the others leave its cells free
   { key: 'duelReach', min: 0, max: 1, def: 0.6 },
   // wake ambushes: an area that turns 3+ waiting officers on us is kept out of until it is time (ambush)
-  { key: 'ambWake', min: 0, max: 1, def: 0.4 },
+  // (on: checked on 거록, 계교, 북해, 박망파, 장판파 and 장사, the same or more exp, 장사 +40%)
+  { key: 'ambWake', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */

@@ -107,6 +107,8 @@ export class Battle {
   readonly learn: Uint8Array;
   /** Map-change log of MAP_CHIP (DS:0xe5aa); kept so a reload can replay it. */
   readonly chipLog: { x: number; y: number; kind: number; terrain: number }[] = [];
+  /** The map as the first setup found it: a retry (총퇴각) reloads the battle (GAMEFLOW.md, result 1). */
+  private atStart: { chips: Uint8Array; terrain: Uint8Array; chipLog: number } | null = null;
 
   constructor(
     readonly state: GameState,
@@ -273,6 +275,17 @@ export class Battle {
     this.info.weather = 1;
     this.s.weather = 1;
     for (let i = 0; i < UNIT_SLOTS; i++) this.clearSlot(i);
+    // a retry (총퇴각, result 1) restores the pre-battle snapshot and loads the battle again: the map
+    // segment comes back as it was (map changes undone) with an empty unit map (+0x12c0). Left
+    // stale, 8422's search found every record's cell taken and put the units off it (양평관: 조조 and
+    // four more behind the castle wall on every second try)
+    if (!this.atStart) this.atStart = { chips: this.map.chips.slice(), terrain: this.map.terrain.slice(), chipLog: this.chipLog.length };
+    else {
+      this.map.chips.set(this.atStart.chips);
+      this.map.terrain.set(this.atStart.terrain);
+      this.chipLog.length = this.atStart.chipLog;
+    }
+    this.s.unitAt.fill(NONE);
     this.info.turnLimit = sc.battleB;
     let ps = 0;
     let es = PLAYER_SLOTS;

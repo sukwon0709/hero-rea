@@ -585,13 +585,13 @@ describe('grind: 가맹관 params', () => {
 });
 
 describe('grind: 정군산 / 양평관 params', () => {
-  it('duelReach (on) and ambWake (off: the wake ambushes of earlier battles keep the old play) are appended last, learnable within bounds; plans made before them read the defaults', async () => {
+  it('duelReach and ambWake (on) are appended last, learnable within bounds; plans made before them read the defaults', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['duelReach', 'ambWake'] as const;
     expect(PARAM_SPECS.slice(-keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(d.duelReach).toBeGreaterThan(0.5);
-    expect(d.ambWake).toBeLessThanOrEqual(0.5);
+    expect(d.ambWake).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
     for (const k of keys) {
@@ -690,5 +690,28 @@ describe.skipIf(!hasGame)('grind: look-ahead search in the sandbox', () => {
     expect(on.won).toBe(true);
     expect(on.search!.phases).toBeGreaterThan(0);
     expect(on.turns).toBeLessThanOrEqual(on.turnLimit);
+  }, 300_000);
+});
+
+describe.skipIf(!hasGame)('grind: 총퇴각 retry', () => {
+  it('a retried battle starts with every unit on its own cell again (the unit map is not left stale)', async () => {
+    const { scenarioSnapshot } = await import('../src/sim/grind/devsnap');
+    const { runGrindBattle, sceneHooks } = await import('../src/sim/grind/battle');
+    const { defaultParams } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const snap = await scenarioSnapshot(files, 0, 0, 12345);
+    const starts: string[] = [];
+    const hook = (scene: { units: { officer: number; x: number; y: number; status: number }[] }) => {
+      starts.push(scene.units.filter((u) => u.officer !== 0xffff && u.status === 2).map((u) => `${u.officer}@${u.x},${u.y}`).join(' '));
+    };
+    sceneHooks.push(hook as never);
+    try {
+      await runGrindBattle(files, snap, { ...defaultParams(), rerolls: 3, search: 0 });
+    } finally {
+      sceneHooks.splice(sceneHooks.indexOf(hook as never), 1);
+    }
+    // the first try and the three retries (8422 found every record's cell taken on every second one)
+    expect(starts.length).toBe(4);
+    expect(new Set(starts).size).toBe(1);
   }, 300_000);
 });
