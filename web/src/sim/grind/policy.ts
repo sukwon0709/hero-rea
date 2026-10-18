@@ -548,6 +548,21 @@ export interface GrindParams {
    */
   duelOut: number;
   /**
+   * Duel reach, above 0.5: an ending duel taken now (duelNow) is driven home: its actor acts first
+   * when a cell next to its partner is in reach, walks up to it out of reach without the duelKeep
+   * margin (the duel ends the battle; waiting for a safe way lost 정군산 with 황충 five cells from
+   * 하후연 for five turns), and the others keep off the cells next to the partner (유봉 took the one
+   * free cell next to 하후연 at turn 22 and 황충 had none left).
+   */
+  duelReach: number;
+  /**
+   * Wake ambushes, above 0.5: an arrival area whose record (once, behind an IF) turns three or more
+   * officers already on the field on us (SET_AI to attack) is an ambush too (GrindParams.ambush):
+   * 양평관 r4, one of ours in 20..25 x 6..15, sends 장합, 조창, 방덕 and six more at us; the old
+   * bot walked in with 유비 ahead of the party, the rear was cut off and 12 of 14 fell by turn 24.
+   */
+  ambWake: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -746,6 +761,10 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'finCharge', min: 0, max: 1, def: 0.6 },
   // duel out: the ending duel ends a battle that turns on us
   { key: 'duelOut', min: 0, max: 1, def: 0.6 },
+  // duel reach: the ending duel taken now goes first, walks up boldly, and the others leave its cells free
+  { key: 'duelReach', min: 0, max: 1, def: 0.6 },
+  // wake ambushes: an area that turns 3+ waiting officers on us is kept out of until it is time (ambush)
+  { key: 'ambWake', min: 0, max: 1, def: 0.4 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -860,7 +879,7 @@ export interface BattleKnowledge {
    * at 7..9 x 15..19; the old bot walked in during its finish, strung out, and 유비 fell to them).
    * `clear`: the flags its IF needs clear (it fires once).
    */
-  ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[] }[];
+  ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[]; wake?: boolean }[];
   stage?: Stage;
   block?: number;
 }
@@ -953,19 +972,26 @@ export function scriptSleepers(stage: Stage, block: number): BattleKnowledge['sl
 
 /** Ambushes of a block (BattleKnowledge.ambushes). */
 export function scriptAmbushes(stage: Stage, block: number): BattleKnowledge['ambushes'] {
-  type Cmd = { name: string; officer?: number; clear?: number | number[]; set?: number[] };
+  type Cmd = { name: string; officer?: number; algo?: number; clear?: number | number[]; set?: number[] };
   const out: BattleKnowledge['ambushes'] = [];
   for (const r of stage.blocks[block]?.records ?? []) {
     if ((r.trigger !== 11 && r.trigger !== 6) || !(r.p1 === 0x400 || r.p1 < 0x100)) continue;
     const cmds = recordCommands(stage, r.code) as unknown as Cmd[];
     if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'LEAVE_GROUP' || c.name === 'GOTO_BLOCK')) continue;
-    const officers = [...new Set(cmds.filter((c) => c.name === 'REINFORCE' && c.officer !== undefined).map((c) => c.officer!))];
-    if (officers.length < 3) continue;
+    let officers = [...new Set(cmds.filter((c) => c.name === 'REINFORCE' && c.officer !== undefined).map((c) => c.officer!))];
     const cond = cmds.find((c) => c.name === 'IF');
     const clear = Array.isArray(cond?.clear) ? cond.clear : [];
+    // (a wake ambush: officers on the field turned on us, SET_AI order 1 attacks / 3 heads for a unit;
+    // once only, behind the IF's flags)
+    let wake = false;
+    if (officers.length < 3 && clear.length) {
+      officers = [...new Set(cmds.filter((c) => c.name === 'SET_AI' && (c.algo === 1 || c.algo === 3) && c.officer !== undefined).map((c) => c.officer!))];
+      wake = true;
+    }
+    if (officers.length < 3) continue;
     const [x0, y0] = cellOf(r.p2);
     const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
-    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), clear: [...clear], officers });
+    out.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), clear: [...clear], officers, ...(wake ? { wake } : {}) });
   }
   return out;
 }
@@ -1456,6 +1482,8 @@ export class GrindPolicy {
 
   /** The ambush is to be sprung now (ambushOpen): its cells are open and the scout walks in. */
   private ambGo = false;
+  /** The record of the ambush ambGo was set for. */
+  private ambGoRec = -1;
   /** Slot of the unit sent into the ambush area, NONE when none. */
   private ambScout = NONE;
   private ambMemo: { sig: string; cells: Uint8Array } | null = null;
@@ -1468,6 +1496,12 @@ export class GrindPolicy {
     for (const z of this.know.ambushes) {
       if (z.clear.some((f) => getFlag(st, f))) continue;
       const foes = z.officers.map((o) => b.slotOfOfficer(o)).filter((sl) => sl !== NONE && sl >= PLAYER_SLOTS);
+      if (z.wake) {
+        // (a wake ambush: its officers wait on the field; open while three of them still wait there)
+        if (paramOr(this.p, 'ambWake') <= 0.5) continue;
+        if (foes.filter((sl) => this.scene.units[sl].status === Status.Field && (this.scene.units[sl].mode === AiMode.Wait || this.scene.units[sl].mode === AiMode.Hold)).length < 3) continue;
+        return z;
+      }
       if (foes.length < 3 || foes.some((sl) => this.scene.units[sl].status === Status.Field)) continue;
       return z;
     }
@@ -1513,6 +1547,12 @@ export class GrindPolicy {
       this.ambScout = NONE;
       return;
     }
+    // (a new ambush once the one sprung is spent: 양평관's r5 by 조조's camp after r4 in the middle;
+    // the old flag left it sprung at once, its area open to every walk)
+    if (this.ambGo && this.ambGoRec !== z.record) {
+      this.ambGo = false;
+      this.ambScout = NONE;
+    }
     const b = this.b;
     const turn = b.info.turn + 1;
     if (!this.ambGo) {
@@ -1543,6 +1583,7 @@ export class GrindPolicy {
         return;
       }
       this.ambGo = true;
+      this.ambGoRec = z.record;
       const at = this.ambSpawns(z);
       this.log?.(`ambush: spring r${z.record} at turn ${turn} (${this.finishing ? 'finish' : late ? 'late' : 'dry'}), ${at.length} coming in at ${at.map((c) => c.join(',')).join(' ')}`);
     }
@@ -2592,7 +2633,8 @@ export class GrindPolicy {
             this.weight(y.slot) - this.weight(x.slot) ||
             x.slot - y.slot,
         );
-        const u = order[0];
+        // (duelReach: the actor of an ending duel taken now goes first when its partner is in reach)
+        const u = (paramOr(this.p, 'duelReach') > 0.5 ? order.find((v) => this.duelInReach(v)) : undefined) ?? order[0];
         if (!u) break;
         done.add(u.slot);
         // the enemies' reach as it is now (earlier units moved or fell), with this unit lifted off
@@ -4722,7 +4764,10 @@ export class GrindPolicy {
     if ((this.finishing && !this.endHeld()) || this.deadline() - this.b.info.turn <= 2) return true;
     // (duelOut: the battle turning on us, 유비 hurt or the enemies 3 to 2: 정군산's whole army
     // came at turn 8 and 유비 fell at turn 27 with 황충 three cells from 하후연)
-    if (paramOr(this.p, 'duelOut') > 0.5 && this.goingBad()) return true;
+    // (duelReach: a partner that stays where it stands (부동 / 대기) only once it is near, two moves
+    // at most: 20 enemies to our 10 at 가맹관2's start sent 엄안 at the far 하후덕, holding by his
+    // castle, on turn 1, alone, and he fell on turn 8; 정군산's 하후연 comes to us and is met halfway)
+    if (paramOr(this.p, 'duelOut') > 0.5 && this.goingBad() && (paramOr(this.p, 'duelReach') <= 0.5 || this.partnerComing(u) || this.partnerNear(u))) return true;
     if (hp < max * 0.4 && (this.enemiesOnField() <= 1 || this.lateThird()) && this.danger(u, u.x, u.y).worst >= hp) return true;
     return false;
   }
@@ -4748,6 +4793,95 @@ export class GrindPolicy {
       if (o.hp < maxHp(o) * 0.6) return true;
     }
     return this.enemiesOnField() >= 1.5 * Math.max(1, this.oursOnField());
+  }
+
+  /** duelNow for unit u at its own troops. */
+  private duelNowOf(u: Unit): boolean {
+    const o = this.b.officerOf(u);
+    return this.duelNow(u, o.hp, maxHp(o));
+  }
+
+  /** u takes its ending duel now (duelNow) and its partner stands within two of its moves (walking distance). */
+  private duelNear(u: Unit): boolean {
+    return this.wadj().some((a) => a.actor === u.officer) && this.partnerNear(u) && this.duelNowOf(u);
+  }
+
+  /** The partner of u's ending duel is on the field and on the move (not 부동 / 대기). */
+  private partnerComing(u: Unit): boolean {
+    for (const a of this.wadj()) {
+      if (a.actor !== u.officer) continue;
+      const s2 = this.b.slotOfOfficer(a.other);
+      if (s2 === NONE || this.scene.units[s2].status !== Status.Field) continue;
+      const m = this.scene.units[s2].mode;
+      return m !== AiMode.Hold && m !== AiMode.Wait;
+    }
+    return false;
+  }
+
+  /** The partner of u's ending duel stands within two of u's moves (walking distance). */
+  private partnerNear(u: Unit): boolean {
+    const at = this.duelPartnerAt(u);
+    if (!at) return false;
+    return this.pathDist(at, moveTypeOf(this.b.s, u), u.x, u.y) <= 2 * movePoints(this.b.officerOf(u), this.b.s.items) + 1;
+  }
+
+  /** u takes its ending duel now (duelNow) and can reach a free cell next to its partner this phase (GrindParams.duelReach). */
+  private duelInReach(u: Unit): boolean {
+    if (!this.wadj().some((a) => a.actor === u.officer) || !this.duelNowOf(u)) return false;
+    const ban = this.walkBan();
+    for (const [x, y] of this.reachable(u)) {
+      if (ban.cells && ban.cells[y * this.b.width + x]) continue;
+      if (this.winAdjacent(u, x, y)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * (x, y) is next to the partner of another unit's ending duel taken now (duelNow, GrindParams.duelReach)
+   * whose actor stands within its move + 1 of the partner and not next to it yet: left free for it.
+   */
+  private blocksDuel(u: Unit, x: number, y: number): boolean {
+    for (const a of this.wadj()) {
+      if (a.actor === u.officer || a.actor === 0x400) continue;
+      const s = this.b.slotOfOfficer(a.other);
+      const as = this.b.slotOfOfficer(a.actor);
+      if (s === NONE || as === NONE || as >= PLAYER_SLOTS) continue;
+      const T = this.scene.units[s], A = this.scene.units[as];
+      if (T.status !== Status.Field || A.status !== Status.Field || !this.controllable(A) || A.flags & UnitFlag.Acted) continue;
+      if (Math.abs(T.x - x) + Math.abs(T.y - y) !== 1) continue;
+      const da = Math.abs(A.x - T.x) + Math.abs(A.y - T.y);
+      if (da <= 1 || da > movePoints(this.b.officerOf(A), this.b.s.items) + 1) continue;
+      if (this.duelNowOf(A)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Enemies standing next to the partner of another unit's ending duel taken now (duelNow), whose
+   * actor has not acted and stands within its move + 2 of the partner but cannot reach a cell next
+   * to it (GrindParams.duelReach): 하후연 at 정군산 walks in the middle of his army, every cell next
+   * to him taken; a kill there opens one for 황충.
+   */
+  private duelOpeners(u: Unit): Set<number> | null {
+    let out: Set<number> | null = null;
+    for (const a of this.wadj()) {
+      if (a.actor === u.officer || a.actor === 0x400) continue;
+      const s = this.b.slotOfOfficer(a.other);
+      const as = this.b.slotOfOfficer(a.actor);
+      if (s === NONE || as === NONE || as >= PLAYER_SLOTS) continue;
+      const T = this.scene.units[s], A = this.scene.units[as];
+      if (T.status !== Status.Field || A.status !== Status.Field || !this.controllable(A) || A.flags & UnitFlag.Acted) continue;
+      const da = Math.abs(A.x - T.x) + Math.abs(A.y - T.y);
+      if (da <= 1 || da > movePoints(this.b.officerOf(A), this.b.s.items) + 2) continue;
+      if (!this.duelNowOf(A) || this.duelInReach(A)) continue;
+      for (const [nx, ny] of [[T.x, T.y - 1], [T.x + 1, T.y], [T.x, T.y + 1], [T.x - 1, T.y]]) {
+        if (nx < 0 || ny < 0 || nx >= this.b.width || ny >= this.b.height) continue;
+        const v = unitAt(this.b.s, nx, ny);
+        if (v === NONE || v < PLAYER_SLOTS || v === s) continue;
+        (out ??= new Set()).add(v);
+      }
+    }
+    return out;
   }
 
   /** u is the actor of an unfired duel / persuasion (ending or not) with enemy officer `off`: acting next to it fires the event, killing it would waste it. */
@@ -4945,7 +5079,14 @@ export class GrindPolicy {
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
     // the search asks for the best action of each kind too (alternatives for its candidates)
     const alts = this.altK > 0 ? new Map<string, Action>() : null;
+    // (duelReach: an enemy next to the partner of another's ending duel taken now: a kill opens the cell for its actor)
+    const openers = paramOr(this.p, 'duelReach') > 0.5 ? this.duelOpeners(u) : null;
     const offer = (a: Action) => {
+      if (openers && a.target !== NONE && openers.has(a.target)) {
+        const D = this.scene.units[a.target];
+        const od = b.officerOf(D);
+        a = { ...a, value: a.value + (a.lethal ? 300 : 0) + (a.kind !== 'wait' ? 60 * (1 - od.hp / Math.max(1, maxHp(od))) : 0) };
+      }
       if (a.value > best.value) best = a;
       if (alts) {
         const key = actionKey(a);
@@ -4969,7 +5110,13 @@ export class GrindPolicy {
     // (not on the bonus walk-in itself: it waits for its way to open, and is given up when it stalls)
     const alone = guarded && fin && this.stats.finishReason !== 'escape' && this.leaderAlone(u);
     if (alone) guardEff = Math.max(guardEff, 1);
-    const kept = this.duelKept(u.officer);
+    // (duelReach: the actor of an ending duel taken now walks up to it without the duelKeep margin)
+    // (only once the partner is near, two moves at most, and on the move: 황충 walking alone at
+    // 하후연's army from across the map fell on the way, and 엄안 shooting at 하후덕, who holds by
+    // his castle, from a cell his guards reach fell to them with two turns to spare)
+    const reach = paramOr(this.p, 'duelReach') > 0.5;
+    const near = reach && this.duelNear(u);
+    const kept = this.duelKept(u.officer) && !(near && this.partnerComing(u));
     const keptEnds = kept && this.wadj().some((a) => a.actor === u.officer);
     const deathCost = (d: { worst: number; expected: number; n?: number }, p: number) => {
       const r = d.expected / hp;
@@ -5207,7 +5354,9 @@ export class GrindPolicy {
       if (pk) base += pk[0] === x && pk[1] === y ? 300 : -20 * Math.min(this.pathDist(pk, moveTypeOf(b.s, u), x, y), 60);
       if ((chg || dn) && this.winAdjacent(u, x, y)) base += 400;
       // (duelOut, out of the finish: an ending duel taken now walks up to its partner when it is out of reach this phase)
-      else if (dnAt && !fin) base -= 3 * Math.max(0, this.pathDist(dnAt, moveTypeOf(b.s, u), x, y) - 1);
+      else if (dnAt && (!fin || reach)) base -= (reach ? 8 : 3) * Math.max(0, this.pathDist(dnAt, moveTypeOf(b.s, u), x, y) - 1);
+      // (duelReach: the cells next to the partner of another's ending duel taken now are its actor's)
+      if (reach && this.blocksDuel(u, x, y)) base -= 300;
       // leave the cells next to an ending duel / persuasion target to its actor once it is close
       if (chg && this.blocksActor(u, x, y)) base -= 15;
       // a treasure cell not yet stepped on this battle (its event gives an item once)
