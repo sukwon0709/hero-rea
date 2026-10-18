@@ -571,6 +571,25 @@ export interface GrindParams {
    */
   ypPlan: number;
   /**
+   * Farm before the end, above 0.5: once the finish runs, the blow that ends the battle (the victory
+   * officer's defeat, the ending duel or persuasion, the win cell) waits while enemies whose defeat
+   * ends nothing are left to farm and the turns left still cover the ending (finishEstimate) with a
+   * turn to spare (endHold's hold, but only in the finish and only while something is left to farm).
+   * Released when the battle turns on us (goingBad), the leader is hurt, or two finish phases in a
+   * row bring no fighting exp (what is left cannot be got at). 장사: the finish began with 10 turns
+   * left and 관우's duel with 황충 ended it on the next turn with four foot units still standing.
+   */
+  farmHold: number;
+  /**
+   * Walk to a holding enemy, above 0.5: in a timed battle (a turn event ends it, or brings a wave of
+   * 4+ later on), on a quiet field (every enemy waits or holds, none reaches any of ours) the approach
+   * pulls by the walking distance (over passable terrain, the river crossed
+   * by its bridge) with at least the idle weight, from the first turn. 강릉: 진교's garrison holds in
+   * the castle behind the river; the straight-line pull found no closer cell this side of the river
+   * and the party sat at its start until the wave of turn 8.
+   */
+  holdWalk: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -776,6 +795,10 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'ambWake', min: 0, max: 1, def: 0.6 },
   // 양평관 plan: r4 fought in the forest, the bridge's guards shot across the river, r5 from the west bank
   { key: 'ypPlan', min: 0, max: 1, def: 0.6 },
+  // farm before the end: in the finish, the ending blow waits while something is left to farm
+  { key: 'farmHold', min: 0, max: 1, def: 0.6 },
+  // walk to a holding enemy: on a quiet field the approach pulls by the walking distance
+  { key: 'holdWalk', min: 0, max: 1, def: 0.6 },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -1049,6 +1072,22 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     // (or through a LEAVE_GROUP into the group that ends it: 부 1st r4, the turn-8 supply raid)
     else if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'LEAVE_GROUP') && winning(stage, r.code, k.victory, script.block, r.group)) k.endsAt = Math.min(k.endsAt ?? 999, r.p1);
+  }
+  // a turn event that carries the battle on into another block (GOTO_BLOCK, no BATTLE_SETUP there)
+  // brings that block's timed end along (강릉: r5's wave at turn 8 goes on in block 3, whose
+  // turn-16 event, 주유 out of food and gone, wins; the battle always ended there at T15/30)
+  for (const r of stage.blocks[script.block]?.records ?? []) {
+    if (r.trigger !== 9 || r.p1 <= 0) continue;
+    const go = recordCommands(stage, r.code).find((c) => c.name === 'GOTO_BLOCK') as unknown as { block: number } | undefined;
+    if (!go || go.block === script.block) continue;
+    const next = stage.blocks[go.block]?.records ?? [];
+    if (next.some((n) => recordCommands(stage, n.code).some((c) => c.name === 'BATTLE_SETUP'))) continue;
+    for (const n of next) {
+      if (n.trigger !== 9 || n.p1 <= r.p1) continue;
+      const nc = recordCommands(stage, n.code);
+      if (nc.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, n.p1);
+      else if (nc.some((c) => c.name === 'BATTLE_END' || c.name === 'LEAVE_GROUP') && winning(stage, n.code, k.victory, go.block, n.group)) k.endsAt = Math.min(k.endsAt ?? 999, n.p1);
+    }
   }
   k.sleepers = scriptSleepers(stage, script.block);
   // (a sleeper area brings its wave in too, to stand still: the scout walks into it, no ban: 부 2nd
@@ -2073,6 +2112,8 @@ export class GrindPolicy {
   /** endHeld() at the start of the search phase (a rollout's win is judged by it). */
   private srHeld = false;
   private endHeldMemo: { turn: number; v: boolean } | null = null;
+  /** farmHold released (for good: the finish runs on to the end). */
+  private farmReleased = false;
 
   /**
    * The blow that ends the battle waits (while grinding too: the leader's own kill of the last
@@ -2081,14 +2122,18 @@ export class GrindPolicy {
    * timing (escape / bonus walk-in, 회남, the scripted steps) nor for the emergency finishes.
    */
   private endHeld(): boolean {
-    if (paramOr(this.p, 'endHold') <= 0.5 || this.p.native) return false;
+    const hold = paramOr(this.p, 'endHold') > 0.5;
+    // (farmHold: only in the finish, and only while enemies whose defeat ends nothing are left)
+    const farm = !hold && this.finishing && paramOr(this.p, 'farmHold') > 0.5;
+    if ((!hold && !farm) || this.p.native) return false;
     const r = this.finishing ? this.stats.finishReason : undefined;
     if (r === 'leader' || r === 'losses' || r === 'escape' || r === 'native') return false;
     if (this.stepsLeft() > 0 || this.exitPlan || this.hnOn()) return false;
     const b = this.b;
     const t = b.info.turn;
     if (this.endHeldMemo && this.endHeldMemo.turn === t) return this.endHeldMemo.v;
-    let v = this.enemiesOnField() > 0;
+    // (farm: the phases without fighting counted from the finish's start; the grind's idle ones before it do not count)
+    let v = hold ? this.enemiesOnField() > 0 : this.farmLeft() > 0 && !this.goingBad() && (this.fightIdle < 2 || t + 1 - (this.stats.finishTurn ?? t + 1) < 2);
     for (const off of this.know.guarded) {
       const sl = b.slotOfOfficer(off);
       if (!v || sl === NONE || sl >= PLAYER_SLOTS) continue;
@@ -2098,10 +2143,50 @@ export class GrindPolicy {
       // (badly hurt, or a blow away from it where it stands: the end comes now)
       if (o.hp * 100 < maxHp(o) * 35 || (o.hp * 2 < maxHp(o) && this.danger(u, u.x, u.y).worst >= o.hp * 0.6)) v = false;
     }
-    if (v) v = this.deadline() - t > this.finishEstimate() + paramOr(this.p, 'endSpare');
+    // (farm: only with the ending at hand, three turns at most by the estimate, and three turns spare
+    // on top: far off, the estimate runs short when the party is hurt and spread, 장사 with the c31515
+    // carry took 19 turns where it said under 10, and three turns held there lost it on time)
+    if (v && farm) {
+      const est = this.finishEstimate();
+      v = est <= 3 && this.deadline() - t > est + 3 + paramOr(this.p, 'endSpare');
+    } else if (v) v = this.deadline() - t > this.finishEstimate() + paramOr(this.p, 'endSpare');
+    // (farm: once released it stays released: the finish runs on to the end)
+    if (farm && this.farmReleased) v = false;
+    if (farm && !v && this.endHeldMemo?.v && !this.inRollout) this.farmReleased = true;
     if (!v && this.log && this.endHeldMemo?.v !== false) this.log(`end: released at turn ${t + 1} (${this.deadline() - t} turns left)`);
+    if (v && farm && this.log && !this.endHeldMemo?.v) this.log(`end: held at turn ${t + 1} for ${this.farmLeft()} to farm (${this.deadline() - t} turns left)`);
     this.endHeldMemo = { turn: t, v };
     return v;
+  }
+
+  /**
+   * Enemies on the field left to farm (farmHold): neither the victory officer nor a protected one,
+   * nor the partner of a duel / persuasion / adjacency event of ours, and not the last one standing.
+   */
+  private farmLeft(): number {
+    const v = this.victoryNow();
+    const partners = new Set([...this.wadj().map((a) => a.other), ...this.know.gains.filter((g) => g.trigger === 4 && g.other !== null && !this.fired.has(g.record)).map((g) => g.other as number)]);
+    let n = 0, all = 0;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff) continue;
+      all++;
+      if (E.officer === v || this.know.protect.has(E.officer) || partners.has(E.officer)) continue;
+      n++;
+    }
+    return all > 1 ? n : 0;
+  }
+
+  /**
+   * Walk to a holding enemy (GrindParams.holdWalk) in a timed battle: a turn event ends it or brings
+   * a wave of 4+ later on, so the turns before are the farm window and waiting for the enemy wastes
+   * them (강릉: the garrison holds, 주유's wave comes at turn 8 and the battle ends at 16). Elsewhere
+   * (장사's last group around 한현 waits on purpose) the quiet field keeps the usual pull.
+   */
+  private holdWalkOn(): boolean {
+    if (paramOr(this.p, 'holdWalk') <= 0.5) return false;
+    const turn = this.b.info.turn + 1;
+    return this.know.endsAt !== null || this.know.turns.some((e) => e.turn !== null && e.turn > turn && e.reinforce.length >= 4);
   }
 
   /** Defeating this enemy ends the battle: the victory officer (or a protected one), or the last enemy on the field. */
@@ -5422,8 +5507,10 @@ export class GrindPolicy {
       let dist = 99;
       // walking distance over passable terrain (a manhattan pull leaves units stuck behind walls
       // and rivers: 서주 2nd, three units waited 20 turns in the corner north of 차주)
+      // (holdWalk: on a quiet field of a timed battle by the walking distance too: 강릉's castle lies past a river)
+      const hw = !fin && this.quiet && this.holdWalkOn();
       if (goal) dist = this.pathDist(goal, moveTypeOf(b.s, u), x, y);
-      else if (this.p.walk > 0.5) dist = this.foeDist(enemies, moveTypeOf(b.s, u), x, y);
+      else if (this.p.walk > 0.5 || hw) dist = this.foeDist(enemies, moveTypeOf(b.s, u), x, y);
       else for (const e of enemies) dist = Math.min(dist, Math.abs(e.x - x) + Math.abs(e.y - y));
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       const ypA = this.ypAnchorOf(u);
@@ -5450,7 +5537,7 @@ export class GrindPolicy {
         // (and so do phases without a fight (castIdle): 와구관2's party healed each other for 40 turns
         // while the 14 enemies waited in their positions)
         const ci = paramOr(this.p, 'castIdle');
-        const apW = fin && goal ? (leadWalk ? 12 : 3) : this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
+        const apW = fin && goal ? (leadWalk ? 12 : 3) : (hw && hp >= max * 0.5) || this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
         else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeTrap().cells) ? 200 : 40);
