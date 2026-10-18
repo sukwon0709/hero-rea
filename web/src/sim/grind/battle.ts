@@ -214,6 +214,7 @@ export async function runGrindBattle(
   let scene0: BattleScene | null = null;
   let start: BattleStart | undefined;
   let rerolls = p.rerolls ?? 0;
+  const wakeRerolls = { left: Math.max(0, Math.round(paramOr(p, 'wakeReroll'))) };
   const purchases: Purchase[] = [];
   const run = buildSandbox(
     files,
@@ -266,6 +267,7 @@ export async function runGrindBattle(
         rerolls--;
         policy.retreatNow = true;
       }
+      policy.wakeRerolls = wakeRerolls;
       if (trace) policy.log = trace;
       for (const h of sceneHooks) h(scene);
       before = scene.ctx.state.officers.map((o) => ({ level: o.dyn.level, exp: o.dyn.exp }));

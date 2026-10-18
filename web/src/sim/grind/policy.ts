@@ -453,6 +453,16 @@ export interface GrindParams {
    */
   farmReach: number;
   /**
+   * Wakers (BattleKnowledge.wakers), above 0.5: no unit acts next to an enemy whose neighbour or
+   * fall wakes a sleeping army, none hits it, and the walking distances go round it, while two or
+   * more of the officers it wakes still sleep (무릉: 오조 on the middle way, 양안 in the north).
+   */
+  wakeAvoid: number;
+  /** Turns the finish counts for each sleeping enemy within reach of its way round the wakers (wakeNeed). */
+  wakeKill: number;
+  /** 총퇴각s at turn 1 while the wakers shut every way round them to what wins (GrindPolicy.wakeRerolls). */
+  wakeReroll: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -616,6 +626,12 @@ export const PARAM_SPECS: ParamSpec[] = [
   // the farms' safety check: leave out the sleeping enemies we would not wake (off by default:
   // measured on the bench it cost wins, 60/70 -> 42/70, and 하비 12/12 -> 11/12)
   { key: 'farmReach', min: 0, max: 1, def: 0.4 },
+  // wakers: keep off the cells next to an enemy whose neighbour or fall wakes a sleeping army (무릉)
+  { key: 'wakeAvoid', min: 0, max: 1, def: 0.6 },
+  // ... and the finish's turns per sleeping enemy met on the way round them (wakeNeed)
+  { key: 'wakeKill', min: 0, max: 4, def: 1.5 },
+  // ... and the 총퇴각s at turn 1 while they shut every way round (wakeRerolls)
+  { key: 'wakeReroll', min: 0, max: 6, def: 3, int: true },
 ];
 
 /** 폭탄 (0x21) a battle may use: one, for an emergency (saving the leader from a near-lethal hit). */
@@ -691,6 +707,12 @@ export interface BattleKnowledge {
    * the turn-30 event). The cells, the flags the IF needs, and the officers the event brings in.
    */
   gates: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; set: number[]; clear: number[]; reinforce: number[] }[];
+  /**
+   * Wakers: enemy officers next to whom any of ours acting (trigger 4, actor 0x400), or whose defeat
+   * (trigger 12), turns a sleeping army on us (SET_AI to an attacking mode on 3+ other officers; 무릉
+   * r4..r7: next to 양안 / 오조, or either falling, sends eight units at us). The officers each wakes.
+   */
+  wakers: { officer: number; wakes: number[] }[];
   stage?: Stage;
   block?: number;
 }
@@ -711,7 +733,7 @@ function winning(stage: Stage, code: number, victory: number | null, block?: num
 
 /** Reads the current block's records: what wins, what loses, what to keep alive. */
 export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledge {
-  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], stage, block: script.block };
+  const k: BattleKnowledge = { victory: null, protect: new Set(), guarded: new Set([0]), winCells: [], winAdj: [], deadline: null, endsAt: null, treasure: [], gains: scriptGains(stage, script.block), turns: turnEvents(stage, script.block), soft: null, steps: [], gates: [], wakers: [], stage, block: script.block };
   if (script.victory.enabled) {
     k.victory = script.victory.officer;
     k.protect.add(script.victory.officer);
@@ -735,6 +757,15 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
         const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
         const reinforce = cmds.filter((c) => c.name === 'REINFORCE').map((c) => (c as unknown as { officer: number }).officer);
         k.gates.push({ record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), set: [...cond.set], clear: [...cond.clear], reinforce });
+      }
+    }
+    if ((r.trigger === 4 && r.p1 === 0x400) || r.trigger === 12) {
+      const off = r.trigger === 4 ? r.p2 : r.p1;
+      const wakes = (cmds as unknown as { name: string; officer?: number; algo?: number }[]).filter((c) => c.name === 'SET_AI' && c.algo !== 0 && c.officer !== undefined && c.officer !== off).map((c) => c.officer!);
+      if (off < 0x400 && new Set(wakes).size >= 3 && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER')) {
+        const w = k.wakers.find((x) => x.officer === off);
+        if (w) w.wakes = [...new Set([...w.wakes, ...wakes])];
+        else k.wakers.push({ officer: off, wakes: [...new Set(wakes)] });
       }
     }
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
@@ -957,6 +988,13 @@ export class GrindPolicy {
   private looted = new Set<number>();
   /** Retreat (총퇴각, result 1) at the first player phase instead of playing. */
   retreatNow = false;
+  /**
+   * 총퇴각s left for a shut way round the wakers (GrindParams.wakeReroll), shared by the restarts of
+   * one battle: at the first player phase the battle is restarted while the wakers shut every way to
+   * what wins (the enemies are placed anew at a restart: 무릉 has 양안 in the north narrows and 오조 at
+   * the middle fort at the first placement, a way open at the next).
+   */
+  wakeRerolls: { left: number } | null = null;
 
   /** Replaces the scene's player phase. Call from BattleExtras.afterSetup. */
   install(): void {
@@ -1860,6 +1898,11 @@ export class GrindPolicy {
     if (b.info.turn === 0) await sc.victoryWindow(true);
     await sc.say(S.playerPhase);
     for (const u of sc.units) tryCure(b.rng, u, u.officer === 0xffff ? 0 : b.officerOf(u).lead);
+    if (b.info.turn === 0 && !this.retreatNow && !b.formation && this.wakeRerolls && this.wakeRerolls.left > 0 && this.wakeTrap().shut) {
+      this.wakeRerolls.left--;
+      this.retreatNow = true;
+      this.log?.(`wake: every way round the wakers shut, 총퇴각 (${this.wakeRerolls.left} left)`);
+    }
     if (this.retreatNow && !b.formation) {
       // 기능 menu -> 총퇴각 -> yes (1cb6:44de battle menu item 1): the scene restarts the battle
       b.info.result = 1;
@@ -2739,7 +2782,10 @@ export class GrindPolicy {
     const left = this.deadline() - b.info.turn; // turns left including this one
     // each pending step (defeat X, march into an area) needs about 12 turns of the finish
     const stepTurns = this.stepsLeft() * 12;
-    const deadlineHit = left <= this.p.finish + stepTurns;
+    // with wakers about, the finish walks the long way round them to what wins (the enemy sleeps:
+    // nothing comes to us), so it starts once the turns left just cover that walk (farmNeed), not
+    // `finish` turns before the end (무릉: 2 turns left for a 40-step walk, lost on time)
+    const deadlineHit = left <= Math.max(this.p.finish, this.wakeTrap().cells ? this.farmNeed() : 0) + stepTurns;
     // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
@@ -2931,10 +2977,10 @@ export class GrindPolicy {
    * lead there: 하비 timed out in 10 of 12 seeds). `all`: every enemy within that reach, awake or
    * not, attacker or not (farmAllNear). Off: every enemy on the field.
    */
-  private farmThreats(at: [number, number][] = [], all = false): Map<number, number> {
+  private farmThreats(at: [number, number][] = [], all = false, near = false): Map<number, number> {
     const b = this.b;
     const out = new Map<number, number>();
-    const reach = paramOr(this.p, 'farmReach') > 0.5;
+    const reach = near || paramOr(this.p, 'farmReach') > 0.5;
     const cells = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && u.officer !== 0xffff).map((u): [number, number] => [u.x, u.y]);
     cells.push(...at);
     const rain = WEATHER_TYPE[b.info.weather] === RAIN;
@@ -3091,7 +3137,10 @@ export class GrindPolicy {
     let top = 0;
     for (const u of this.scene.units.slice(0, PLAYER_SLOTS)) if (this.controllable(u)) top = Math.max(top, b.officerOf(u).level);
     for (const e of this.scene.units.slice(PLAYER_SLOTS)) if (e.status === Status.Field && e.officer !== 0xffff && b.officerOf(e).level > top + 2) return false;
-    if (this.sideStrength(false) > this.sideStrength(true) * paramOr(this.p, 'wakeRatio')) return false;
+    // (with wakers about, only the enemies we would wake within about two turns count: the army
+    // behind them sleeps on while we keep off them, 무릉's 14 against our 7)
+    const foes = this.wakeTrap().cells ? [...this.farmThreats([], false, true).values()].reduce((a, c) => a + c, 0) : this.sideStrength(false);
+    if (foes > this.sideStrength(true) * paramOr(this.p, 'wakeRatio')) return false;
     for (const e of this.scene.units.slice(PLAYER_SLOTS)) {
       if (e.status === Status.Field && e.officer !== 0xffff && e.mode !== AiMode.Wait && e.mode !== AiMode.Hold) return false;
     }
@@ -3110,7 +3159,72 @@ export class GrindPolicy {
   }
 
   private farmNeed(): number {
+    if (this.wakeTrap().cells) return this.wakeNeed() + paramOr(this.p, 'farmEnd');
     return Math.ceil(this.finishEstimate() * 1.5) + paramOr(this.p, 'farmEnd');
+  }
+
+  /**
+   * With wakers about (wakeTrap), the turns the finish needs: the walk of the unit that wins (유비 to
+   * the adjacency partner, else to the victory officer) the long way round the wakers, plus wakeKill
+   * turns for each sleeping enemy within its reach of that way (it wakes as we pass and is fought
+   * there: 무릉's north way meets 310, then 257, 332, 275 and the two in the castle).
+   */
+  private wakeNeed(): number {
+    const b = this.b;
+    const W = b.width;
+    const units = this.scene.units;
+    const ours = units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    if (!ours.length) return 0;
+    let actor: Unit | null = null;
+    let target: Unit | null = null;
+    for (const a of this.wadj()) {
+      const s2 = b.slotOfOfficer(a.other);
+      if (s2 === NONE || units[s2].status !== Status.Field) continue;
+      const u = ours.find((v) => v.officer === a.actor || a.actor === 0x400);
+      if (u) {
+        [actor, target] = [u, units[s2]];
+        break;
+      }
+    }
+    if (!actor || !target) {
+      const v = this.victoryNow();
+      const vs = v !== null ? b.slotOfOfficer(v) : NONE;
+      if (vs === NONE || units[vs].status !== Status.Field) return this.finishEstimate();
+      target = units[vs];
+      actor = ours.find((u) => this.know.guarded.has(u.officer)) ?? ours[0];
+    }
+    const mt = moveTypeOf(b.s, actor);
+    const goal: [number, number] = [target.x, target.y];
+    this.pathDist(goal, mt, actor.x, actor.y);
+    const sig = this.wakeTrap().sig;
+    const m = this.distMaps.get(`${goal[0]},${goal[1]},${mt}${sig ? `|${sig}` : ''}`)!;
+    let c = actor.y * W + actor.x;
+    if (m[c] === 0xffff) return this.finishEstimate();
+    const steps = m[c];
+    const path: number[] = [c];
+    while (m[c] > 1 && path.length < 400) {
+      const cx = c % W, cy = (c - cx) / W;
+      let nxt = -1;
+      for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= b.height) continue;
+        if (m[ny * W + nx] === m[c] - 1) {
+          nxt = ny * W + nx;
+          break;
+        }
+      }
+      if (nxt < 0) break;
+      c = nxt;
+      path.push(c);
+    }
+    const wk = this.wakeTrap().slots;
+    let n = 0;
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = units[i];
+      if (E.status !== Status.Field || E.officer === 0xffff || E === target || wk.has(i) || this.know.protect.has(E.officer)) continue;
+      const rad = (E.mode === AiMode.Hold ? 0 : movePoints(b.officerOf(E), b.s.items)) + 2;
+      if (path.some((k) => Math.abs((k % W) - E.x) + Math.abs(Math.trunc(k / W) - E.y) <= rad)) n++;
+    }
+    return Math.ceil(steps / Math.max(1, movePoints(b.officerOf(actor), b.s.items))) + 1 + Math.ceil(n * paramOr(this.p, 'wakeKill'));
   }
 
   /**
@@ -3450,7 +3564,8 @@ export class GrindPolicy {
   private foeDist(enemies: Unit[], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
-    const key = `${mt}|${enemies.map((e) => e.y * W + e.x).join(',')}`;
+    const wt = this.wakeTrap();
+    const key = `${mt}|${enemies.map((e) => e.y * W + e.x).join(',')}${wt.sig ? `|${wt.sig}` : ''}`;
     let m = this.foeMaps.get(key);
     if (!m) {
       if (this.foeMaps.size > 64) this.foeMaps.clear();
@@ -3468,7 +3583,7 @@ export class GrindPolicy {
         for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
           if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
           const k = ny * W + nx;
-          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff || (wt.cells && wt.cells[k])) continue;
           m[k] = m[c] + 1;
           q.push(k);
         }
@@ -3484,13 +3599,99 @@ export class GrindPolicy {
   /** (x, y) is reachable from `goal` over the terrain (pathDist's map). */
   private reaches(goal: [number, number], mt: number, x: number, y: number): boolean {
     this.pathDist(goal, mt, x, y);
-    return this.distMaps.get(`${goal[0]},${goal[1]},${mt}`)![y * this.b.width + x] !== 0xffff;
+    const sig = this.wakeTrap().sig;
+    return this.distMaps.get(`${goal[0]},${goal[1]},${mt}${sig ? `|${sig}` : ''}`)![y * this.b.width + x] !== 0xffff;
+  }
+
+  /**
+   * The wakers still able to turn their army on us (BattleKnowledge.wakers, GrindParams.wakeAvoid):
+   * on the field, with two or more of the officers they wake still asleep (not 최단 적공격). Their
+   * slots, and the cells next to them, where any of ours acting would wake the army (무릉: next to
+   * 오조 at the fort on the only middle way, or 양안 in the north). Units keep off those cells, never
+   * hit a waker (its fall wakes them too), and walk round them (pathDist, foeDist).
+   */
+  private wakeMemo: { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean } = { sig: '', slots: new Set(), cells: null };
+  private wakeTrap(): { sig: string; slots: Set<number>; cells: Uint8Array | null; shut?: boolean } {
+    const k = this.know.wakers;
+    if (!k?.length || paramOr(this.p, 'wakeAvoid') <= 0.5) return this.wakeMemo;
+    const b = this.b;
+    const units = this.scene.units;
+    const live: number[] = [];
+    for (const w of k) {
+      const s = b.slotOfOfficer(w.officer);
+      if (s === NONE || s < PLAYER_SLOTS || units[s].status !== Status.Field) continue;
+      let asleep = 0;
+      for (const off of w.wakes) {
+        const t = b.slotOfOfficer(off);
+        if (t !== NONE && t >= PLAYER_SLOTS && units[t].status === Status.Field && units[t].mode !== AiMode.AttackNearest) asleep++;
+      }
+      if (asleep >= 2) live.push(s);
+    }
+    const sig = live.map((s) => `${s}@${units[s].x},${units[s].y}`).join(' ');
+    if (sig === this.wakeMemo.sig) return this.wakeMemo;
+    let cells: Uint8Array | null = null;
+    let shut = false;
+    if (live.length) {
+      cells = new Uint8Array(b.width * b.height);
+      for (const s of live) {
+        const E = units[s];
+        for (const [nx, ny] of [[E.x, E.y - 1], [E.x + 1, E.y], [E.x, E.y + 1], [E.x - 1, E.y]]) if (nx >= 0 && ny >= 0 && nx < b.width && ny < b.height) cells[ny * b.width + nx] = 1;
+      }
+      // no way round them to what wins (the enemies are placed at random: 무릉 with 양안 in the north
+      // narrows and 오조 on the middle way shuts both): the wakers are not avoided (the old play)
+      if (!this.wakeWayOpen(cells)) {
+        live.length = 0;
+        cells = null;
+        shut = true;
+      }
+    }
+    this.wakeMemo = { sig, slots: new Set(live), cells, shut };
+    return this.wakeMemo;
+  }
+
+  /** 유비 can walk to what wins (next to the adjacency partner, or to the victory officer) without entering `ban`. */
+  private wakeWayOpen(ban: Uint8Array): boolean {
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const units = this.scene.units;
+    const ls = b.slotOfOfficer(0);
+    if (ls === NONE || units[ls].status !== Status.Field) return true;
+    const L = units[ls];
+    let target: Unit | null = null;
+    for (const a of this.wadj()) {
+      if (a.actor !== 0 && a.actor !== 0x400) continue;
+      const s2 = b.slotOfOfficer(a.other);
+      if (s2 !== NONE && units[s2].status === Status.Field) target = units[s2];
+    }
+    if (!target) {
+      const v = this.know.victory;
+      const vs = v !== null ? b.slotOfOfficer(v) : NONE;
+      if (vs === NONE || units[vs].status !== Status.Field) return true;
+      target = units[vs];
+    }
+    const mt = moveTypeOf(b.s, L);
+    const seen = new Uint8Array(W * H);
+    const q = [L.y * W + L.x];
+    seen[q[0]] = 1;
+    for (let h = 0; h < q.length; h++) {
+      const c = q[h], cx = c % W, cy = (c - cx) / W;
+      if (Math.abs(cx - target.x) + Math.abs(cy - target.y) <= 1) return true;
+      for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const k = ny * W + nx;
+        if (seen[k] || ban[k] || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+        seen[k] = 1;
+        q.push(k);
+      }
+    }
+    return false;
   }
 
   private pathDist(goal: [number, number], mt: number, x: number, y: number): number {
     const b = this.b;
     const W = b.width, H = b.height;
-    const key = `${goal[0]},${goal[1]},${mt}`;
+    const wt = this.wakeTrap();
+    const key = `${goal[0]},${goal[1]},${mt}${wt.sig ? `|${wt.sig}` : ''}`;
     let m = this.distMaps.get(key);
     if (!m) {
       m = new Uint16Array(W * H).fill(0xffff);
@@ -3501,7 +3702,7 @@ export class GrindPolicy {
         for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
           if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
           const k = ny * W + nx;
-          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff) continue;
+          if (m[k] !== 0xffff || moveCost(mt, b.s.terrain[k]) === 0xff || (wt.cells && wt.cells[k])) continue;
           m[k] = m[c] + 1;
           q.push(k);
         }
@@ -3810,7 +4011,17 @@ export class GrindPolicy {
     const walkIn = guarded && u.officer === 0 && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
     // ... and the others clear the way there (the guards of the cell), leaving the spared leader be
     const walkAll = !walkIn && fin && this.stats.finishReason === 'escape' && !this.exitPlan ? this.bonusCell() : null;
-    const goal = !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    // (with wakers about, the finish walks the long way round them from its start, fighting what it
+    // meets, but ends nothing before the last third: 무릉's finish lingered at the nearest enemy, in
+    // the middle dead end by 오조, until turn 24 and ran out of time on the way)
+    const wakeWalk = fin && !chg && !!this.wakeTrap().cells;
+    // ... and 유비, the one whose arrival wins, walks in earnest once the turns left barely cover his
+    // way (he stayed back healing, 3 turns short at the limit)
+    const leadWalk = guarded && fin && !!adjAt && !!this.wakeTrap().cells && (() => {
+      const mp = Math.max(1, movePoints(o, b.s.items));
+      return turnsLeft <= Math.ceil(this.pathDist(adjAt, moveTypeOf(b.s, u), u.x, u.y) / mp) + 3;
+    })();
+    const goal = wakeWalk ? (guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -3919,11 +4130,13 @@ export class GrindPolicy {
     const idleWalk = !fin && !guarded && hp * 2 >= max && (this.unitIdle.get(slot) ?? 0) >= 2 ? paramOr(this.p, 'idleAp') : 0;
     const idleD0 = idleWalk > 0 && !goal ? (this.p.walk > 0.5 ? this.foeDist(enemies, moveTypeOf(b.s, u), u.x, u.y) : enemies.reduce((m, e) => Math.min(m, Math.abs(e.x - u.x) + Math.abs(e.y - u.y)), 99)) : 99;
     const pk = this.parkCellOf(slot);
+    const wake = this.wakeTrap();
     const mend = (!fin || endHeld) && !hnLive && !this.exitPlan && hp < max * (paramOr(this.p, 'cbMend') + (guarded ? 0.2 : 0)) && paramOr(this.p, 'cbMend') > 0 && (quietMend || (fin && endHeld) || this.scene.units.slice(0, PLAYER_SLOTS).filter((v) => this.controllable(v)).length >= 5) ? this.mendGoal(u) : null;
     for (const [x, y] of this.reachable(u)) {
       if ((!chg || endHeld) && !(dn && this.winAdjacent(u, x, y)) && (this.winCell(u, x, y) || this.winAdjacent(u, x, y))) continue;
       if (avoid && Math.abs(avoid.x - x) + Math.abs(avoid.y - y) === 1) continue;
       if (hnEsc && guarded && !this.hnTrapOk(u, x, y)) continue;
+      if (wake.cells && wake.cells[y * b.width + x]) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
@@ -4010,10 +4223,11 @@ export class GrindPolicy {
       } else if (!(farming && gg)) {
         // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
         // walking and sat out the whole push in the north-east)
-        const apW = fin && goal ? 3 : this.idleTurns >= 2 || (farming && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
+        // (the wake phase walks up too: flat-rate casts kept idleTurns at 0 and the party sat at the start)
+        const apW = fin && goal ? (leadWalk ? 12 : 3) : this.idleTurns >= 2 || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
-        else base -= apW * Math.min(dist, hnEsc ? 200 : 40);
+        else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeTrap().cells) ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
@@ -4047,7 +4261,7 @@ export class GrindPolicy {
       if (range !== NONE)
         for (const d of unitsInRange(b.s, u, range, x, y, false)) {
           const D = this.scene.units[d];
-          if (!(D.flags & UnitFlag.Visible)) continue;
+          if (!(D.flags & UnitFlag.Visible) || wake.slots.has(d)) continue;
           const od = b.officerOf(D);
           const dmg = physicalDamage({
             attack: attackPower(o, u.morale, b.s.items),
@@ -4135,7 +4349,7 @@ export class GrindPolicy {
       // items (ab86): promotions, troop heals (single and area), morale area heals, bombs
       for (const it of held) {
         const a = this.itemValue(u, it.id, x, y, w, guarded);
-        if (!a) continue;
+        if (!a || wake.slots.has(a.target)) continue;
         let v = base + a.value;
         if (chg && a.target === vslot) v += 300;
         if (v > best.value || alts) offer({ slot, x, y, kind: 'item', target: a.target, tactic: NONE, item: it, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
@@ -4389,6 +4603,7 @@ export class GrindPolicy {
           const pc = tacticSkill(o);
           const land = paramOr(this.p, 'tacHit') > 0.5 ? (pc > 0 ? Math.max(0, pc - 1 - pt) / pc : 0) : 1;
           if (this.spared(H.officer) && oh.hp - hi * 1.5 < maxHp(oh) * 0.5) ok = false;
+          if (this.wakeTrap().slots.has(h)) ok = false;
           // the pen: no tactic that could finish it (or leave it to our counters), nor drive it off by morale
           const penH = h === this.pen && this.penning() && !this.finishing;
           if (penH && hi >= oh.hp - this.penReserve) ok = false;
@@ -4448,6 +4663,7 @@ export class GrindPolicy {
           if (leaves(s, drop) && (!this.killOk(s) || (s === this.pen && this.penning() && !this.finishing))) bad = true;
           // the leader kept for the bonus walk-in: a routed leader (morale 0) is a defeat too
           if (this.spared(this.scene.units[s].officer)) bad = true;
+          if (this.wakeTrap().slots.has(s)) bad = true;
         }
         if (bad) continue;
         void od;
