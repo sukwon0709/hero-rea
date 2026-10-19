@@ -626,6 +626,12 @@ export interface GrindParams {
    */
   doorTurns: number;
   /**
+   * 업 sortie (ye.ts), above 0.5: 업1's picks fight 업2 and 업3 too (hex flag, no FORMATION of their
+   * own): the strongest go out, 업3's duel actors first, and the three strongest close-combat
+   * officers on the places 업2 puts in 유비's pocket, whose one way out is the inner court's gate.
+   */
+  yePick: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -845,6 +851,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'door', min: 0, max: 1, def: 0.6 },
   // turns the finish keeps for a door (the plugs, the courtyard, the fight behind it)
   { key: 'doorTurns', min: 8, max: 36, def: 16, int: true },
+  // 업 sortie: 업1's picks (the strongest, 업3's duel actors) fight 업2 and 업3; the court's three in 업2's middle pocket
+  { key: 'yePick', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */

@@ -14,6 +14,7 @@ import { HuainanStrike } from './huainan';
 import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
 import { YeonjuEscape, isYeonjuAt } from './yeonju';
 import { isXiangyangAt } from './xiangyang';
+import { YE_LAST_BLOCK, isYeFirstAt, yeOrder } from './ye';
 import { mixSeed } from './search';
 import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, scriptDoors, type GrindParams, type GrindStats } from './policy';
 
@@ -198,8 +199,13 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // horsemen, the town's L46..55 holders after: 8 seeds won 1 with the lowest levels sent out
       // to farm, 3 with the strongest)
       const yyGate = paramOr(params, 'yyGate') > 0.5 && isXiangyangAt(snap.chapter, snap.stage, snap.block);
-      const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate || door ? free : params.strong, params.band > 0, params.healers, learn, actors);
+      // 업 sortie (ye.ts): 업1's picks fight 업2 and 업3 too; the strongest go out, 업3's duel actors
+      // first, the three strongest close-combat officers on 업2's middle-pocket places
+      const ye = paramOr(params, 'yePick') > 0.5 && !!stage && isYeFirstAt(snap.chapter, snap.stage, snap.block);
+      if (ye) for (const a of gainActors(stage!, YE_LAST_BLOCK)) if (!actors.includes(a)) actors.push(a);
+      const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate || door || ye ? free : params.strong, params.band > 0, params.healers, learn, actors);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
+      if (ye) picks.splice(0, picks.length, ...yeOrder(state, picks));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
         recs.forEach((r, k) => {

@@ -34,6 +34,7 @@ export interface SceneSave {
   terrain: Uint8Array | number[];
   chips: Uint8Array | number[];
   chipLog: number;
+  effectLog: { x: number; y: number; terrain: number }[];
   weather: number;
   ai: Record<string, unknown>;
   castable: unknown[];
@@ -81,6 +82,7 @@ export function saveScene(scene: BattleScene, objs: object[] = []): SceneSave {
     terrain: b.map.terrain.slice(),
     chips: b.map.chips.slice(),
     chipLog: b.chipLog.length,
+    effectLog: b.effectLog.map((e) => ({ ...e })),
     weather: s.weather,
     ai: { ...(s.ai as unknown as Record<string, unknown>) },
     castable: structuredClone(s.castable),
@@ -130,6 +132,7 @@ export function restoreScene(scene: BattleScene, sv: SceneSave): void {
   setArr(b.map.terrain, sv.terrain);
   setArr(b.map.chips, sv.chips);
   b.chipLog.length = sv.chipLog;
+  b.effectLog.splice(0, b.effectLog.length, ...sv.effectLog.map((e) => ({ ...e })));
   s.weather = sv.weather;
   Object.assign(s.ai, sv.ai);
   s.castable = structuredClone(sv.castable) as typeof s.castable;

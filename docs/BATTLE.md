@@ -703,7 +703,7 @@ are the battle branches:
 | 18 | REMOVE o | `0cf5:9cbc` → `2cb4:02e8` | Set flag 4, `8504` (leaves; events run), clear flag 4 |
 | 1c | SET_AI o code | `2cb4:031a` | If `0cf5:0ef6(officer)` (AI-controlled officer, *inferred*): clear flag 4 and set mode = `DS:0x4fe6[code]` |
 | 26 | MAP_CHIP x y kind | `2cb4:05e6` | Change a cell's chips and terrain; see below |
-| 27 | MAP_EFFECT b b b | `2cb4:0420` | Map effect at a cell (*not traced*) |
+| 27 | MAP_EFFECT x y kind | `2cb4:0420` | Fire / flood on a cell, or put out; see below |
 | 28 | UNIT_FORCE o b | `2cb4:08f2` | Moves the officer's unit to a free slot on the **other** side (defection): `0cf5:2228(officer, b)`, copy the record (`0b84`; mode 7 if it becomes a player unit and the officer is not AI-controlled, else 3), free the old slot. Message `DS:0x501e` if no slot is free |
 | 2b | DATA 4 w | `2cb4:0b72` | Battle state +0x24 = w (victory bonus exp) |
 | 2d | HALVE b1 b2 | `2cb4:0a9a` | For every unit on the field of one side (b1: 0 player, else enemy): b2 == 0 halves morale via `898c` (can confuse), otherwise halves troops |
@@ -951,7 +951,12 @@ animation is not.
 - **The close-up port.** The screen layout is traced (see *HEXBMAP.R3: close-up backdrops*) but not ported yet. The port's
   close-up is a simplified panel (enlarged unit sprites, troop bar, the original result strings).
 - **Status codes 5/6 and modes 5/6** are not produced by any battle routine that was read.
-- **`MAP_EFFECT`** (`2cb4:0420`) is not traced.
+- **`MAP_EFFECT`** (`2cb4:0420(kind, y, x)`): nothing happens when a unit stands on the cell
+  (`bd7e`, unit map +0x12c0). Kind 0 / 1 draws the overlay `0x2d + kind` on the cell (`be62`), logs
+  `{x, y, kind, old terrain}` in the context's effect list and sets the terrain to `DS:0x4ff4[kind]`
+  (18 / 19, impassable for every move type), with sound 0xc / 0xb. Kind 2 finds the cell's first
+  log entry, puts its terrain back, clears the overlay and drops the entry. 업2's r2 sets 22 fires
+  at the start that cut the start into three pockets; 업3 spreads them every two turns.
 - **`7b08`**, the free-cell search used when a deployment cell is taken, recurses N, E, S, W. The
   port uses a ring search, which can pick a different cell when several are free.
 - **The RNG seed source** `0cf5:48aa` (called at game start) is not documented here.

@@ -107,6 +107,8 @@ export class Battle {
   readonly learn: Uint8Array;
   /** Map-change log of MAP_CHIP (DS:0xe5aa); kept so a reload can replay it. */
   readonly chipLog: { x: number; y: number; kind: number; terrain: number }[] = [];
+  /** Cells under a MAP_EFFECT fire or flood with the terrain they had (2cb4:0420's list). */
+  readonly effectLog: { x: number; y: number; terrain: number }[] = [];
   /** The map as the first setup found it: a retry (총퇴각) reloads the battle (GAMEFLOW.md, result 1). */
   private atStart: { chips: Uint8Array; terrain: Uint8Array; chipLog: number } | null = null;
 
@@ -284,6 +286,7 @@ export class Battle {
       this.map.chips.set(this.atStart.chips);
       this.map.terrain.set(this.atStart.terrain);
       this.chipLog.length = this.atStart.chipLog;
+      this.effectLog.length = 0;
     }
     this.s.unitAt.fill(NONE);
     this.info.turnLimit = sc.battleB;
