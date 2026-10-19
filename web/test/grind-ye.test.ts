@@ -36,7 +36,7 @@ describe('grind: 업 sortie (yePick)', () => {
   it('yePick is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('yePick');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('yePick');
     expect(d.yePick).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yePick;
@@ -63,10 +63,10 @@ describe('grind: 업 sortie (yePick)', () => {
     expect(isYeFirstAt(4, 2, 3)).toBe(false);
   });
 
-  it('ye3Plan is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
+  it('ye3Plan is appended after yePick, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('ye3Plan');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('ye3Plan');
     expect(d.ye3Plan).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.ye3Plan;
@@ -91,5 +91,41 @@ describe('grind: 업 sortie (yePick)', () => {
     expect(YE_MIDDLE.map((k) => out[k])).toEqual([203, 189, 1]);
     expect(isYeLastAt(4, 2, 4)).toBe(true);
     expect(isYeLastAt(4, 2, 3)).toBe(false);
+  });
+
+  it('yeLanes is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('yeLanes');
+    expect(d.yeLanes).toBeGreaterThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    delete old.yeLanes;
+    expect(paramOr(old as unknown as typeof d, 'yeLanes')).toBe(d.yeLanes);
+    expect(clampParams({ ...d, yeLanes: 9 }).yeLanes).toBe(1);
+    expect(clampParams({ ...d, yeLanes: -9 }).yeLanes).toBe(0);
+  });
+
+  it('업2 lanes: an archer and a healer in each outer pocket (the stronger west), 장비 and the strongest others west; the court keeps its three', async () => {
+    const { yeOrder, YE_MIDDLE, YE_WEST, YE_EAST, YE3_EAST } = await import('../src/sim/grind/ye');
+    // the 39-chain's 업1 sortie (levels at 업1): [level, class]; both archers (조루 38, 관순 58) went west
+    // in list order, and the east pocket (조운, 미축, 관훙: the lowest levels, no archer) fell by turn 10
+    const spec: Record<number, [number, number]> = { 38: [50, 5], 53: [41, 7], 2: [43, 8], 64: [42, 12], 203: [59, 8], 58: [58, 5], 37: [51, 2], 189: [57, 8], 113: [51, 2], 33: [50, 2], 1: [56, 7], 30: [45, 12], 29: [45, 8] };
+    const state = { officers: Array.from({ length: 256 }, (_, i) => ({ dyn: { level: spec[i]?.[0] ?? 1, cls: spec[i]?.[1] ?? 0 } })) } as never;
+    const picks = [38, 53, 2, 64, 203, 58, 37, 189, 113, 33, 1, 30, 29];
+    expect(YE_EAST.filter((k) => YE_WEST.includes(k) || YE_MIDDLE.includes(k))).toEqual([]);
+    const plain = yeOrder(state, picks);
+    expect(new Set(YE_WEST.map((k) => plain[k]))).toEqual(new Set([38, 2, 58, 113, 30]));
+    for (const race of [false, true]) {
+      const out = yeOrder(state, picks, race, true);
+      expect(YE_MIDDLE.map((k) => out[k])).toEqual([203, 189, 1]);
+      expect(new Set(YE_WEST.map((k) => out[k]))).toEqual(new Set([58, 30, 2, 37, 113]));
+      expect(new Set(YE_EAST.map((k) => out[k]))).toEqual(new Set([38, 64, 33, 29, 53]));
+      // the east from the lowest level up, the archer last (it starts at the back)
+      expect(YE_EAST.map((k) => out[k])).toEqual([53, 64, 29, 33, 38]);
+      if (race) expect(YE3_EAST.map((k) => out[k])).toEqual([2, 58, 37]);
+    }
+    // a short list keeps every pick
+    const short = yeOrder(state, picks.slice(0, 8), false, true);
+    expect(new Set(short)).toEqual(new Set(picks.slice(0, 8)));
   });
 });

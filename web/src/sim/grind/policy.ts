@@ -635,6 +635,12 @@ export interface GrindParams {
   /** 업3 race (ye.ts), above 0.5: the finish sets out at turn 1 (the fires seal 조조's castle at turn 34). */
   ye3Plan: number;
   /**
+   * 업 sortie (ye.ts), above 0.5: 업2's outer pockets (the ways that win: neither the court's gate
+   * nor its 부동 holders ever fall) get an archer and a healer each, the west the stronger, the east
+   * from the lowest level up with its archer last.
+   */
+  yeLanes: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -858,6 +864,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'yePick', min: 0, max: 1, def: 0.6 },
   // 업3 race: the finish from turn 1, the walk pulled the whole way (the fires shut the castle at turn 34)
   { key: 'ye3Plan', min: 0, max: 1, def: 0.6 },
+  // 업 sortie: 업2's outer pockets an archer and a healer each, the west (the longer fight) the stronger
+  { key: 'yeLanes', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */

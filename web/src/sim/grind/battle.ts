@@ -205,7 +205,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       if (ye) for (const a of gainActors(stage!, YE_LAST_BLOCK)) if (!actors.includes(a)) actors.push(a);
       const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate || door || ye ? free : params.strong, params.band > 0, params.healers, learn, actors);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
-      if (ye) picks.splice(0, picks.length, ...yeOrder(state, picks, paramOr(params, 'ye3Plan') > 0.5));
+      if (ye) picks.splice(0, picks.length, ...yeOrder(state, picks, paramOr(params, 'ye3Plan') > 0.5, paramOr(params, 'yeLanes') > 0.5));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else
         recs.forEach((r, k) => {
