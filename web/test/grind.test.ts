@@ -357,7 +357,7 @@ describe('grind: fish pen params', () => {
     const idx = (k: string) => PARAM_SPECS.findIndex((x) => x.key === k);
     expect(PARAM_SPECS.slice(idx('pen'), idx('pen') + keys.length).map((s) => s.key)).toEqual([...keys]);
     expect(idx('pen')).toBeGreaterThan(idx('idleFinish'));
-    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate', 'farmReach', 'wakeAvoid', 'wakeKill', 'wakeReroll', 'capture', 'capSlack', 'capLast', 'capLoot', 'fireRing', 'sleeper', 'bandEnd', 'castIdle', 'finNeed', 'finPath', 'gainPick', 'ambush', 'ambTurns', 'duelKeep', 'finCharge', 'duelOut', 'duelReach', 'ambWake', 'ypPlan', 'farmHold', 'holdWalk', 'wakeShut', 'yyPlan', 'yyGate']);
+    expect(PARAM_SPECS.slice(idx('sell')).map((s) => s.key)).toEqual(['sell', 'idleAp', 'scrollEarn', 'escIdle', 'escWin', 'bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd', 'gate', 'gateLate', 'farmReach', 'wakeAvoid', 'wakeKill', 'wakeReroll', 'capture', 'capSlack', 'capLast', 'capLoot', 'fireRing', 'sleeper', 'bandEnd', 'castIdle', 'finNeed', 'finPath', 'gainPick', 'ambush', 'ambTurns', 'duelKeep', 'finCharge', 'duelOut', 'duelReach', 'ambWake', 'ypPlan', 'farmHold', 'holdWalk', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'doorTurns']);
   });
   it('escort exit (escIdle, escWin): appended last; plans without them take the defaults', async () => {
     const { defaultParams, paramOr } = await import('../src/sim/grind/policy');
@@ -388,7 +388,7 @@ describe('grind: band farm params', () => {
     const d = defaultParams();
     const keys = ['bandFarm', 'bfRatio', 'bfSpare', 'bfCell', 'bfPen', 'bfEnd'] as const;
     // the gate keys, farmReach, the waker keys, the capture keys, fireRing, sleeper and the 가맹관 keys come after them
-    expect(PARAM_SPECS.slice(-keys.length - 30, -30).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 32, -32).map((s) => s.key)).toEqual([...keys]);
     expect(d.bandFarm).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
@@ -406,7 +406,7 @@ describe('grind: gate params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['gate', 'gateLate'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 28, -28).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 30, -30).map((s) => s.key)).toEqual([...keys]);
     expect(d.gate).toBeGreaterThan(0.5);
     expect(d.gateLate).toBe(0);
     const old = { ...d } as Record<string, number>;
@@ -424,7 +424,7 @@ describe('grind: farm reach param', () => {
   it('farmReach is appended last (before the waker keys, the capture keys, fireRing, sleeper and the 가맹관 keys), off by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 28].key).toBe('farmReach');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 30].key).toBe('farmReach');
     expect(d.farmReach).toBeLessThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.farmReach;
@@ -440,7 +440,7 @@ describe('grind: waker params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['wakeAvoid', 'wakeKill', 'wakeReroll'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 24, -24).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 26, -26).map((s) => s.key)).toEqual([...keys]);
     expect(d.wakeAvoid).toBeGreaterThan(0.5);
     expect(d.wakeKill).toBeGreaterThan(0);
     expect(d.wakeReroll).toBeGreaterThan(0);
@@ -476,12 +476,46 @@ describe.skipIf(!hasGame)('grind: wakers read from the script', () => {
   });
 });
 
+describe.skipIf(!hasGame)('grind: doors read from the script', () => {
+  it('허창2 (chapter 4 stage 1 block 7): one of ours at (13,10), before the inner gate, opens it and moves on to the group where 사마의 falls; the drawbridge of 하비 (behind the persuasions) is a gate, no door', async () => {
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle, scriptDoors } = await import('../src/sim/grind/policy');
+    const files = loadFiles();
+    const a = new DevAssets(files);
+    const script = (block: number, victory: number) => ({ block, victory: { enabled: true, officer: victory }, defeat: { enabled: true, officer: 0 } }) as unknown as Parameters<typeof analyseBattle>[1];
+    const k = analyseBattle(a.chapter(4).stages[1], script(7, 213));
+    expect(k.doors).toEqual([{ group: 4, record: 6, actor: 0x400, x0: 13, y0: 10, x1: 13, y1: 10 }]);
+    // (not an ambush either: its LEAVE_GROUP changes the map)
+    expect(k.ambushes.some((z) => z.record === 6)).toBe(false);
+    expect(scriptDoors(a.chapter(1).stages[3], 4)).toEqual([]);
+  });
+});
+
+describe('grind: door params', () => {
+  it('door (on) and doorTurns are appended last, learnable within bounds; plans made before them read the defaults', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS.slice(-2).map((s) => s.key)).toEqual(['door', 'doorTurns']);
+    expect(d.door).toBeGreaterThan(0.5);
+    expect(d.doorTurns).toBe(16);
+    const old = { ...d } as Record<string, number>;
+    delete old.door;
+    delete old.doorTurns;
+    for (const k of ['door', 'doorTurns'] as const) {
+      expect(paramOr(old as unknown as typeof d, k)).toBe(d[k]);
+      const sp = PARAM_SPECS.find((x) => x.key === k)!;
+      expect(clampParams({ ...d, [k]: sp.max + 500 })[k]).toBe(sp.max);
+      expect(clampParams({ ...d, [k]: sp.min - 500 })[k]).toBe(sp.min);
+    }
+  });
+});
+
 describe('grind: capture params', () => {
   it('capture, capSlack, capLast and capLoot are appended last (before fireRing, sleeper and the 가맹관 keys), on by default, learnable within bounds; plans made before them read the defaults', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['capture', 'capSlack', 'capLast', 'capLoot'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 20, -20).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 22, -22).map((s) => s.key)).toEqual([...keys]);
     expect(d.capture).toBeGreaterThan(0.5);
     expect(d.capLoot).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
@@ -521,7 +555,7 @@ describe('grind: fire ring param', () => {
   it('fireRing is appended last (before sleeper and the 가맹관 keys), on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 20].key).toBe('fireRing');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 22].key).toBe('fireRing');
     expect(d.fireRing).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.fireRing;
@@ -536,7 +570,7 @@ describe('grind: sleeper param', () => {
   it('sleeper is appended last (before the 가맹관 keys), on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 19].key).toBe('sleeper');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 21].key).toBe('sleeper');
     expect(d.sleeper).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.sleeper;
@@ -589,7 +623,7 @@ describe('grind: 정군산 / 양평관 params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['duelReach', 'ambWake'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 6, -6).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 8, -8).map((s) => s.key)).toEqual([...keys]);
     expect(d.duelReach).toBeGreaterThan(0.5);
     expect(d.ambWake).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
@@ -605,7 +639,7 @@ describe('grind: 정군산 / 양평관 params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const Y = await import('../src/sim/grind/yangpyeong');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 6].key).toBe('ypPlan');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 8].key).toBe('ypPlan');
     expect(d.ypPlan).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.ypPlan;
@@ -628,7 +662,7 @@ describe('grind: farm before the end / walk to a holding enemy params', () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
     const keys = ['farmHold', 'holdWalk'] as const;
-    expect(PARAM_SPECS.slice(-keys.length - 3, -3).map((s) => s.key)).toEqual([...keys]);
+    expect(PARAM_SPECS.slice(-keys.length - 5, -5).map((s) => s.key)).toEqual([...keys]);
     for (const k of keys) expect(d[k]).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     for (const k of keys) delete old[k];
@@ -645,7 +679,7 @@ describe('grind: shut wakers param', () => {
   it('wakeShut (on) is appended after holdWalk, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('wakeShut');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 5].key).toBe('wakeShut');
     expect(d.wakeShut).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.wakeShut;
@@ -659,7 +693,7 @@ describe('grind: 양양 plan param', () => {
   it('yyPlan (on) is appended (before yyGate), learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('yyPlan');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 4].key).toBe('yyPlan');
     expect(d.yyPlan).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yyPlan;
@@ -683,10 +717,10 @@ describe('grind: 양양 plan param', () => {
     expect(yyAnchor(st, 0)).toBeNull();
     expect(yyBanned(st, wood, edge, [18, 21], true, 16, 21)).toBe(false);
   });
-  it('yyGate (on) is appended last, learnable within bounds; plans made before it read the default', async () => {
+  it('yyGate (on) is appended after yyPlan, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('yyGate');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('yyGate');
     expect(d.yyGate).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yyGate;

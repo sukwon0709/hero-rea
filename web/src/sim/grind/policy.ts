@@ -612,6 +612,20 @@ export interface GrindParams {
    */
   yyGate: number;
   /**
+   * Doors (BattleKnowledge.doors), above 0.5: while the victory officer is walled in (no walk of
+   * 유비's reaches him), the current group's door (an arrival that changes the map and moves the
+   * script on to the group his defeat wins in) is the step the finish takes; then him (허창2: one
+   * of ours at (13,10) before the inner gate, 황충 and 엄안 open it, 사마의 waits behind).
+   */
+  door: number;
+  /**
+   * Turns the finish keeps for a door (door): the walk to it through the plugs and what stands
+   * behind them, and the fight past it for the victory officer (허창2: 허저 and 장요 on their
+   * fortresses, the courtyard, then 사마의 on his behind the one-cell gate; 12 as for a plain step
+   * opened the gate at turn 36 of 40; 8 seeds won 0 with 12, 3..4 with 16, 2 with 20, 1 with 24).
+   */
+  doorTurns: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -827,7 +841,14 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'yyPlan', min: 0, max: 1, def: 0.6 },
   // 양양 gate plan: the wave held on the gate and the street behind it, then 조인
   { key: 'yyGate', min: 0, max: 1, def: 0.6 },
+  // doors: a walled-in victory officer's door (an arrival that opens the way) is the finish's first step
+  { key: 'door', min: 0, max: 1, def: 0.6 },
+  // turns the finish keeps for a door (the plugs, the courtyard, the fight behind it)
+  { key: 'doorTurns', min: 8, max: 36, def: 16, int: true },
 ];
+
+/** Worth of a plug's (door) whole troops taken in one blow, in action value. */
+const DOOR_PLUG = 800;
 
 /** Phases in a row without a fight after which the hold before shut wakers ends (wakeShut). */
 const WAKE_IDLE = 2;
@@ -951,6 +972,14 @@ export interface BattleKnowledge {
    * `clear`: the flags its IF needs clear (it fires once).
    */
   ambushes: { record: number; actor: number; x0: number; y0: number; x1: number; y1: number; clear: number[]; officers: number[]; wake?: boolean; leaves?: boolean }[];
+  /**
+   * Doors: arrival cells / areas of any of ours (trigger 6 / 11) that change the map (MAP_CHIP) and
+   * move the script on (LEAVE_GROUP, no end) to a later group holding the victory's defeat record
+   * (허창2 r6: one of ours at (13,10), before the inner gate, brings 황충 and 엄안 in, who open it
+   * at (13,9); 사마의 waits behind it, out of every walk until then). While the victory officer is
+   * walled in, the door of the current group is the step the finish takes (GrindParams.door).
+   */
+  doors?: { group: number; record: number; actor: number; x0: number; y0: number; x1: number; y1: number }[];
   stage?: Stage;
   block?: number;
 }
@@ -1166,7 +1195,32 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
     const [x1, y1] = r.trigger === 11 ? cellOf(r.p3) : [x0, y0];
     k.steps.push({ group: g, trigger: r.trigger, officer: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
   }
+  k.doors = scriptDoors(stage, script.block);
   return k;
+}
+
+/** Doors of a block (BattleKnowledge.doors). */
+export function scriptDoors(stage: Stage, block: number): NonNullable<BattleKnowledge['doors']> {
+  const recs = stage.blocks[block]?.records ?? [];
+  const out: NonNullable<BattleKnowledge['doors']> = [];
+  for (const r of recs) {
+    if ((r.trigger !== 6 && r.trigger !== 11) || !(r.p1 === 0x400 || r.p1 < 0x100)) continue;
+    const cmds = recordCommands(stage, r.code);
+    if (!cmds.some((c) => c.name === 'MAP_CHIP') || !cmds.some((c) => c.name === 'LEAVE_GROUP')) continue;
+    if (cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'GOTO_BLOCK')) continue;
+    // (an IF on flags other events set makes it a gate: 하비's drawbridge after the persuasions)
+    const cond = cmds.find((c) => c.name === 'IF') as unknown as { set?: number[] } | undefined;
+    if (cond?.set?.length) continue;
+    // (the group it leaves into: the next one, which must hold the victory's defeat record)
+    const later = recs.filter((x) => x.group > r.group);
+    if (!later.length) continue;
+    const next = Math.min(...later.map((x) => x.group));
+    if (!recs.some((x) => x.group === next && x.trigger === 7)) continue;
+    const [x0, y0] = cellOf(r.p2);
+    const [x1, y1] = r.trigger === 6 ? [x0, y0] : cellOf(r.p3);
+    out.push({ group: r.group, record: r.index, actor: r.p1, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- formation
@@ -2343,6 +2397,9 @@ export class GrindPolicy {
     const r = this.finishing ? this.stats.finishReason : undefined;
     if (r === 'leader' || r === 'losses' || r === 'escape' || r === 'native') return false;
     if (this.stepsLeft() > 0 || this.exitPlan || this.hnOn()) return false;
+    // (nor behind a door: its turns were kept for the fight there, and the victory officer mends on
+    // his fortress; 허창2 held 3..4 turns for the archers past the gate and ran out of time on 사마의)
+    if (farm && this.doorWay()) return false;
     const b = this.b;
     const t = b.info.turn;
     if (this.endHeldMemo && this.endHeldMemo.turn === t) return this.endHeldMemo.v;
@@ -2849,7 +2906,7 @@ export class GrindPolicy {
       if (this.waves.length) this.log?.(`brace: waves ${this.waves.map((w) => `T${w.turn}x${w.n}`).join(' ')}`);
     }
     // the latest the bracing may hold: the finish needs its turns at the end
-    const cap = Math.min(b.info.turnLimit, this.know.deadline ?? 999) - this.p.finish - 4 - this.stepsLeft() * 12;
+    const cap = Math.min(b.info.turnLimit, this.know.deadline ?? 999) - this.p.finish - 4 - this.stepTurns();
     const ahead = Math.round(0.5 + this.p.brace);
     let until = this.braceUntil;
     for (const w of this.waves) if (turn >= w.turn - ahead && turn <= w.turn) until = Math.max(until, w.turn + 2);
@@ -3895,7 +3952,7 @@ export class GrindPolicy {
     }
     const left = this.deadline() - b.info.turn; // turns left including this one
     // each pending step (defeat X, march into an area) needs about 12 turns of the finish
-    const stepTurns = this.stepsLeft() * 12;
+    const stepTurns = this.stepTurns();
     // with wakers about, the finish walks the long way round them to what wins (the enemy sleeps:
     // nothing comes to us), so it starts once the turns left just cover that walk (farmNeed), not
     // `finish` turns before the end (무릉: 2 turns left for a 40-step walk, lost on time)
@@ -4582,7 +4639,7 @@ export class GrindPolicy {
     // (finNeed with finCharge: 가맹관2's rout of the nearest enemies until the last third left the
     // party 3 cells short of 하후덕 at the time limit)
     if (paramOr(this.p, 'finCharge') > 0.5 && this.deadline() - this.b.info.turn <= this.finNeed()) return true;
-    const stepTurns = this.stepsLeft() * 12;
+    const stepTurns = this.stepTurns();
     return stepTurns > 0 && this.deadline() - this.b.info.turn <= this.p.finish + stepTurns;
   }
 
@@ -5184,9 +5241,108 @@ export class GrindPolicy {
 
   /** The step the script waits for now (서주 2nd: defeat 89, then 유비 into the south area), or null. */
   private step(): BattleKnowledge['steps'][number] | null {
-    if (!this.know.steps.length) return null;
+    if (!this.know.steps.length) return this.door();
     const g = this.activeGroup();
-    return this.know.steps.find((s) => s.group === g) ?? null;
+    return this.know.steps.find((s) => s.group === g) ?? this.door();
+  }
+
+  /**
+   * Plugs on the way to the door (GrindParams.door): the enemies that shut every way of ours to
+   * it, the nearest to the door next to each group of ours that cannot walk there round the
+   * units on the field (허창2: 허저 holds (20,7), the one cell from the north-east into the
+   * castle's east street; 장요 (6,7) the west one). Hitting them is what the finish is for.
+   */
+  private plugMemo: { sig: string; plugs: Set<number> } = { sig: '', plugs: new Set() };
+  private plugs(): Set<number> {
+    const st = this.door();
+    if (!st) return new Set();
+    const b = this.b;
+    const W = b.width, H = b.height;
+    const units = this.scene.units;
+    const field = units.filter((u) => u.status === Status.Field && u.officer !== 0xffff);
+    const sig = `${b.info.turn}|${field.map((u) => `${u.slot}@${u.x},${u.y}`).join(';')}`;
+    if (this.plugMemo.sig === sig) return this.plugMemo.plugs;
+    const plugs = new Set<number>();
+    const goal: [number, number] = [(st.x0 + st.x1) >> 1, (st.y0 + st.y1) >> 1];
+    const gk = goal[1] * W + goal[0];
+    const ours = units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    const foeAt = new Int16Array(W * H).fill(-1);
+    for (const e of field) if (e.slot >= PLAYER_SLOTS) foeAt[e.y * W + e.x] = e.slot;
+    const comp = new Int16Array(W * H).fill(-1);
+    let nc = 0;
+    for (const u0 of ours) {
+      const mt = moveTypeOf(b.s, u0);
+      this.pathDist(goal, mt, u0.x, u0.y);
+      const ws = this.walkBan().sig;
+      const m = this.distMaps.get(`${goal[0]},${goal[1]},${mt}${ws ? `|${ws}` : ''}`);
+      const k0 = u0.y * W + u0.x;
+      if (!m || m[k0] === 0xffff || comp[k0] >= 0) continue;
+      // the cells this unit walks to round the enemies (its group's region), and the enemies on
+      // its edge nearest to the door
+      const c = nc++;
+      const q = [k0];
+      comp[k0] = c;
+      let reach = false;
+      let best = 0xffff;
+      const front: number[] = [];
+      for (let h = 0; h < q.length; h++) {
+        const k = q[h], cx = k % W, cy = (k - cx) / W;
+        if (k === gk) reach = true;
+        for (const [nx, ny] of [[cx, cy - 1], [cx + 1, cy], [cx, cy + 1], [cx - 1, cy]]) {
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const n = ny * W + nx;
+          if (comp[n] === c || moveCost(mt, b.s.terrain[n]) === 0xff) continue;
+          if (foeAt[n] >= 0) {
+            if (m[n] !== 0xffff && m[n] <= best) {
+              if (m[n] < best) front.length = 0;
+              best = m[n];
+              if (!front.includes(foeAt[n])) front.push(foeAt[n]);
+            }
+            continue;
+          }
+          comp[n] = c;
+          q.push(n);
+        }
+      }
+      if (!reach) for (const f of front) plugs.add(f);
+    }
+    this.plugMemo = { sig, plugs };
+    return plugs;
+  }
+
+  /** The cell of the door the finish heads for now, or null. */
+  private doorCell(): [number, number] | null {
+    const d = this.door();
+    return d ? [(d.x0 + d.x1) >> 1, (d.y0 + d.y1) >> 1] : null;
+  }
+
+  /** The battle has a door (GrindParams.door): the finish's walks there and behind it are long ones. */
+  private doorWay(): boolean {
+    return !!this.know.doors?.length && this.know.victory !== null && paramOr(this.p, 'door') > 0.5;
+  }
+
+  /**
+   * The current group's door (GrindParams.door) while the victory officer stands where no walk of
+   * 유비's (else of any unit of ours) reaches, as an arrival step; else null.
+   */
+  private door(): BattleKnowledge['steps'][number] | null {
+    if (!this.know.doors?.length || this.know.victory === null || paramOr(this.p, 'door') <= 0.5) return null;
+    const g = this.activeGroup();
+    const d = this.know.doors.find((x) => x.group === g);
+    if (!d) return null;
+    const b = this.b;
+    const vs = b.slotOfOfficer(this.know.victory);
+    if (vs === NONE || this.scene.units[vs].status !== Status.Field) return null;
+    const ours = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
+    const u = ours.find((x) => x.officer === 0) ?? ours[0];
+    if (!u) return null;
+    const V = this.scene.units[vs];
+    const mt = moveTypeOf(b.s, u);
+    this.pathDist([V.x, V.y], mt, u.x, u.y);
+    const sig = this.walkBan().sig;
+    const m = this.distMaps.get(`${V.x},${V.y},${mt}${sig ? `|${sig}` : ''}`);
+    if (!m || m[u.y * b.width + u.x] !== 0xffff) return null;
+    return { group: d.group, trigger: 11, officer: d.actor, x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 };
   }
 
   /** Win cells that can fire now: a pending arrival step stands in for them. */
@@ -5208,11 +5364,18 @@ export class GrindPolicy {
     return this.know.victory;
   }
 
-  /** Steps still to do (each needs time in the finish). */
+  /** Turns the finish keeps for the steps still to do: about 12 each, a door doorTurns (it opens the last fight). */
+  private stepTurns(): number {
+    const door = this.door() ? 1 : 0;
+    return (this.stepsLeft() - door) * 12 + door * paramOr(this.p, 'doorTurns');
+  }
+
+  /** Steps still to do (each needs time in the finish; a door counts while it is the way). */
   private stepsLeft(): number {
-    if (!this.know.steps.length) return 0;
+    const door = this.door() ? 1 : 0;
+    if (!this.know.steps.length) return door;
     const g = this.activeGroup();
-    return this.know.steps.filter((s) => s.group >= g).length;
+    return this.know.steps.filter((s) => s.group >= g).length + door;
   }
 
   private winCell(u: Unit, x: number, y: number): boolean {
@@ -5612,7 +5775,9 @@ export class GrindPolicy {
       const mp = Math.max(1, movePoints(o, b.s.items));
       return turnsLeft <= Math.ceil(this.pathDist(adjAt, moveTypeOf(b.s, u), u.x, u.y) / mp) + 3;
     })();
-    const goal = wakeWalk ? (guarded ? (this.wakeLeadWait() && !leadWalk && !own ? this.wakeRear : own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.wakeArmyUp() ? this.wakeMouthMemo.at[0] : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.goalFor(u);
+    // (door: 유비 walks to it with the others, none being the actor; left with no goal he stayed in
+    // the north-east healing while the party went on, and the few at the door fell short there)
+    const goal = wakeWalk ? (guarded ? (this.wakeLeadWait() && !leadWalk && !own ? this.wakeRear : own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.wakeArmyUp() ? this.wakeMouthMemo.at[0] : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt ?? this.doorCell()) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -5620,6 +5785,8 @@ export class GrindPolicy {
     const alts = this.altK > 0 ? new Map<string, Action>() : null;
     // (duelReach: an enemy next to the partner of another's ending duel taken now: a kill opens the cell for its actor)
     const openers = paramOr(this.p, 'duelReach') > 0.5 ? this.duelOpeners(u) : null;
+    // (door: the enemies that shut the way to it)
+    const plugs = fin && this.door() ? this.plugs() : null;
     const offer = (a: Action) => {
       if (openers && a.target !== NONE && openers.has(a.target)) {
         const D = this.scene.units[a.target];
@@ -5862,7 +6029,7 @@ export class GrindPolicy {
         const apW = fin && goal ? (leadWalk ? 12 : 3) : (hw && hp >= max * 0.5) || this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
-        else base -= apW * Math.min(dist, hnEsc || (fin && goal && this.wakeWay()) ? 200 : 40);
+        else base -= apW * Math.min(dist, hnEsc || (fin && goal && (this.wakeWay() || this.doorWay())) ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
@@ -5950,7 +6117,10 @@ export class GrindPolicy {
           const all = combatExp(true, o.level, od.level, lethal, d);
           let v = base;
           // (the end held: the enemies whose defeat ends the battle are farmed like in the grind, no rush on them)
-          if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot ? 40 : 0);
+          // (door: a plug on the way to it is hit by what it takes: a blow its fortress mends overnight
+          // is worth little, 허저 healed 240 a turn while 마량 and 조운 stood by him for 1)
+          const plug = !!plugs && plugs.has(d);
+          if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot && !plug ? 40 : 0) + (plug ? (DOOR_PLUG * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 300 : 0) : 0);
           else if (penHit) {
             // the pen's troops go to the best exp per damage point first (buildPen's price)
             v += w * hit - this.penLam * dmg;
