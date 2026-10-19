@@ -16,7 +16,7 @@
 import { applyStoryNames } from './names';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { serialize, deserialize } from 'node:v8';
 import type { BattleSnapshot } from './sandbox';
@@ -27,6 +27,7 @@ import { runGrindBattle, safeGrindBattle, type CarryState } from './battle';
 import { defaultParams, PARAM_SPECS, type GrindParams } from './policy';
 import { dropRushPlans, frozenBattles, frozenOf, newEvolveState, populationSize, sampleGeneration, updateGeneration, updateRestart, type CandidateResult, type EvolveState } from './evolve';
 import { realRun } from './realrun';
+import { codeRevision } from './revision';
 import { progressHtml, progressJson, progressMarkdown, guideMarkdown, resultsJson, tacticNames, itemNames, type Bench, type BenchRow, type HintAb, type LiveStatus } from './report';
 import { dsTable, S } from '../../native/battle/strings';
 import { parseBakData } from '../../formats/tables';
@@ -432,7 +433,9 @@ async function main() {
       // candidates finished before a stop are kept on local disk (gen-N.json) and not played again;
       // entries marked `injected` (a recovered run) join this generation's results as they are
       const pendingPath = join(WORK, `gen-${st.gen}.json`);
-      type Pending = { i: number; params: GrindParams; campaign: CampaignResult; injected?: boolean };
+      // (each entry carries the code revision it was played under: one played under other code is played again)
+      type Pending = { i: number; params: GrindParams; campaign: CampaignResult; injected?: boolean; rev?: string };
+      const rev = codeRevision(join(dirname(new URL(import.meta.url).pathname), '..', '..'));
       let pending: Pending[] = [];
       try {
         pending = JSON.parse(readFileSync(pendingPath, 'utf8')) as Pending[];
@@ -448,6 +451,9 @@ async function main() {
         live.done++;
         live.candidates.push({ objective: c.objective, n99: c.n99, top15: c.top15, wins: c.wins, forced: c.forced, seconds: c.ms / 1000, cleared: c.cleared, frontier: c.frontier });
       };
+      const stale = pending.filter((pd) => !pd.injected && pd.rev !== rev);
+      if (stale.length) console.log(`gen ${st.gen}: ${stale.map((pd) => `cand ${pd.i}`).join(', ')} played under other code (${stale[0].rev ?? 'unstamped'}, now ${rev}): played again`);
+      pending = pending.filter((pd) => pd.injected || pd.rev === rev);
       for (const pd of pending) {
         if (pd.injected || (pd.i < cands.length && JSON.stringify(pd.params) === JSON.stringify(cands[pd.i]))) {
           take(pd.i, pd.params, pd.campaign);
@@ -491,7 +497,7 @@ async function main() {
           }
           if (!c) c = await runCampaign(files, snaps, cands[i], { variants: runVariants, seed, limit: limit || undefined, elites: lineElites, frozen: new Set(lineFrozen), hints: hints.perBattle, rescue, extra, backtrack: opt('backtrack', 2), backJump: opt('backjump', 0), replan: opt('replan', 2), levelGate });
           take(i, cands[i], c);
-          savePending({ i, params: cands[i], campaign: c });
+          savePending({ i, params: cands[i], campaign: c, rev });
           writeProgress(st, live);
           console.log(`gen ${st.gen} cand ${i}: cleared ${c.cleared}${c.frontier ? ` (stopped at [${c.frontier.index}] ${c.frontier.name})` : ' (reached the end)'} n99 ${c.n99} top15 ${c.top15} ${(c.ms / 1000).toFixed(0)} s (${c.battlesRun} battles)`);
         }
