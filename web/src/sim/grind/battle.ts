@@ -13,6 +13,7 @@ import type { Stage } from '../../formats/scenario';
 import { HuainanStrike } from './huainan';
 import { LurePlan, lureOptionsFor, scriptTraps } from './lure';
 import { YeonjuEscape, isYeonjuAt } from './yeonju';
+import { isXiangyangAt } from './xiangyang';
 import { mixSeed } from './search';
 import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, type GrindParams, type GrindStats } from './policy';
 
@@ -189,7 +190,11 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // (gainPick: the named actors of the block's duels and persuasions go out first: 가맹관2's 엄안
       // ends the battle in a duel with 하후덕, 정군산's 황충 with 하후연)
       const actors = paramOr(params, 'gainPick') > 0.5 && stage ? gainActors(stage, script.block) : [];
-      const picks = pickFormation(state, [...fi.fixed, ...own], free, params.strong, params.band > 0, params.healers, learn, actors);
+      // 양양 gate plan: the strongest go out (the gate is held by the two at its front against L44..51
+      // horsemen, the town's L46..55 holders after: 8 seeds won 1 with the lowest levels sent out
+      // to farm, 3 with the strongest)
+      const yyGate = paramOr(params, 'yyGate') > 0.5 && isXiangyangAt(snap.chapter, snap.stage, snap.block);
+      const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate ? free : params.strong, params.band > 0, params.healers, learn, actors);
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];
       else

@@ -47,7 +47,7 @@ import {
 import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import { isYeonjuAt } from './yeonju';
-import { YY, isXiangyangAt, yyAnchor, yyBanned, yyHoldFinish, yyInit, yyPull, yySpring, yyUpdate, type YyCtx, type YyState } from './xiangyang';
+import { YY, isXiangyangAt, yyAnchor, yyBan, yyBanned, yyHoldFinish, yyInit, yyPull, yySpring, yyUpdate, type YyCtx, type YyState } from './xiangyang';
 import { YP, isYangpyeongAt, ypAnchor, ypBan, ypHoldFinish, ypInit, ypPull, ypSpring, ypUpdate, ypWestBank, type YpCtx, type YpState } from './yangpyeong';
 import {
   AiMode,
@@ -604,6 +604,14 @@ export interface GrindParams {
    */
   yyPlan: number;
   /**
+   * 양양 gate plan (xiangyang.ts), above 0.5 (over yyPlan): the party breaks the gate from the
+   * south, fights whatever comes out of the town there, gathers on the gate and the street behind
+   * it (outside r6's area), springs r6 and holds there while the wave comes up the gate one or two
+   * at a time (no archers among them), then goes for 조인 (the disguised 관우's duel ends it once
+   * the gate and the holder of (17,6) are gone).
+   */
+  yyGate: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -817,6 +825,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'wakeShut', min: 0, max: 1, def: 0.6 },
   // 양양 plan: r6 sprung with the party in the wood its horsemen cannot enter, then 조인
   { key: 'yyPlan', min: 0, max: 1, def: 0.6 },
+  // 양양 gate plan: the wave held on the gate and the street behind it, then 조인
+  { key: 'yyGate', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Phases in a row without a fight after which the hold before shut wakers ends (wakeShut). */
@@ -1818,7 +1828,7 @@ export class GrindPolicy {
     const wt = this.noWakeBan ? { sig: '', cells: null } : this.wakeTrap();
     const cap = this.capBan();
     const amb = this.ambBan();
-    const yp = this.yp ? (this.ypMemo = ypBan(this.yp, this.b.width, this.b.height, this.ypMemo)) : null;
+    const yp = this.yp ? (this.ypMemo = ypBan(this.yp, this.b.width, this.b.height, this.ypMemo)) : this.yy ? (this.ypMemo = yyBan(this.yy, this.scene.units, this.b.width, this.b.height, this.ypMemo)) : null;
     if (!cap && !amb && !yp) return wt;
     const key = `${wt.sig}|${cap ? 1 : 0}|${amb ? amb.sig : ''}|${yp ? yp.sig : ''}`;
     if (this.banMemo?.key === key) return this.banMemo.v;
@@ -1839,6 +1849,8 @@ export class GrindPolicy {
   /** Slot of the unit sent into the ambush area, NONE when none. */
   private ambScout = NONE;
   private ambMemo: { sig: string; cells: Uint8Array } | null = null;
+  /** Records of ambushes whose officers came onto the field (양양 plan: not open again once their wave is down). */
+  private ambSpent: number[] = [];
 
   /** The first ambush not sprung yet (none of its officers on the field, its IF flags clear), or null. */
   private ambushOpen(): BattleKnowledge['ambushes'][number] | null {
@@ -1854,7 +1866,14 @@ export class GrindPolicy {
         if (foes.filter((sl) => this.scene.units[sl].status === Status.Field && (this.scene.units[sl].mode === AiMode.Wait || this.scene.units[sl].mode === AiMode.Hold)).length < 3) continue;
         return z;
       }
-      if (foes.length < 3 || foes.some((sl) => this.scene.units[sl].status === Status.Field)) continue;
+      if (foes.length < 3) continue;
+      if (foes.some((sl) => this.scene.units[sl].status === Status.Field)) {
+        if (this.yy && !this.ambSpent.includes(z.record)) this.ambSpent.push(z.record);
+        continue;
+      }
+      // (양양 plan: r6 sprung once is spent once its wave is down, not open again: its area stayed
+      // banned after the wave, and the finish sat at the gate until the time ran out)
+      if (this.yy && this.ambSpent.includes(z.record)) continue;
       return z;
     }
     return null;
@@ -2993,9 +3012,10 @@ export class GrindPolicy {
       this.log?.('yp: 양평관 plan on');
     }
     if (this.yp) ypUpdate(this.yp, this.ypCtx());
-    if (this.yy === null && paramOr(this.p, 'yyPlan') > 0.5 && this.know.stage && isXiangyangAt(this.know.stage.chapter, this.know.stage.index, this.know.block) && this.know.ambushes.some((z) => z.record === YY.r6)) {
-      this.yy = yyInit();
-      this.log?.('yy: 양양 plan on');
+    if (this.yy === null && (paramOr(this.p, 'yyPlan') > 0.5 || paramOr(this.p, 'yyGate') > 0.5) && this.know.stage && isXiangyangAt(this.know.stage.chapter, this.know.stage.index, this.know.block) && this.know.ambushes.some((z) => z.record === YY.r6)) {
+      const gate = paramOr(this.p, 'yyGate') > 0.5;
+      this.yy = yyInit(gate);
+      this.log?.(`yy: 양양 ${gate ? 'gate' : 'wood'} plan on`);
     }
     if (this.yy) yyUpdate(this.yy, this.yyCtx());
     this.updateAmbush();
@@ -3825,6 +3845,17 @@ export class GrindPolicy {
     // 양평관 plan: no finish before the camp (the deadline's last two turns still finish)
     if (this.yp && ypHoldFinish(this.yp) && this.deadline() - b.info.turn > 2) return;
     if (this.yy && yyHoldFinish(this.yy) && this.deadline() - b.info.turn > 2) return;
+    // 양양 gate plan: the wave is down, nothing comes at us any more (the town's holders do not
+    // move): the finish sets out at once, the holders on the way to 조인 are fought as it goes
+    // (started on the usual deadline it reached (17,6) only at the time limit)
+    if (this.yy?.gate && this.yy.phase === 'finish') {
+      this.finishing = true;
+      this.stats.finishTurn = b.info.turn + 1;
+      this.stats.finishReason = 'deadline';
+      this.log?.(`finish: gate plan at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
+      this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      return;
+    }
     this.farmOn = this.farmSafe();
     // captures pending: no finish (the victory officer sits behind the trap; taking the cells wins)
     if (this.capPending().length) return;
