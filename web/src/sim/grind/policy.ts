@@ -47,6 +47,7 @@ import {
 import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import { isYeonjuAt } from './yeonju';
+import { YE3_KEY, isYeLastAt } from './ye';
 import { YY, isXiangyangAt, yyAnchor, yyBan, yyBanned, yyHoldFinish, yyInit, yyPull, yySpring, yyUpdate, type YyCtx, type YyState } from './xiangyang';
 import { YP, isYangpyeongAt, ypAnchor, ypBan, ypHoldFinish, ypInit, ypPull, ypSpring, ypUpdate, ypWestBank, type YpCtx, type YpState } from './yangpyeong';
 import {
@@ -631,6 +632,8 @@ export interface GrindParams {
    * officers on the places 업2 puts in 유비's pocket, whose one way out is the inner court's gate.
    */
   yePick: number;
+  /** 업3 race (ye.ts), above 0.5: the finish sets out at turn 1 (the fires seal 조조's castle at turn 34). */
+  ye3Plan: number;
   /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
@@ -853,6 +856,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'doorTurns', min: 8, max: 36, def: 16, int: true },
   // 업 sortie: 업1's picks (the strongest, 업3's duel actors) fight 업2 and 업3; the court's three in 업2's middle pocket
   { key: 'yePick', min: 0, max: 1, def: 0.6 },
+  // 업3 race: the finish from turn 1, the walk pulled the whole way (the fires shut the castle at turn 34)
+  { key: 'ye3Plan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
@@ -1732,6 +1737,8 @@ export class GrindPolicy {
 
   /** The plan's state (null: not 양양 or the plan off). */
   private yy: YyState | null = null;
+  /** 업3 race (GrindParams.ye3Plan, ye.ts) */
+  private ye3 = false;
   private yyCtx(): YyCtx {
     const b = this.b;
     const wave = (record: number) => {
@@ -3083,6 +3090,10 @@ export class GrindPolicy {
       this.log?.(`yy: 양양 ${gate ? 'gate' : 'wood'} plan on`);
     }
     if (this.yy) yyUpdate(this.yy, this.yyCtx());
+    if (!this.ye3 && paramOr(this.p, 'ye3Plan') > 0.5 && this.know.stage && isYeLastAt(this.know.stage.chapter, this.know.stage.index, this.know.block)) {
+      this.ye3 = true;
+      this.log?.('ye3: 업3 race on');
+    }
     this.updateAmbush();
     this.updateBrace();
     this.updateScout();
@@ -3913,6 +3924,17 @@ export class GrindPolicy {
     // 양양 gate plan: the wave is down, nothing comes at us any more (the town's holders do not
     // move): the finish sets out at once, the holders on the way to 조인 are fought as it goes
     // (started on the usual deadline it reached (17,6) only at the time limit)
+    // 업3 race (ye.ts): the fires shut every way to 조조's castle at turn 34 (and 업3's west gate at
+    // turn 8): the finish sets out at turn 1 through the east gate (started on the usual deadline,
+    // turn 39, the castle was already shut and the party sat at the start: 0/15 on time)
+    if (this.ye3) {
+      this.finishing = true;
+      this.stats.finishTurn = b.info.turn + 1;
+      this.stats.finishReason = 'deadline';
+      this.log?.(`finish: 업3 race at turn ${b.info.turn + 1} (deadline ${this.deadline()})`);
+      this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
+      return;
+    }
     if (this.yy?.gate && this.yy.phase === 'finish') {
       this.finishing = true;
       this.stats.finishTurn = b.info.turn + 1;
@@ -4637,6 +4659,8 @@ export class GrindPolicy {
    */
   private charge(): boolean {
     if (!this.finishing) return false;
+    // (업3 race: no rout of the nearest first; the walk to 조조 is the race against the fires)
+    if (this.ye3) return true;
     if (this.stats.finishReason === 'escape') return true;
     // the bonus arrival still possible: no charge at the leader; the walk-in comes when it is time
     if (this.bonusOn()) return false;
@@ -4849,7 +4873,24 @@ export class GrindPolicy {
    * Danger at (x, y) for u: `worst` = every enemy that can reach the cell hits u (used for the
    * leader), `expected` = each enemy's damage shared between the units it can reach.
    */
-  private danger(u: Unit, x: number, y: number): { worst: number; expected: number; n?: number } {
+  /**
+   * 업3 race: the slot of 허저 when u is 장비 at (x, y) next to him with r3's duel to come: the duel
+   * takes 허저 off the field when 장비 acts there, so his blows on the cell never come (in s4 장비,
+   * hurt, kept off (31,10) for 12 turns and the party sat in the corridor until the fires shut it).
+   */
+  private ye3Duel(u: Unit, x: number, y: number): number {
+    if (!this.ye3 || u.officer !== YE3_KEY) return NONE;
+    for (const g of this.know.gains) {
+      if (g.trigger !== 4 || g.kind !== 'duel' || g.actor !== u.officer || g.other === null || this.fired.has(g.record)) continue;
+      const s = this.b.slotOfOfficer(g.other);
+      if (s === NONE || s < PLAYER_SLOTS || this.scene.units[s].status !== Status.Field) continue;
+      const E = this.scene.units[s];
+      if (Math.abs(E.x - x) + Math.abs(E.y - y) === 1) return s;
+    }
+    return NONE;
+  }
+
+  private danger(u: Unit, x: number, y: number, skip = NONE): { worst: number; expected: number; n?: number } {
     const b = this.b;
     let worst = 0, expected = 0, n = 0;
     const k = y * b.width + x;
@@ -4859,6 +4900,7 @@ export class GrindPolicy {
     const guarded = this.know.guarded.has(u.officer);
     const loose = guarded ? (this.loose[k] ?? []) : [];
     for (const e of new Set([...phys, ...tac, ...loose])) {
+      if (e === skip) continue;
       const E = this.scene.units[e];
       if (!phys.includes(e) && !tac.includes(e)) {
         // reachable only through our lines: counts for the worst case alone
@@ -5785,7 +5827,8 @@ export class GrindPolicy {
     })();
     // (door: 유비 walks to it with the others, none being the actor; left with no goal he stayed in
     // the north-east healing while the party went on, and the few at the door fell short there)
-    const goal = wakeWalk ? (guarded ? (this.wakeLeadWait() && !leadWalk && !own ? this.wakeRear : own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.wakeArmyUp() ? this.wakeMouthMemo.at[0] : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt ?? this.doorCell()) : this.goalFor(u);
+    // (업3 race: 유비 walks to 조조 with the others; left without a goal he stayed at the start alone)
+    const goal = wakeWalk ? (guarded ? (this.wakeLeadWait() && !leadWalk && !own ? this.wakeRear : own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt) : this.wakeArmyUp() ? this.wakeMouthMemo.at[0] : this.goalFor(u)) : !fin || !chg ? null : this.hnEsc() ? this.exitPlan!.cell : walkIn ? walkIn : walkAll ? walkAll : guarded && !this.ye3 ? (own ? ([(own.x0 + own.x1) >> 1, (own.y0 + own.y1) >> 1] as [number, number]) : adjAt ?? this.doorCell()) : this.goalFor(u);
     const vNow = this.victoryNow();
     const vslot = vNow !== null ? b.slotOfOfficer(vNow) : NONE;
     let best: Action = { slot, x: u.x, y: u.y, kind: 'wait', target: NONE, tactic: NONE, value: -1e9, exp: 0, lethal: false };
@@ -5945,7 +5988,7 @@ export class GrindPolicy {
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
       // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
-      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y);
+      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y, this.ye3Duel(u, x, y));
       let base = -deathCost(dang, 1);
       // 회남: keep out of the reach of the waiting units not being peeled
       if (hnBan && hnBan[y * b.width + x]) base -= 300;
@@ -6030,6 +6073,7 @@ export class GrindPolicy {
       } else if (!(farming && gg)) {
         // (회남 escape: the fort is 40+ steps from the hold; capped at 40 the far units saw no gain in
         // walking and sat out the whole push in the north-east)
+        // (업3 race: 조조 is 59 steps from 유비 by the east gate, more by the west: capped, nobody moved)
         // (the wake phase walks up too: flat-rate casts kept idleTurns at 0 and the party sat at the start)
         // (and so do phases without a fight (castIdle): 와구관2's party healed each other for 40 turns
         // while the 14 enemies waited in their positions)
@@ -6037,7 +6081,7 @@ export class GrindPolicy {
         const apW = fin && goal ? (leadWalk ? 12 : 3) : (hw && hp >= max * 0.5) || this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
-        else base -= apW * Math.min(dist, hnEsc || (fin && goal && (this.wakeWay() || this.doorWay())) ? 200 : 40);
+        else base -= apW * Math.min(dist, hnEsc || (fin && goal && (this.wakeWay() || this.doorWay() || this.ye3)) ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }

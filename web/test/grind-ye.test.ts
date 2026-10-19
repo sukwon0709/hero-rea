@@ -36,7 +36,7 @@ describe('grind: 업 sortie (yePick)', () => {
   it('yePick is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('yePick');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('yePick');
     expect(d.yePick).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yePick;
@@ -61,5 +61,35 @@ describe('grind: 업 sortie (yePick)', () => {
     expect(new Set(short)).toEqual(new Set([30, 58, 1, 189, 203, 187, 63, 2]));
     expect(isYeFirstAt(4, 2, 2)).toBe(true);
     expect(isYeFirstAt(4, 2, 3)).toBe(false);
+  });
+
+  it('ye3Plan is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
+    const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    expect(PARAM_SPECS[PARAM_SPECS.length - 1].key).toBe('ye3Plan');
+    expect(d.ye3Plan).toBeGreaterThan(0.5);
+    const old = { ...d } as Record<string, number>;
+    delete old.ye3Plan;
+    expect(paramOr(old as unknown as typeof d, 'ye3Plan')).toBe(d.ye3Plan);
+    expect(clampParams({ ...d, ye3Plan: 9 }).ye3Plan).toBe(1);
+    expect(clampParams({ ...d, ye3Plan: -9 }).ye3Plan).toBe(0);
+  });
+
+  it('업3 race: 장비 and the highest levels of 업2 west pocket take the places 업3 puts east with 유비; the pockets keep their officers', async () => {
+    const { yeOrder, YE_MIDDLE, YE_WEST, YE3_EAST, isYeLastAt } = await import('../src/sim/grind/ye');
+    // the chain's 업1 sortie: [level, class]
+    const spec: Record<number, [number, number]> = { 2: [46, 8], 53: [43, 7], 30: [50, 12], 64: [44, 12], 203: [61, 8], 58: [63, 5], 187: [58, 2], 189: [60, 8], 37: [57, 2], 33: [55, 2], 1: [59, 7], 113: [55, 2], 38: [59, 5] };
+    const state = { officers: Array.from({ length: 256 }, (_, i) => ({ dyn: { level: spec[i]?.[0] ?? 1, cls: spec[i]?.[1] ?? 0 } })) } as never;
+    const picks = [2, 53, 30, 64, 203, 58, 187, 189, 37, 33, 1, 113, 38];
+    const plain = yeOrder(state, picks);
+    const out = yeOrder(state, picks, true);
+    expect(YE3_EAST.every((k) => YE_WEST.includes(k))).toBe(true);
+    expect(YE3_EAST.map((k) => out[k])).toEqual([2, 58, 37]);
+    expect([out[0], out[11]]).toEqual([113, 30]);
+    expect(new Set(YE_WEST.map((k) => out[k]))).toEqual(new Set(YE_WEST.map((k) => plain[k])));
+    for (let k = 0; k < picks.length; k++) if (!YE_WEST.includes(k)) expect(out[k]).toBe(plain[k]);
+    expect(YE_MIDDLE.map((k) => out[k])).toEqual([203, 189, 1]);
+    expect(isYeLastAt(4, 2, 4)).toBe(true);
+    expect(isYeLastAt(4, 2, 3)).toBe(false);
   });
 });
