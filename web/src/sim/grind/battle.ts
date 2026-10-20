@@ -16,7 +16,7 @@ import { YeonjuEscape, isYeonjuAt } from './yeonju';
 import { isXiangyangAt } from './xiangyang';
 import { YE_LAST_BLOCK, isYeFirstAt, yeOrder } from './ye';
 import { mixSeed } from './search';
-import { GrindPolicy, analyseBattle, clampParams, paramOr, isHuainan, isHuainanAt, huainanPicks, pickFormation, scriptDoors, type GrindParams, type GrindStats } from './policy';
+import { GrindPolicy, analyseBattle, clampParams, paramOr, plansOn, isHuainan, isHuainanAt, huainanPicks, pickFormation, scriptDoors, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
   officer: number;
@@ -528,12 +528,16 @@ export async function searchBattle(
     // (hold together near 유비, kill whatever comes, finish at the end) and the hold plan (하비:
     // form up near the start, let the waves come, push out after), each with rerolls. The game's
     // own AI (native, charging from turn 1) and the finish-99 rush are gone.
-    const a = aggressive(base);
+    // Every per-battle plan is switched on for them: a switch only acts at its own battle, so the
+    // evolve's plan can come to it with the switch drifted off (무릉: wakeShut 0.46 lost every try,
+    // switched on it won 10/10 from the same carry).
+    const rb = plansOn(base);
+    const a = aggressive(rb);
     const k = (r - 1) % 3;
     const c: GrindParams =
       k === 0 ? { ...a, rerolls: r + 7 }
-      : k === 1 ? clampParams({ ...base, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, cbPrice: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
-      : clampParams({ ...base, hold: 1, brace: 0, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, cbPrice: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
+      : k === 1 ? clampParams({ ...rb, approach: 0, escort: 2.5, keep: 1, kill: 2, conserve: 0, cbPrice: 0, finish: 2, risk: 2, guard: 0.7, lead: 0, rerolls: r + 3 })
+      : clampParams({ ...rb, hold: 1, brace: 0, approach: 0, escort: 2.5, lead: 0, kill: 2, conserve: 0, cbPrice: 0, keep: 1, guard: 1.2, heal: Math.max(base.heal, 2), finish: 4, rerolls: r + 11 });
     consider(await safeGrindBattle(files, snap, c, carry));
   }
   return { best: best as unknown as BattleOutcome, tried };

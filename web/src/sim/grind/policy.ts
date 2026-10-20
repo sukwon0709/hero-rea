@@ -909,6 +909,20 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
   return chapter === 1 && stage === 2 && block === 12;
 }
 
+/**
+ * The per-battle plans' on/off switches (each acts at its own battle only, on above 0.5). Away from
+ * that battle a switch changes nothing, so while the evolve's frontier is short of it the switch
+ * drifts at random and can come to the battle off (무릉: wakeShut 0.46, 0 wins).
+ */
+export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan'] as const satisfies readonly ParamKey[];
+
+/** The plan with every per-battle plan switched on (at least its default). */
+export function plansOn(p: GrindParams): GrindParams {
+  const o = { ...p };
+  for (const k of PLAN_SWITCHES) o[k] = Math.max(paramOr(p, k), PARAM_SPECS.find((sp) => sp.key === k)!.def);
+  return o;
+}
+
 export function defaultParams(): GrindParams {
   const p = {} as GrindParams;
   for (const s of PARAM_SPECS) p[s.key] = s.def;

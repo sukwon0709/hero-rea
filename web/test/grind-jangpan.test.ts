@@ -55,3 +55,23 @@ describe('grind: 장판파 2nd plan (jpPlan)', () => {
     expect(jpHoldFinish(st)).toBe(false);
   });
 });
+
+describe('grind: per-battle plan switches (plansOn)', () => {
+  it('switches every per-battle plan on (at least its default) and leaves the rest alone', async () => {
+    const { defaultParams, plansOn, PLAN_SWITCHES, PARAM_SPECS } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    for (const k of PLAN_SWITCHES) expect(PARAM_SPECS.find((s) => s.key === k)!.def).toBeGreaterThan(0.5);
+    // 무릉: the evolve's wakeShut drifted to 0.46 (off); a switch learnt higher stays as it is
+    const p = { ...d, wakeShut: 0.46, ypPlan: 0.97, yyGate: 0.1, kill: 1.7 };
+    const o = plansOn(p);
+    expect(o.wakeShut).toBe(d.wakeShut);
+    expect(o.yyGate).toBe(d.yyGate);
+    expect(o.ypPlan).toBe(0.97);
+    expect(o.kill).toBe(1.7);
+    expect(p.wakeShut).toBe(0.46);
+    // a plan made before a switch existed reads its default
+    const old = { ...d } as Record<string, number>;
+    delete old.jpPlan;
+    expect(plansOn(old as unknown as typeof d).jpPlan).toBe(d.jpPlan);
+  });
+});
