@@ -48,6 +48,7 @@ import { healUseful } from '../../engine/battle/combat';
 import { saveScene, restoreScene, mixSeed, type SceneSave } from './search';
 import { isYeonjuAt } from './yeonju';
 import { YE3_KEY, isYeLastAt } from './ye';
+import { JP_PULL, isJangpanAt, jpAnchor, jpBanned, jpEscort, jpHoldFinish, jpInit, jpUpdate, type JpState } from './jangpan';
 import { YY, isXiangyangAt, yyAnchor, yyBan, yyBanned, yyHoldFinish, yyInit, yyPull, yySpring, yyUpdate, type YyCtx, type YyState } from './xiangyang';
 import { YP, isYangpyeongAt, ypAnchor, ypBan, ypHoldFinish, ypInit, ypPull, ypSpring, ypUpdate, ypWestBank, type YpCtx, type YpState } from './yangpyeong';
 import {
@@ -641,6 +642,12 @@ export interface GrindParams {
    */
   yeLanes: number;
   /**
+   * 장판파 2nd plan (jangpan.ts), above 0.5: while a 민중 walks to the exit (its arrival wins at turn
+   * 12) nobody finishes; the party holds the south-east wood (no horseman enters it), 유비 in its far
+   * corner off the edge, the others round him.
+   */
+  jpPlan: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -866,6 +873,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'ye3Plan', min: 0, max: 1, def: 0.6 },
   // 업 sortie: 업2's outer pockets an archer and a healer each, the west (the longer fight) the stronger
   { key: 'yeLanes', min: 0, max: 1, def: 0.6 },
+  // 장판파 2nd: no finish while a 민중 walks to the exit; the party in the south-east wood, 유비 in its corner
+  { key: 'jpPlan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
@@ -1738,8 +1747,14 @@ export class GrindPolicy {
 
   /** The plan's anchor for this unit (null: none): 양평관's, else 양양's. */
   private ypAnchorOf(u: Unit): [number, number] | null {
+    if (this.jp) return jpAnchor(this.jp, moveTypeOf(this.b.s, u), this.know.guarded.has(u.officer));
     return this.yp ? ypAnchor(this.yp, u, moveTypeOf(this.b.s, u)) : this.yy ? yyAnchor(this.yy, moveTypeOf(this.b.s, u)) : null;
   }
+
+  // ---- 장판파 2nd plan (GrindParams.jpPlan, jangpan.ts)
+
+  /** The plan's state (null: not 장판파 2nd or the plan off). */
+  private jp: JpState | null = null;
 
   // ---- 양양 plan (GrindParams.yyPlan, xiangyang.ts)
 
@@ -2889,6 +2904,7 @@ export class GrindPolicy {
   private holding(): boolean {
     if (this.yp && !this.finishing && ypAnchor(this.yp, this.scene.units[0], 0)) return true;
     if (this.yy && !this.finishing && yyAnchor(this.yy, 0)) return true;
+    if (this.jp && !this.finishing && this.jp.phase !== 'off') return true;
     if (this.wakeMouth()) return true;
     return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
   }
@@ -3098,6 +3114,11 @@ export class GrindPolicy {
       this.log?.(`yy: 양양 ${gate ? 'gate' : 'wood'} plan on`);
     }
     if (this.yy) yyUpdate(this.yy, this.yyCtx());
+    if (this.jp === null && paramOr(this.p, 'jpPlan') > 0.5 && this.know.stage && isJangpanAt(this.know.stage.chapter, this.know.stage.index, this.know.block) && jpEscort(this.scene.units, (u) => this.controllable(u))) {
+      this.jp = jpInit(this.b.info.turn + 1);
+      this.log?.('jp: 장판파 2nd wood plan on');
+    }
+    if (this.jp) jpUpdate(this.jp, this.b.info.turn + 1, jpEscort(this.scene.units, (u) => this.controllable(u)), this.inRollout ? null : this.log);
     if (!this.ye3 && paramOr(this.p, 'ye3Plan') > 0.5 && this.know.stage && isYeLastAt(this.know.stage.chapter, this.know.stage.index, this.know.block)) {
       this.ye3 = true;
       this.log?.('ye3: 업3 race on');
@@ -3929,6 +3950,7 @@ export class GrindPolicy {
     // 양평관 plan: no finish before the camp (the deadline's last two turns still finish)
     if (this.yp && ypHoldFinish(this.yp) && this.deadline() - b.info.turn > 2) return;
     if (this.yy && yyHoldFinish(this.yy) && this.deadline() - b.info.turn > 2) return;
+    if (this.jp && jpHoldFinish(this.jp) && this.deadline() - b.info.turn > 2) return;
     // 양양 gate plan: the wave is down, nothing comes at us any more (the town's holders do not
     // move): the finish sets out at once, the holders on the way to 조인 are fought as it goes
     // (started on the usual deadline it reached (17,6) only at the time limit)
@@ -5991,6 +6013,8 @@ export class GrindPolicy {
       if (ypHome && ypWestBank(x, y)) continue;
       // (양양 plan, the wave by the wood: who is in it stays in it, 유비 off its edge)
       if (this.yy && yyBanned(this.yy, (cx, cy) => this.yyWood(cx, cy), (cx, cy) => this.yyEdge(cx, cy), [u.x, u.y], guarded, x, y)) continue;
+      // (장판파 2nd plan: who is in the south-east wood stays in it, 유비 off its edge)
+      if (this.jp && jpBanned(this.jp, (cx, cy) => this.yyWood(cx, cy), (cx, cy) => this.yyEdge(cx, cy), [u.x, u.y], guarded, x, y)) continue;
       if (this.capHeld(x, y)) continue;
       // stand on the cell for the evaluation (range shapes read the unit map)
       b.place(slot, null, x, y);
@@ -6070,7 +6094,7 @@ export class GrindPolicy {
         const da = this.bracing() || ypA || this.wakeMouth() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);
         // (회남: firmer while peeling, and for 유비 always: left loose he backed into the south-east
         // corner away from the wave and was cut off there, 3 of 10 seeds lost at turn 14)
-        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.yp ? ypPull(this.yp) : ypA && this.yy ? yyPull(this.yy) : 4) * Math.max(0, da - (guarded ? 1 : 2));
+        base -= (hnLive && (guarded || this.hnPhase === 'peel') ? 10 : ypA && this.jp ? JP_PULL : ypA && this.yp ? ypPull(this.yp) : ypA && this.yy ? yyPull(this.yy) : 4) * Math.max(0, da - (guarded ? 1 : 2));
         // bracing: tight around 유비 (the enemy finds no gap to reach him)
         if (this.bracing() && !guarded && leaderPos) base -= 1.5 * Math.max(0, Math.abs(leaderPos[0] - x) + Math.abs(leaderPos[1] - y) - 2);
       } else if (mend) {
