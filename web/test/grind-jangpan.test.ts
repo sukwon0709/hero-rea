@@ -75,3 +75,22 @@ describe('grind: per-battle plan switches (plansOn)', () => {
     expect(plansOn(old as unknown as typeof d).jpPlan).toBe(d.jpPlan);
   });
 });
+
+describe('grind: rescue sortie (rescueSortie)', () => {
+  it('fields the strongest and the duel actors, and leaves the rest alone', async () => {
+    const { defaultParams, rescueSortie, PARAM_SPECS, pickFormation } = await import('../src/sim/grind/policy');
+    const d = defaultParams();
+    const spec = (k: string) => PARAM_SPECS.find((s) => s.key === k)!;
+    const p = { ...d, strong: 0, gainPick: 0.44, kill: 1.7 };
+    const o = rescueSortie(p);
+    expect(o.strong).toBe(spec('strong').max);
+    expect(o.gainPick).toBeGreaterThan(0.5);
+    expect(o.kill).toBe(1.7);
+    expect(p.strong).toBe(0);
+    // the strongest go out: with 6 free slots and strong at its max, the two lowest stay home
+    const off = (level: number) => ({ dyn: { level, flags: 0x80 } });
+    const state = { officers: [off(24), off(15), off(19), off(17), off(18), off(16), off(18), off(13), off(19)] } as never;
+    expect(pickFormation(state, [0], 6, p.strong).sort((a, b) => a - b)).toEqual([1, 3, 4, 5, 6, 7]);
+    expect(pickFormation(state, [0], 6, o.strong).sort((a, b) => a - b)).toEqual([2, 3, 4, 5, 6, 8]);
+  });
+});

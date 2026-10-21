@@ -938,6 +938,19 @@ export function plansOn(p: GrindParams): GrindParams {
   return o;
 }
 
+/**
+ * The sortie of a rescue try (a battle the plan's own tries all lost): the strongest officers go
+ * out (every free slot to the highest levels, not the lowest to farm) and the actors of the block's
+ * duels and persuasions first (gainPick), as a player retrying a lost battle would field them.
+ * 고성's six picks for 유비 (no 관우 or 장비) took 손건 L15 and 간옹 L17 over 미방 L18 and the
+ * L18 무도가: 0 wins in 60 tries from the evolve's carry, 3-4 of 6 with the strongest; 강하's
+ * 조운 (his action next to 장무 ends it) stayed home: 1 of 6, 4 of 6 with him out.
+ */
+export function rescueSortie(p: GrindParams): GrindParams {
+  const max = (k: ParamKey) => PARAM_SPECS.find((sp) => sp.key === k)!.max;
+  return { ...p, strong: max('strong'), gainPick: Math.max(paramOr(p, 'gainPick'), max('gainPick')) };
+}
+
 export function defaultParams(): GrindParams {
   const p = {} as GrindParams;
   for (const s of PARAM_SPECS) p[s.key] = s.def;

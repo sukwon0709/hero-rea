@@ -16,7 +16,7 @@ import { YeonjuEscape, isYeonjuAt } from './yeonju';
 import { isXiangyangAt } from './xiangyang';
 import { YE_LAST_BLOCK, isYeFirstAt, yeOrder } from './ye';
 import { mixSeed } from './search';
-import { GrindPolicy, analyseBattle, clampParams, paramOr, plansOn, isHuainan, isHuainanAt, huainanPicks, pickFormation, scriptDoors, type GrindParams, type GrindStats } from './policy';
+import { GrindPolicy, analyseBattle, clampParams, paramOr, plansOn, rescueSortie, isHuainan, isHuainanAt, huainanPicks, pickFormation, scriptDoors, type GrindParams, type GrindStats } from './policy';
 
 export interface OfficerGain {
   officer: number;
@@ -531,7 +531,10 @@ export async function searchBattle(
     // Every per-battle plan is switched on for them: a switch only acts at its own battle, so the
     // evolve's plan can come to it with the switch drifted off (무릉: wakeShut 0.46 lost every try,
     // switched on it won 10/10 from the same carry).
-    const rb = plansOn(base);
+    // They field the strongest officers too, the duel / persuasion actors first (rescueSortie): the
+    // plan's sortie sends the lowest levels out to farm, and where that loses a player brings the
+    // strongest (고성: 0 of 60 tries with 손건 and 간옹 out, 3-4 of 6 with the strongest).
+    const rb = rescueSortie(plansOn(base));
     const a = aggressive(rb);
     const k = (r - 1) % 3;
     const c: GrindParams =
