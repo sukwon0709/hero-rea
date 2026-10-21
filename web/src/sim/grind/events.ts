@@ -64,6 +64,11 @@ export interface ScriptGain {
   needsFlags: number[];
   /** Story: fires by itself (setup, turn events). */
   automatic: boolean;
+  /**
+   * Enemy officers the record takes off the field (REMOVE), when it has any: 가맹관1's 장비-마초
+   * duel sends 마초, 마대 and their four horsemen away.
+   */
+  removes?: number[];
 }
 
 /** Record bytes as the VM copies them (ScriptState.record). */
@@ -107,6 +112,7 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
     let bonus = 0;
     const levels: { officer: number; value: number }[] = [];
     const recruits: number[] = [];
+    const removes: number[] = [];
     let duel = false;
     let needsFlags: number[] = [];
     let gated = false;
@@ -122,6 +128,7 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
       else if (c.name === 'ADD_STAT') levels.push({ officer: a.officer, value: a.value });
       else if ((c.name === 'UNIT_FORCE' || c.name === 'SET_FORCE') && a.force === 0 && a.officer !== 0) recruits.push(a.officer);
       else if (c.name === 'DUEL') duel = true;
+      else if (c.name === 'REMOVE' && a.officer !== 0) removes.push(a.officer);
       else if (c.name === 'BATTLE_END') ends = true;
       else if (c.name === 'LEAVE_GROUP' && !gated && leaveWins(stage, block, r.group)) leaves = true;
     }
@@ -149,6 +156,7 @@ export function scriptGains(stage: Stage, block: number): ScriptGain[] {
       ends,
       needsFlags: gated ? needsFlags : [],
       automatic,
+      ...(removes.length ? { removes } : {}),
     });
   }
   return out;

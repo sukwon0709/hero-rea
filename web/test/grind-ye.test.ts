@@ -36,7 +36,7 @@ describe('grind: 업 sortie (yePick)', () => {
   it('yePick is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 4].key).toBe('yePick');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 5].key).toBe('yePick');
     expect(d.yePick).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yePick;
@@ -66,7 +66,7 @@ describe('grind: 업 sortie (yePick)', () => {
   it('ye3Plan is appended after yePick, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('ye3Plan');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 4].key).toBe('ye3Plan');
     expect(d.ye3Plan).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.ye3Plan;
@@ -96,7 +96,7 @@ describe('grind: 업 sortie (yePick)', () => {
   it('yeLanes is appended after ye3Plan, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('yeLanes');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('yeLanes');
     expect(d.yeLanes).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.yeLanes;

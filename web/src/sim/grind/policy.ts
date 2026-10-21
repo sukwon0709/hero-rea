@@ -648,6 +648,15 @@ export interface GrindParams {
    */
   jpPlan: number;
   /**
+   * Clearing duels, above 0.5: a duel whose record takes more enemies off the field than its partner
+   * (REMOVE; 가맹관1's 장비 next to 마초 sends 마초, 마대 and their four horsemen away) is worth those
+   * enemies, the cell next to the partner is judged without them (the duel fires as the actor acts,
+   * before any of them moves), and the actor goes first when it can reach that cell. Without it the
+   * duel was a +1 level and 장비 kept away from the six L39..41 horsemen (duelKeep) until they had
+   * run the party down.
+   */
+  clearDuel: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -875,7 +884,12 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'yeLanes', min: 0, max: 1, def: 0.6 },
   // 장판파 2nd: no finish while a 민중 walks to the exit; the party in the south-east wood, 유비 in its corner
   { key: 'jpPlan', min: 0, max: 1, def: 0.6 },
+  // clearing duels: a duel that REMOVEs more than its partner is worth those enemies, its cell judged without them
+  { key: 'clearDuel', min: 0, max: 1, def: 0.6 },
 ];
+
+/** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
+const CLEAR_WORTH = 250;
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
 const DOOR_PLUG = 800;
@@ -912,9 +926,10 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
 /**
  * The per-battle plans' on/off switches (each acts at its own battle only, on above 0.5). Away from
  * that battle a switch changes nothing, so while the evolve's frontier is short of it the switch
- * drifts at random and can come to the battle off (무릉: wakeShut 0.46, 0 wins).
+ * drifts at random and can come to the battle off (무릉: wakeShut 0.46, 0 wins). clearDuel acts only
+ * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way.
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -1552,7 +1567,50 @@ export class GrindPolicy {
     }
     v += g.recruits.length * 150;
     if (g.needsFlags.length) v *= 0.5;
-    return v * this.p.event;
+    return v * this.p.event + this.clearValue(g);
+  }
+
+  /** Clearing duels (GrindParams.clearDuel): enemy slots on the field the gain's record REMOVEs, when they are more than its partner. */
+  private clearSlots(g: ScriptGain): number[] {
+    if (g.trigger !== 4 || g.kind !== 'duel' || g.other === null || !g.removes || g.removes.length < 2 || paramOr(this.p, 'clearDuel') <= 0.5) return [];
+    const out: number[] = [];
+    for (const off of g.removes) {
+      const s = this.b.slotOfOfficer(off);
+      if (s !== NONE && s >= PLAYER_SLOTS && this.scene.units[s].status === Status.Field && this.scene.units[s].officer !== 0xffff) out.push(s);
+    }
+    return out.length >= 2 && out.includes(this.b.slotOfOfficer(g.other)) ? out : [];
+  }
+
+  /** What the enemies a clearing duel sends away are worth: each one besides the partner at about a strong hit taken off us. */
+  private clearValue(g: ScriptGain): number {
+    if (this.fired.has(g.record)) return 0;
+    return Math.max(0, this.clearSlots(g).length - 1) * CLEAR_WORTH;
+  }
+
+  /** Enemy slots a clearing duel of u's fired by acting at (x, y) takes off the field (its partner next to the cell), or null. */
+  private clearAt(u: Unit, x: number, y: number): Set<number> | null {
+    let out: Set<number> | null = null;
+    for (const g of this.know.gains) {
+      if (g.actor !== u.officer || this.fired.has(g.record) || this.capRecord(g.record)) continue;
+      const sl = this.clearSlots(g);
+      if (!sl.length) continue;
+      const P = this.scene.units[this.b.slotOfOfficer(g.other!)];
+      if (Math.abs(P.x - x) + Math.abs(P.y - y) !== 1) continue;
+      for (const s of sl) (out ??= new Set()).add(s);
+    }
+    return out;
+  }
+
+  /** u has a clearing duel (clearAt) it can fire from a cell it reaches this phase (not banned). */
+  private clearInReach(u: Unit): boolean {
+    if (!this.know.gains.some((g) => g.actor === u.officer && this.clearSlots(g).length && !this.fired.has(g.record))) return false;
+    const ban = this.walkBan();
+    for (const [x, y] of this.reachable(u)) {
+      if (ban.cells && ban.cells[y * this.b.width + x]) continue;
+      if (unitAt(this.b.s, x, y) !== NONE && unitAt(this.b.s, x, y) !== u.slot) continue;
+      if (this.clearAt(u, x, y)) return true;
+    }
+    return false;
   }
 
   /** Gains a unit standing at (x, y) after its action would fire (adjacency, cell, area). */
@@ -3193,7 +3251,8 @@ export class GrindPolicy {
             x.slot - y.slot,
         );
         // (duelReach: the actor of an ending duel taken now goes first when its partner is in reach)
-        const u = (paramOr(this.p, 'duelReach') > 0.5 ? order.find((v) => this.duelInReach(v)) : undefined) ?? order[0];
+        // (clearDuel: so does the actor of a clearing duel that can reach the cell next to its partner)
+        const u = (paramOr(this.p, 'duelReach') > 0.5 ? order.find((v) => this.duelInReach(v)) : undefined) ?? (paramOr(this.p, 'clearDuel') > 0.5 ? order.find((v) => this.clearInReach(v)) : undefined) ?? order[0];
         if (!u) break;
         done.add(u.slot);
         // the enemies' reach as it is now (earlier units moved or fell), with this unit lifted off
@@ -4934,7 +4993,7 @@ export class GrindPolicy {
     return NONE;
   }
 
-  private danger(u: Unit, x: number, y: number, skip = NONE): { worst: number; expected: number; n?: number } {
+  private danger(u: Unit, x: number, y: number, skip: number | Set<number> = NONE): { worst: number; expected: number; n?: number } {
     const b = this.b;
     let worst = 0, expected = 0, n = 0;
     const k = y * b.width + x;
@@ -4944,7 +5003,7 @@ export class GrindPolicy {
     const guarded = this.know.guarded.has(u.officer);
     const loose = guarded ? (this.loose[k] ?? []) : [];
     for (const e of new Set([...phys, ...tac, ...loose])) {
-      if (e === skip) continue;
+      if (typeof skip === 'number' ? e === skip : skip.has(e)) continue;
       const E = this.scene.units[e];
       if (!phys.includes(e) && !tac.includes(e)) {
         // reachable only through our lines: counts for the worst case alone
@@ -6034,7 +6093,7 @@ export class GrindPolicy {
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
       // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
-      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y, this.ye3Duel(u, x, y));
+      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y, this.clearAt(u, x, y) ?? this.ye3Duel(u, x, y));
       let base = -deathCost(dang, 1);
       // 회남: keep out of the reach of the waiting units not being peeled
       if (hnBan && hnBan[y * b.width + x]) base -= 300;
