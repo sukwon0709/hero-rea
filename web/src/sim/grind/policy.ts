@@ -657,6 +657,16 @@ export interface GrindParams {
    */
   clearDuel: number;
   /**
+   * 양평관 lure (yangpyeong.ts, with ypPlan), above 0.5: across the bridge the party first stands
+   * where the three guards waiting by r5's area (L54..55, outside the camp) reach it without anyone
+   * stepping into the area, kills them as they come out, and springs r5 only then (by turn 34 at the
+   * latest), its scout walking in whatever the danger; r5's wave is fought on the west bank and the
+   * finish follows. Without it r5 was sprung at turn 25 with the three still there, the party went back
+   * over the bridge and the wave stood on it, healed each turn, until the turns ran out (6 of 32 won
+   * from the gen-433 carries; 16 of 32 with it).
+   */
+  ypLure: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -886,10 +896,15 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'jpPlan', min: 0, max: 1, def: 0.6 },
   // clearing duels: a duel that REMOVEs more than its partner is worth those enemies, its cell judged without them
   { key: 'clearDuel', min: 0, max: 1, def: 0.6 },
+  // 양평관 lure: the three guards by r5's area lured out and killed first, then r5 sprung and fought on the west bank
+  { key: 'ypLure', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
 const CLEAR_WORTH = 250;
+
+/** Pull per step of 양평관's r5 scout into its area under the lure plan (GrindParams.ypLure; any other scout: 20). */
+const YP_SCOUT_PULL = 100;
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
 const DOOR_PLUG = 800;
@@ -929,7 +944,7 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
  * drifts at random and can come to the battle off (무릉: wakeShut 0.46, 0 wins). clearDuel acts only
  * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way.
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -3189,7 +3204,7 @@ export class GrindPolicy {
     }
     this.updateHold();
     if (this.yp === null && paramOr(this.p, 'ypPlan') > 0.5 && this.know.stage && isYangpyeongAt(this.know.stage.chapter, this.know.stage.index, this.know.block)) {
-      this.yp = ypInit();
+      this.yp = ypInit(paramOr(this.p, 'ypLure') > 0.5);
       this.log?.('yp: 양평관 plan on');
     }
     if (this.yp) ypUpdate(this.yp, this.ypCtx());
@@ -6234,7 +6249,10 @@ export class GrindPolicy {
       }
       if (ambAt) {
         const sd = this.areaDist(ambAt, moveTypeOf(b.s, u), x, y);
-        base += sd === 0 ? 300 : -20 * Math.min(sd, 60);
+        // (양평관 lure: r5's scout walks in whatever the danger: it held two steps short for up to
+        // fourteen turns, kept off by the camp's guards, while the deadline came)
+        const sp = this.yp?.lurePlan && ambAt.record === YP.r5 ? YP_SCOUT_PULL : 20;
+        base += sd === 0 ? 300 + 15 * sp : -sp * Math.min(sd, 60);
       }
       // 양평관 plan: the bait stands where one or two of the waiting guards reach it
       if (this.ypBait && this.ypBait.slot === slot && this.ypBait.x === x && this.ypBait.y === y) base += 300;

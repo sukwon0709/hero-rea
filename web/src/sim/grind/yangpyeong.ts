@@ -27,6 +27,15 @@
 // bridge to 조조 and the last kills take ~12 turns: a later finish ran out of turns with 9 alive).
 // Measured (8 seeds): the GA carries J-c31515 / J-c30310c (L32..49) lose either way (0/8 off and
 // on: r4 and the bridge go well, r5's wave of L53..58 officers wipes the party); +10 levels win 2/8.
+// Lure plan (GrindParams.ypLure, on by default): in the cross phase the three guards waiting by r5's
+// area (L54..55, outside the camp: they woke with r5 and joined its wave) are lured out first: the
+// party stands at (10,11), where they reach it with nobody stepping into r5's area, and kills them as
+// they come. Then r5 (by turn 34 at the latest), its scout pulled in whatever the danger (it held two
+// steps short for up to fourteen turns), and the wave is fought on the west bank, the finish right
+// after (no hold5). The old order (r5 at turn 25 with the three still there, back over the bridge,
+// the wave held on it) lost on time: the wave's front stood on the bridge, out of reach of all but
+// three of ours and healed every turn by the wave's healer, for ten turns (gen-433 carries, L35..54,
+// 16 seeds each: 6/32 won; with the lure 16/32).
 
 import type { Unit } from '../../engine/battle/types';
 import { CLASS_MOVE_TYPE, PLAYER_SLOTS, Status, AiMode } from '../../engine/battle/types';
@@ -46,6 +55,10 @@ export interface YpState {
   since: number;
   /** turn the party first stood formed in this phase */
   formedAt?: number;
+  /** the lure plan (GrindParams.ypLure) */
+  lurePlan?: boolean;
+  /** lure plan, cross phase: the west bank's guards outside the camp still stand (the party lures them out) */
+  lure?: boolean;
 }
 
 /** Cells and turns of the plan. */
@@ -58,6 +71,8 @@ export const YP = {
   bridge: [20, 13] as [number, number],
   /** the west end: formed here before r5 */
   west: [12, 13] as [number, number],
+  /** lure plan: the guards waiting by r5's area reach the party here (outside the area) */
+  lure: [10, 11] as [number, number],
   /** in the forest east of the bridge: r5's wave is fought here (its cavalry stops at the edge) */
   hold: [18, 13] as [number, number],
   /** the bridge's east end: plugged by the sturdiest while r5's wave comes */
@@ -70,6 +85,8 @@ export const YP = {
   crossBy: 24,
   r5By: 25,
   finishBy: 32,
+  /** lure plan: r5 sprung by then whatever stands */
+  r5ByLure: 34,
 };
 
 /** The west bank and the bridge (x <= 15): banned until the crossing. */
@@ -77,8 +94,8 @@ export function ypWestBank(x: number, _y: number): boolean {
   return x <= 15;
 }
 
-export function ypInit(): YpState {
-  return { phase: 'form', since: 1 };
+export function ypInit(lurePlan = false): YpState {
+  return lurePlan ? { phase: 'form', since: 1, lurePlan } : { phase: 'form', since: 1 };
 }
 
 export interface YpCtx {
@@ -117,6 +134,18 @@ function formed(st: YpState, c: YpCtx, r: number): number {
   return n / us.length;
 }
 
+/** The west bank's guards outside the camp (not r5's, not the victory officer): 서황 by r5's area joined the wave at the bridge. */
+function westGuards(c: YpCtx): Unit[] {
+  const r5 = c.know.ambushes.find((z) => z.record === YP.r5)?.officers ?? [];
+  return foes(c).filter((e) => ypWestBank(e.x, e.y) && (e.y >= 7 || e.x >= 8) && !r5.includes(e.officer) && e.officer !== c.know.victory);
+}
+
+/** Average troops share of our controllable units. */
+function fitShare(c: YpCtx): number {
+  const us = ours(c);
+  return us.length ? us.reduce((a, u) => a + c.hpShare(u), 0) / us.length : 0;
+}
+
 /** Moves the plan on (each player phase, before the ambush and finish decisions). */
 export function ypUpdate(st: YpState, c: YpCtx): void {
   const set = (p: YpPhase, why: string) => {
@@ -145,7 +174,9 @@ export function ypUpdate(st: YpState, c: YpCtx): void {
       else if (c.turn >= YP.crossBy) set('cross', 'late');
       else return;
     } else if (st.phase === 'cross') {
-      if (c.fired(YP.r5)) set('hold5', 'r5 sprung');
+      // (lure plan: r5's wave is fought on the west bank, no going back over the bridge)
+      if (st.lurePlan) st.lure = westGuards(c).length > 0;
+      if (c.fired(YP.r5)) set(st.lurePlan ? 'finish' : 'hold5', 'r5 sprung');
       else return;
     } else if (st.phase === 'hold5') {
       // the wave spent: nothing awake left but what holds by 조조
@@ -175,7 +206,7 @@ export function ypAnchor(st: YpState, _u: Unit, mt: number): [number, number] | 
     case 'bridge':
       return YP.bridge;
     case 'cross':
-      return YP.west;
+      return st.lure ? YP.lure : YP.west;
     case 'hold5':
       return YP.hold;
     default:
@@ -199,13 +230,11 @@ export function ypSpring(st: YpState, c: YpCtx, record: number): boolean {
   }
   if (record === YP.r5) {
     if (st.phase !== 'cross') return false;
+    // lure plan: the guards by r5's area lured out and killed first (they joined the wave), then r5
+    if (st.lurePlan) return c.turn >= YP.r5ByLure || (!westGuards(c).length && !foes(c).some(awake) && fitShare(c) >= 0.6 && formed(st, c, 4) >= 0.6);
     if (c.turn >= YP.r5By) return true;
-    const us = ours(c);
-    const fit = us.length > 0 && us.reduce((a, u) => a + c.hpShare(u), 0) / us.length >= 0.7;
     // (the west bank's guards outside the camp first: 서황 by r5's area joined the wave at the bridge)
-    const r5 = c.know.ambushes.find((z) => z.record === YP.r5)?.officers ?? [];
-    const left = foes(c).filter((e) => ypWestBank(e.x, e.y) && (e.y >= 7 || e.x >= 8) && !r5.includes(e.officer) && e.officer !== c.know.victory);
-    return c.turn - st.since >= 1 && fit && !left.length && !foes(c).some(awake) && formed(st, c, 4) >= 0.6;
+    return c.turn - st.since >= 1 && fitShare(c) >= 0.7 && !westGuards(c).length && !foes(c).some(awake) && formed(st, c, 4) >= 0.6;
   }
   return false;
 }

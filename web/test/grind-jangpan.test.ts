@@ -6,7 +6,7 @@ describe('grind: 장판파 2nd plan (jpPlan)', () => {
   it('jpPlan is appended last, on by default, learnable within bounds; plans made before it read the default', async () => {
     const { defaultParams, paramOr, clampParams, PARAM_SPECS } = await import('../src/sim/grind/policy');
     const d = defaultParams();
-    expect(PARAM_SPECS[PARAM_SPECS.length - 2].key).toBe('jpPlan');
+    expect(PARAM_SPECS[PARAM_SPECS.length - 3].key).toBe('jpPlan');
     expect(d.jpPlan).toBeGreaterThan(0.5);
     const old = { ...d } as Record<string, number>;
     delete old.jpPlan;
