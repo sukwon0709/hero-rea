@@ -676,6 +676,36 @@ export interface GrindParams {
    */
   syPlan: number;
   /**
+   * The victory officer's healers first, above 0.5 (a plan switch; acts where a door was the way,
+   * GrindParams.door, once it is open): in the finish an enemy that can cast a troop heal and
+   * stands within its move + 2 of the victory officer is hit before him (a blow on it is worth
+   * DOOR_HEAL_FIRST times the share of its troops taken, a kill 600 more), and a blow on him that
+   * does not take him is not worth the charge's 500 while one stands. 허창2: 사마의 (L65) waits on
+   * his fortress (13,1) between 239 and 240, both 책사 like him; behind the opened door the
+   * party's four or five left hit him for 1300-1700 a turn and the heals put 1200-1500 back each
+   * enemy phase, from turn 33 to the limit (the wins were the runs where he walked out to the
+   * party, away from them).
+   */
+  doorHeal: number;
+  /**
+   * Door ways opened before the finish, above 0.5 (a plan switch; acts where a door is the way,
+   * GrindParams.door): once no enemy is left inside a region of ours (the wanderers farmed; what
+   * is left holds the edges), each unit in shape (DOOR_PRE_HP of its troops; not the leader) walks
+   * to the plug on its own group's edge (plugs: the nearest enemy that shuts the group off from
+   * the door) and its blows on plugs count as in the finish. The actor of a persuasion / duel
+   * that REMOVEs an enemy of the way keeps out of that fight (duelKept, no plug walk) and walks to
+   * its partner once the partner is the plug left on its group's edge (the cell next to it judged
+   * without its blows). 허창2: our west group (관우 and five) is sealed in its pocket by 217 / 256
+   * at the top of the one-wide x 0-1 column, then by 장요 on (6,7), whom 관우's persuasion (r4)
+   * takes off; the east group by 93 / 258 on the way round to 허저 (20,7). The party farmed the
+   * wanderers by turn 10-14 and stood until the finish at turn 18; the west group reached 장요 at
+   * turn 25-29 or never and the courtyard's four L59-60 guards met the east group alone (the door
+   * at turn 31-38, 14 of 32 won). Opened early with 관우 at the column's head, he took the blows
+   * of 217 and 256 together and fell before 장요 in 10 of 32 runs, every one lost; kept back, the
+   * others clear the column, 장요 goes at turn 20-30 and both groups meet in the courtyard.
+   */
+  doorPre: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -908,6 +938,10 @@ export const PARAM_SPECS: ParamSpec[] = [
   // 양평관 lure: the three guards by r5's area lured out and killed first, then r5 sprung and fought on the west bank
   { key: 'ypLure', min: 0, max: 1, def: 0.6 },
   { key: 'syPlan', min: 0, max: 1, def: 0.6 },
+  // behind an opened door, the victory officer's healers (troop heals within reach of him) are hit before him
+  { key: 'doorHeal', min: 0, max: 1, def: 0.6 },
+  // door ways opened before the finish: once the farm is done, each group hits the plug that shuts it off from the door
+  { key: 'doorPre', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -921,6 +955,18 @@ const DISARM_PULL = 3;
 
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
 const DOOR_PLUG = 800;
+
+/** Worth of firing a gain that opens a door's way (GrindParams.doorPre: the plug gone, the partner recruited), in action value. */
+const DOOR_GAIN_WORTH = 600;
+
+/** Pull per step of such a gain's actor towards its partner (GrindParams.doorPre; the finish's walk to its goal: 3). */
+const DOOR_GAIN_PULL = 6;
+
+/** Troops (share of the maximum) a unit needs to walk to its group's plug before the finish (GrindParams.doorPre). */
+const DOOR_PRE_HP = 0.7;
+
+/** Worth of a victory healer's (GrindParams.doorHeal) whole troops taken in one blow, in action value. */
+const DOOR_HEAL_FIRST = 800;
 
 /** Phases in a row without a fight after which the hold before shut wakers ends (wakeShut). */
 const WAKE_IDLE = 2;
@@ -966,7 +1012,7 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
  * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way; and
  * wakeAvoid only where wakers stand (무릉, 남양: without it 남양's party woke the 팔문 army).
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure', 'syPlan'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure', 'syPlan', 'doorHeal', 'doorPre'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -1623,7 +1669,36 @@ export class GrindPolicy {
    */
   private duelKept(off: number): boolean {
     if (paramOr(this.p, 'duelKeep') <= 0 || this.know.guarded.has(off)) return false;
-    return this.know.gains.some((g) => g.kind === 'duel' && g.trigger === 4 && g.actor === off && g.levels.length > 0 && !this.fired.has(g.record));
+    if (this.know.gains.some((g) => g.kind === 'duel' && g.trigger === 4 && g.actor === off && g.levels.length > 0 && !this.fired.has(g.record))) return true;
+    // (doorPre: the actor of a persuasion / duel that takes an enemy of the door's way off the field)
+    return this.know.gains.some((g) => g.actor === off && this.doorWayGain(g));
+  }
+
+  /**
+   * A gain that opens a door's way (GrindParams.doorPre): an unfired persuasion / duel (trigger 4)
+   * whose record REMOVEs its partner, on the field, in a battle whose door is the way (허창2's
+   * 관우 and 장요).
+   */
+  private doorWayGain(g: ScriptGain): boolean {
+    if (paramOr(this.p, 'doorPre') <= 0.5 || g.trigger !== 4 || g.other === null || this.fired.has(g.record)) return false;
+    if ((g.kind !== 'persuade' && g.kind !== 'duel') || !g.removes?.includes(g.other) || !this.door()) return false;
+    const s = this.b.slotOfOfficer(g.other);
+    return s !== NONE && s >= PLAYER_SLOTS && this.scene.units[s].status === Status.Field;
+  }
+
+  /**
+   * The partner slot of u's way-opening gain (doorWayGain) when it can be had now: its flags set,
+   * the partner a plug on u's own group's edge (nothing else in the way), else NONE.
+   */
+  private doorGainOf(u: Unit): number {
+    if (paramOr(this.p, 'doorPre') <= 0.5) return NONE;
+    const st = this.scene.ctx.vm.state;
+    for (const g of this.know.gains) {
+      if (g.actor !== u.officer || !this.doorWayGain(g) || !g.needsFlags.every((f) => getFlag(st, f))) continue;
+      const s = this.b.slotOfOfficer(g.other!);
+      if (this.plugsOf().of.get(u.slot)?.includes(s)) return s;
+    }
+    return NONE;
   }
 
   /** What a gain not yet had is worth now (0 when fired, automatic, or a way to win: the finish takes those). */
@@ -5516,17 +5591,26 @@ export class GrindPolicy {
    * units on the field (허창2: 허저 holds (20,7), the one cell from the north-east into the
    * castle's east street; 장요 (6,7) the west one). Hitting them is what the finish is for.
    */
-  private plugMemo: { sig: string; plugs: Set<number> } = { sig: '', plugs: new Set() };
+  private plugMemo: { sig: string; plugs: Set<number>; of: Map<number, number[]>; islands: number } = { sig: '', plugs: new Set(), of: new Map(), islands: 0 };
   private plugs(): Set<number> {
+    return this.plugsOf().plugs;
+  }
+  /**
+   * plugs, and for each slot of ours shut off from the door the plugs on its own group's edge; and
+   * the enemies standing inside a region of ours (every open cell next to them in it: the farm's
+   * game, not a way's plug).
+   */
+  private plugsOf(): { plugs: Set<number>; of: Map<number, number[]>; islands: number } {
     const st = this.door();
-    if (!st) return new Set();
+    if (!st) return { plugs: new Set(), of: new Map(), islands: 0 };
     const b = this.b;
     const W = b.width, H = b.height;
     const units = this.scene.units;
     const field = units.filter((u) => u.status === Status.Field && u.officer !== 0xffff);
     const sig = `${b.info.turn}|${field.map((u) => `${u.slot}@${u.x},${u.y}`).join(';')}`;
-    if (this.plugMemo.sig === sig) return this.plugMemo.plugs;
+    if (this.plugMemo.sig === sig) return this.plugMemo;
     const plugs = new Set<number>();
+    const fronts: number[][] = [];
     const goal: [number, number] = [(st.x0 + st.x1) >> 1, (st.y0 + st.y1) >> 1];
     const gk = goal[1] * W + goal[0];
     const ours = units.slice(0, PLAYER_SLOTS).filter((u) => this.controllable(u));
@@ -5569,9 +5653,84 @@ export class GrindPolicy {
         }
       }
       if (!reach) for (const f of front) plugs.add(f);
+      fronts[c] = reach ? [] : front;
     }
-    this.plugMemo = { sig, plugs };
-    return plugs;
+    const of = new Map<number, number[]>();
+    for (const u0 of ours) {
+      const c = comp[u0.y * W + u0.x];
+      if (c >= 0 && fronts[c]?.length) of.set(u0.slot, fronts[c]);
+    }
+    let islands = 0;
+    for (const e of field) {
+      if (e.slot < PLAYER_SLOTS) continue;
+      let c0 = -2;
+      for (const [nx, ny] of [[e.x, e.y - 1], [e.x + 1, e.y], [e.x, e.y + 1], [e.x - 1, e.y]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const n = ny * W + nx;
+        if (moveCost(0, b.s.terrain[n]) === 0xff || foeAt[n] >= 0) continue;
+        if (c0 === -2) c0 = comp[n];
+        if (comp[n] < 0 || comp[n] !== c0) {
+          c0 = -1;
+          break;
+        }
+      }
+      if (c0 >= 0) islands++;
+    }
+    this.plugMemo = { sig, plugs, of, islands };
+    return this.plugMemo;
+  }
+
+  /**
+   * Door work before the finish (GrindParams.doorPre): the door is the way and no enemy stands
+   * inside a region of ours any more (the farm has had what came to it; what is left holds the
+   * edges: the plugs and their kind).
+   */
+  private doorPreOn(): boolean {
+    if (paramOr(this.p, 'doorPre') <= 0.5 || this.finishing || !this.door()) return false;
+    return this.plugsOf().islands === 0;
+  }
+
+  /**
+   * The plug a unit of ours in shape (DOOR_PRE_HP of its troops) walks to before the finish
+   * (doorPreOn): the nearest on its own group's edge, else null (its group reaches the door, or the
+   * leader, whom the finish walks).
+   */
+  private plugWalk(u: Unit, hp: number, max: number): [number, number] | null {
+    if (hp < max * DOOR_PRE_HP || this.know.guarded.has(u.officer) || !this.doorPreOn()) return null;
+    // (the actor of a gain that opens the way keeps out of the fight for it: at the head of the
+    // one-wide column 관우 took the blows of 217 and 256 together and fell before 장요, 10 of 32)
+    if (this.know.gains.some((g) => g.actor === u.officer && this.doorWayGain(g))) return null;
+    const fr = this.plugsOf().of.get(u.slot);
+    if (!fr?.length) return null;
+    let best: [number, number] | null = null, bd = 0xffff;
+    for (const s of fr) {
+      const E = this.scene.units[s];
+      const d = this.pathDist([E.x, E.y], moveTypeOf(this.b.s, u), u.x, u.y);
+      if (d < bd) [bd, best] = [d, [E.x, E.y]];
+    }
+    return best;
+  }
+
+  /**
+   * The victory officer's healers (GrindParams.doorHeal): in the finish of a battle with a door,
+   * once the door is open (the victory officer within reach), the enemies besides him that can
+   * cast a troop heal now and stand within their move + 2 of him; else empty.
+   */
+  private vicHealers(): Set<number> {
+    const out = new Set<number>();
+    if (paramOr(this.p, 'doorHeal') <= 0.5 || !this.finishing || !this.doorWay() || this.door()) return out;
+    const b = this.b;
+    const vs = b.slotOfOfficer(this.know.victory!);
+    if (vs === NONE || vs < PLAYER_SLOTS || this.scene.units[vs].status !== Status.Field) return out;
+    const V = this.scene.units[vs];
+    for (let i = PLAYER_SLOTS; i < UNIT_SLOTS; i++) {
+      const E = this.scene.units[i];
+      if (i === vs || E.status !== Status.Field || E.officer === 0xffff) continue;
+      const oe = b.officerOf(E);
+      if (Math.abs(E.x - V.x) + Math.abs(E.y - V.y) > movePoints(oe, b.s.items) + 2) continue;
+      if (castableTactics(oe, E.mp, b.learn).some((t) => (healKind(t) & 1) !== 0)) out.add(i);
+    }
+    return out;
   }
 
   /** The cell of the door the finish heads for now, or null. */
@@ -6051,7 +6210,10 @@ export class GrindPolicy {
     // (duelReach: an enemy next to the partner of another's ending duel taken now: a kill opens the cell for its actor)
     const openers = paramOr(this.p, 'duelReach') > 0.5 ? this.duelOpeners(u) : null;
     // (door: the enemies that shut the way to it)
-    const plugs = fin && this.door() ? this.plugs() : null;
+    const plugs = (fin || this.doorPreOn()) && this.door() ? this.plugs() : null;
+    // (behind an opened door: the victory officer's healers before him, doorHeal)
+    const vheal = fin ? this.vicHealers() : null;
+    const vhealOn = !!vheal && vheal.size > 0;
     const offer = (a: Action) => {
       if (openers && a.target !== NONE && openers.has(a.target)) {
         const D = this.scene.units[a.target];
@@ -6132,6 +6294,11 @@ export class GrindPolicy {
     const gg = !fin ? this.gainGoal(u) : null;
     // an enemy whose fall stops a sleeping army's wake (남양's 262 / 263): walked to round the wakers
     const dg = !fin ? this.disarmAt(u) : null;
+    // the plug on its group's edge, once no enemy is left inside our regions (doorPre)
+    // ... and the actor of a gain that opens the way walks to its partner once it can be had
+    const dgs = this.doorGainOf(u);
+    const dga: [number, number] | null = dgs !== NONE ? [this.scene.units[dgs].x, this.scene.units[dgs].y] : null;
+    const pw = !fin && !dga ? this.plugWalk(u, hp, max) : null;
     // an open gate this unit walks onto (하비's drawbridge), in the finish too
     const gateAt = this.gateGoal(u);
     const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
@@ -6206,7 +6373,7 @@ export class GrindPolicy {
       b.place(slot, null, x, y);
       // acting on a battle-ending cell (next to the persuasion / duel target, on the win cell) ends
       // the battle before any enemy moves: no danger there (팽성: 유비 kept off 조하 by the guard)
-      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y, this.clearAt(u, x, y) ?? this.ye3Duel(u, x, y));
+      const dang = (chg || dn) && (this.winAdjacent(u, x, y) || (chg && this.winCell(u, x, y))) ? { worst: 0, expected: 0, n: 0 } : this.danger(u, x, y, this.clearAt(u, x, y) ?? (dga && Math.abs(dga[0] - x) + Math.abs(dga[1] - y) === 1 ? dgs : this.ye3Duel(u, x, y)));
       let base = -deathCost(dang, 1);
       // 회남: keep out of the reach of the waiting units not being peeled
       if (hnBan && hnBan[y * b.width + x]) base -= 300;
@@ -6273,7 +6440,11 @@ export class GrindPolicy {
       // nothing gained for 2+ turns (the enemy sits and waits): march on it instead of idling
       const ypA = this.ypAnchorOf(u);
       const anc = !fin && this.holding() ? (hnAnc ?? ypA ?? this.wakeMouth() ?? this.anchorNow()) : null;
-      if (mend && quietMend) {
+      if (dga) {
+        base -= DOOR_GAIN_PULL * Math.max(0, this.pathDist(dga, moveTypeOf(b.s, u), x, y) - 1);
+      } else if (pw) {
+        base -= DISARM_PULL * Math.max(0, this.pathDist(pw, moveTypeOf(b.s, u), x, y) - 1);
+      } else if (mend && quietMend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
       } else if (dg) {
         base -= DISARM_PULL * Math.max(0, this.pathDist(dg, moveTypeOf(b.s, u), x, y) - 1);
@@ -6319,7 +6490,7 @@ export class GrindPolicy {
       // (farm phase: safe now, so the open gain, a +50 bonus cell for everyone, is walked to in earnest)
       if (gg && farming) base -= 3 * Math.max(0, this.pathDist(gg.at, moveTypeOf(b.s, u), x, y) - 1);
       else if (gg) base -= Math.min(3, gg.value / 100) * Math.max(0, Math.abs(gg.at[0] - x) + Math.abs(gg.at[1] - y) - 1);
-      base += this.gainAt(u, x, y) * (fin ? 0.5 : 1);
+      base += this.gainAt(u, x, y) * (fin && !dga ? 0.5 : 1) + (dga && Math.abs(dga[0] - x) + Math.abs(dga[1] - y) === 1 ? DOOR_GAIN_WORTH : 0);
       // an open gate: its officer walks onto the cell
       if (gateAt) base += gateAt[0] === x && gateAt[1] === y ? 200 : -4 * Math.min(this.pathDist(gateAt, moveTypeOf(b.s, u), x, y), 40);
       // a capture: its unit walks to the cell (by the terrain costs), steps on it when it may, else waits next to it
@@ -6395,12 +6566,13 @@ export class GrindPolicy {
           // (door: a plug on the way to it is hit by what it takes: a blow its fortress mends overnight
           // is worth little, 허저 healed 240 a turn while 마량 and 조운 stood by him for 1)
           const plug = !!plugs && plugs.has(d);
-          if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot ? 500 : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot && !plug ? 40 : 0) + (plug ? (DOOR_PLUG * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 300 : 0) : 0);
+          if (fin && !(endHeld && this.endsBattle(d))) v += w * all + (chg && d === vslot && (lethal || !vhealOn) ? 500 : 0) + (vhealOn && vheal!.has(d) ? (DOOR_HEAL_FIRST * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 600 : 0) : 0) + (lethal ? 60 : 0) + (dmg * 30) / Math.max(1, maxHp(od)) - (guarded && !lethal && d !== vslot && !plug ? 40 : 0) + (plug ? (DOOR_PLUG * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 300 : 0) : 0);
           else if (penHit) {
             // the pen's troops go to the best exp per damage point first (buildPen's price)
             v += w * hit - this.penLam * dmg;
           } else {
             v += w * (hit + (all - hit) * this.p.kill) - (this.p.conserve * ((lethal ? od.hp : dmg) * 10)) / Math.max(1, maxHp(od)) - Math.min(this.troopCost(d, lethal ? od.hp : dmg, lethal, w), paramOr(this.p, 'cbCap') * w * all);
+            if (plug) v += (DOOR_PLUG * Math.min(dmg, od.hp)) / Math.max(1, maxHp(od)) + (lethal ? 300 : 0);
             // milking: a mendable enemy is not killed while we have slack; its troops go to the low levels first
             if (lethal && this.milkable.has(d)) v -= paramOr(this.p, 'milk') * w * 24;
             const bh = this.slack ? this.bestHit.get(d) ?? 0 : 0;
@@ -6448,7 +6620,8 @@ export class GrindPolicy {
         // 양평관 plan: MP is kept for the fights (the flat-rate casts on a healthy party emptied the
         // healers before r4 came)
         if (this.yp && tc >= 21 && this.ypIdleCast(u, tc, x, y, a.target)) v -= 200;
-        if (chg && a.target === vslot && tc <= 14) v += 300;
+        if (chg && a.target === vslot && tc <= 14 && (a.lethal || !vhealOn)) v += 300;
+        if (vhealOn && tc <= 14 && vheal!.has(a.target)) v += 300 + (a.lethal ? 600 : 0);
         if (v > best.value || alts) offer({ slot, x, y, kind: 'tactic', target: a.target, tactic: tc, value: v, exp: a.exp, lethal: a.lethal, danger: dang.worst });
       }
       // items (ab86): promotions, troop heals (single and area), morale area heals, bombs
