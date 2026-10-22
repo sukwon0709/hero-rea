@@ -667,6 +667,15 @@ export interface GrindParams {
    */
   ypLure: number;
   /**
+   * 신야2 finish need, above 0.5 (a plan switch; acts at 신야2 only): the finish need (finNeed) is
+   * counted at least SY_FIN_NEED times the estimate. 조인 waits in his castle behind two gates and
+   * ten L45-55 guards that never come out (the win: 장비 next to him, or a unit on the cell 256
+   * stands on); the push through them took 16-20 turns where the estimate with the plan's finNeed
+   * said 13-15, and the finish begun 15 turns before the end lost on time in 3 of 8 runs from the
+   * gen-433 carry (8 of 8 with it, the finish from turn 12-20, the farm hold still farming).
+   */
+  syPlan: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -898,6 +907,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'clearDuel', min: 0, max: 1, def: 0.6 },
   // 양평관 lure: the three guards by r5's area lured out and killed first, then r5 sprung and fought on the west bank
   { key: 'ypLure', min: 0, max: 1, def: 0.6 },
+  { key: 'syPlan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -930,6 +940,14 @@ export function paramOr(p: GrindParams, k: ParamKey): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : PARAM_SPECS.find((sp) => sp.key === k)!.def;
 }
 
+/** 신야2: chapter 4 stage 0 block 7 (조인's castle; 양양 is block 5). */
+export function isSinyaAt(chapter: number, stage: number, block: number | undefined): boolean {
+  return chapter === 4 && stage === 0 && block === 7;
+}
+
+/** 신야2's finish need factor at least (GrindParams.syPlan): two turns or so per guard on the way where finPath counts 0.5-0.7. */
+export const SY_FIN_NEED = 2;
+
 /** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
 const HN_TRAP = [3, 10, 9, 13] as const;
 
@@ -948,7 +966,7 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
  * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way; and
  * wakeAvoid only where wakers stand (무릉, 남양: without it 남양's party woke the 팔문 army).
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure', 'syPlan'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -4557,8 +4575,10 @@ export class GrindPolicy {
    * (GrindParams.finNeed times finishEstimate, rounded up), 0 when off or when nothing such stands.
    */
   private finNeed(): number {
-    const f = paramOr(this.p, 'finNeed');
+    let f = paramOr(this.p, 'finNeed');
     if (f <= 0) return 0;
+    // (신야2: the push through 조인's gates and guards takes longer than the estimate counts, syPlan)
+    if (paramOr(this.p, 'syPlan') > 0.5 && this.know.stage && isSinyaAt(this.know.stage.chapter, this.know.stage.index, this.know.block)) f = Math.max(f, SY_FIN_NEED);
     const v = this.victoryNow();
     const vs = v !== null ? this.b.slotOfOfficer(v) : NONE;
     if (vs === NONE || vs < PLAYER_SLOTS || this.scene.units[vs].status !== Status.Field) return 0;
