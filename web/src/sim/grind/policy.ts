@@ -906,6 +906,9 @@ const CLEAR_WORTH = 250;
 /** Pull per step of 양평관's r5 scout into its area under the lure plan (GrindParams.ypLure; any other scout: 20). */
 const YP_SCOUT_PULL = 100;
 
+/** Pull per step towards an enemy whose fall stops a sleeping army's wake (disarmAt; 3, the finish's walk to its goal). */
+const DISARM_PULL = 3;
+
 /** Worth of a plug's (door) whole troops taken in one blow, in action value. */
 const DOOR_PLUG = 800;
 
@@ -942,9 +945,10 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
  * The per-battle plans' on/off switches (each acts at its own battle only, on above 0.5). Away from
  * that battle a switch changes nothing, so while the evolve's frontier is short of it the switch
  * drifts at random and can come to the battle off (무릉: wakeShut 0.46, 0 wins). clearDuel acts only
- * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way.
+ * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way; and
+ * wakeAvoid only where wakers stand (무릉, 남양: without it 남양's party woke the 팔문 army).
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -1022,9 +1026,11 @@ export interface BattleKnowledge {
   /**
    * Wakers: enemy officers next to whom any of ours acting (trigger 4, actor 0x400), or whose defeat
    * (trigger 12), turns a sleeping army on us (SET_AI to an attacking mode on 3+ other officers; 무릉
-   * r4..r7: next to 양안 / 오조, or either falling, sends eight units at us). The officers each wakes.
+   * r4..r7: next to 양안 / 오조, or either falling, sends eight units at us). The officers each wakes;
+   * for a wake behind a LEAVE_GROUP (남양), the flags that stop it (unless) and the enemies whose fall
+   * sets one (disarm).
    */
-  wakers: { officer: number; wakes: number[] }[];
+  wakers: { officer: number; wakes: number[]; unless?: number[]; disarm?: number[] }[];
   /**
    * Captures: arrival records (trigger 6 / 11) that each set a flag and win only once the flags of
    * the others are set too (공안 r4..r7: the four forts; the one taken last, seeing the other three
@@ -1228,6 +1234,22 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
         if (w) w.wakes = [...new Set([...w.wakes, ...wakes])];
         else k.wakers.push({ officer: off, wakes: [...new Set(wakes)] });
       }
+      // (or through a LEAVE_GROUP into a group whose opening record wakes the army unless a flag is
+      // set: 남양 r5..r10, the first of the six front 보병대 to fall sends the whole 팔문 army at us,
+      // r14's SET_AIs, unless 262 or 263 fell first (r11 / r12: +50 and flag 138, no wake))
+      if (off < 0x400 && cmds.some((c) => c.name === 'LEAVE_GROUP') && !cmds.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER' || c.name === 'SET_AI')) {
+        const recs = stage.blocks[script.block]?.records ?? [];
+        const later = recs.filter((x) => x.group > r.group);
+        const next = later.length ? recs.find((x) => x.group === Math.min(...later.map((y) => y.group)) && x.trigger === 0) : undefined;
+        const nc = next ? (recordCommands(stage, next.code) as unknown as { name: string; officer?: number; algo?: number; set?: number[]; clear?: number[]; flag?: number }[]) : [];
+        const cond = nc.find((c) => c.name === 'IF');
+        const unless = cond?.clear ?? [];
+        // (a record that sets the flag the wake needs clear is the way round it, not a waker)
+        const disarms = (cmds as unknown as { name: string; flag?: number; clear?: number }[]).some((c) => c.name === 'SET_FLAG' && !c.clear && unless.includes(c.flag!));
+        const wakes = nc.filter((c) => c.name === 'SET_AI' && c.algo !== 0 && c.officer !== undefined && c.officer !== off).map((c) => c.officer!);
+        if (!disarms && !(cond?.set?.length) && new Set(wakes).size >= 3 && !nc.some((c) => c.name === 'BATTLE_END' || c.name === 'GAME_OVER') && !k.wakers.some((x) => x.officer === off))
+          k.wakers.push({ officer: off, wakes: [...new Set(wakes)], ...(unless.length ? { unless: [...unless] } : {}) });
+      }
     }
     if (r.trigger === 9 && r.p1 > 0 && cmds.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, r.p1);
     // (or through a LEAVE_GROUP into the group that ends it: 부 1st r4, the turn-8 supply raid)
@@ -1248,6 +1270,14 @@ export function analyseBattle(stage: Stage, script: ScriptState): BattleKnowledg
       if (nc.some((c) => c.name === 'GAME_OVER')) k.deadline = Math.min(k.deadline ?? 999, n.p1);
       else if (nc.some((c) => c.name === 'BATTLE_END' || c.name === 'LEAVE_GROUP') && winning(stage, n.code, k.victory, go.block, n.group)) k.endsAt = Math.min(k.endsAt ?? 999, n.p1);
     }
+  }
+  // (the enemies whose fall sets a flag that stops a wake: 남양's 262 / 263, r11 / r12)
+  for (const w of k.wakers) {
+    if (!w.unless) continue;
+    const disarm = (stage.blocks[script.block]?.records ?? [])
+      .filter((r) => r.trigger === 12 && r.p1 < 0x400 && (recordCommands(stage, r.code) as unknown as { name: string; flag?: number; clear?: number }[]).some((c) => c.name === 'SET_FLAG' && !c.clear && w.unless!.includes(c.flag!)))
+      .map((r) => r.p1);
+    if (disarm.length) w.disarm = [...new Set(disarm)];
   }
   k.sleepers = scriptSleepers(stage, script.block);
   // (a sleeper area brings its wave in too, to stand still: the scout walks into it, no ban: 부 2nd
@@ -5130,7 +5160,10 @@ export class GrindPolicy {
     const b = this.b;
     const units = this.scene.units;
     const live: number[] = [];
+    const st = this.scene.ctx.vm.state;
     for (const w of k) {
+      // (disarmed: the flag the wake needs clear is set, 남양's 262 or 263 fallen first)
+      if (w.unless?.some((f) => getFlag(st, f))) continue;
       const s = b.slotOfOfficer(w.officer);
       if (s === NONE || s < PLAYER_SLOTS || units[s].status !== Status.Field) continue;
       let asleep = 0;
@@ -5178,6 +5211,36 @@ export class GrindPolicy {
     }
     this.wakeMemo = { sig: fsig, slots: new Set(live), cells, shut, lead };
     return this.wakeMemo;
+  }
+
+  /**
+   * The nearest enemy (by the walk) whose fall stops a live waker's wake (BattleKnowledge.wakers'
+   * disarm), once every enemy on the field waits: the party walks round the wakers to it, and with
+   * it fallen the army sleeps on for good. 남양: 262 / 263 at the back corners of the 팔문 army; left
+   * to the finish, the party sat at the start for 15 turns and reached 조인 too late, or woke the
+   * whole army by the first front 보병대 it killed and was overrun.
+   */
+  private disarmAt(u: Unit): [number, number] | null {
+    const trap = this.wakeTrap();
+    if (!trap.slots.size || !this.know.wakers.some((w) => w.disarm)) return null;
+    const b = this.b;
+    const units = this.scene.units;
+    for (const e of units.slice(PLAYER_SLOTS)) if (e.status === Status.Field && e.officer !== 0xffff && e.mode !== AiMode.Wait && e.mode !== AiMode.Hold) return null;
+    let best: [number, number] | null = null;
+    let bd = 0xffff;
+    for (const w of this.know.wakers) {
+      if (!w.disarm || !trap.slots.has(b.slotOfOfficer(w.officer))) continue;
+      for (const off of w.disarm) {
+        const s = b.slotOfOfficer(off);
+        if (s === NONE || s < PLAYER_SLOTS || units[s].status !== Status.Field) continue;
+        const d = this.pathDist([units[s].x, units[s].y], moveTypeOf(b.s, u), u.x, u.y);
+        if (d < bd) {
+          bd = d;
+          best = [units[s].x, units[s].y];
+        }
+      }
+    }
+    return best;
   }
 
   /** 유비 can walk to what wins (next to the adjacency partner, or to the victory officer) without entering `ban`. */
@@ -6047,6 +6110,8 @@ export class GrindPolicy {
     const plus = (d: { worst: number; expected: number; n?: number }, extra: number) => ({ worst: d.worst + extra, expected: d.expected + extra, n: d.n });
     // the best script gain open to this unit (duel partner, persuasion target, bonus cell): walk to it
     const gg = !fin ? this.gainGoal(u) : null;
+    // an enemy whose fall stops a sleeping army's wake (남양's 262 / 263): walked to round the wakers
+    const dg = !fin ? this.disarmAt(u) : null;
     // an open gate this unit walks onto (하비's drawbridge), in the finish too
     const gateAt = this.gateGoal(u);
     const feeding = !fin && !guarded && !this.leaderActed && this.leaderKills.size > 0;
@@ -6190,6 +6255,8 @@ export class GrindPolicy {
       const anc = !fin && this.holding() ? (hnAnc ?? ypA ?? this.wakeMouth() ?? this.anchorNow()) : null;
       if (mend && quietMend) {
         base -= 2 * this.pathDist(mend, moveTypeOf(b.s, u), x, y);
+      } else if (dg) {
+        base -= DISARM_PULL * Math.max(0, this.pathDist(dg, moveTypeOf(b.s, u), x, y) - 1);
       } else if (anc) {
         // stay in formation around the anchor: the enemy comes to us; 유비 at its middle
         const da = this.bracing() || ypA || this.wakeMouth() ? this.pathDist(anc, moveTypeOf(b.s, u), x, y) : Math.abs(anc[0] - x) + Math.abs(anc[1] - y);

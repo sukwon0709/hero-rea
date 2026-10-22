@@ -473,6 +473,22 @@ describe.skipIf(!hasGame)('grind: wakers read from the script', () => {
     expect(by.get(232)).toContain(224);
     expect(analyseBattle(a.chapter(1).stages[0], script(13)).wakers).toEqual([]);
     expect(analyseBattle(a.chapter(1).stages[0], script(6)).wakers).toEqual([]);
+    for (const w of k.wakers) expect(w.unless ?? w.disarm).toBeUndefined();
+  });
+
+  it('남양 (chapter 2 stage 1 block 16): the first front 보병대 (256..261) to fall wakes the 팔문 army through r14 unless flag 138, which 262 or 263 falling sets', async () => {
+    const { DevAssets } = await import('../src/native/battle/dev/context');
+    const { analyseBattle } = await import('../src/sim/grind/policy');
+    const a = new DevAssets(loadFiles());
+    const script = { block: 16, victory: { enabled: true, officer: 18 }, defeat: { enabled: false, officer: 0 } } as unknown as Parameters<typeof analyseBattle>[1];
+    const k = analyseBattle(a.chapter(2).stages[1], script);
+    expect(k.wakers.map((w) => w.officer)).toEqual([256, 257, 258, 259, 260, 261]);
+    for (const w of k.wakers) {
+      for (const off of [18, 19, 172, 115, 262, 263, 276, 292]) expect(w.wakes).toContain(off);
+      expect(w.wakes).not.toContain(w.officer);
+      expect(w.unless).toEqual([138]);
+      expect(w.disarm).toEqual([262, 263]);
+    }
   });
 });
 

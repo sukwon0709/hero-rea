@@ -69,6 +69,9 @@ describe('grind: per-battle plan switches (plansOn)', () => {
     expect(o.ypPlan).toBe(0.97);
     expect(o.kill).toBe(1.7);
     expect(p.wakeShut).toBe(0.46);
+    // 남양: the wakers (and the walk round them to 262 / 263) act only with wakeAvoid on
+    expect(PLAN_SWITCHES).toContain('wakeAvoid');
+    expect(plansOn({ ...d, wakeAvoid: 0.45 }).wakeAvoid).toBe(d.wakeAvoid);
     // a plan made before a switch existed reads its default
     const old = { ...d } as Record<string, number>;
     delete old.jpPlan;
