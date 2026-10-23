@@ -37,6 +37,7 @@ Unmarked statements in the rules sections are *read* unless the section says oth
 | `tools/battle_ref.py` | Unicorn harness that runs the original routines on random inputs and prints JSON |
 | `web/test/battle.test.ts` | Unit tests; table checks against MAIN.EXE; map parsing (game-gated) |
 | `web/test/battle-ref.test.ts` | TS vs the original for every harness case (game-gated, needs `python3` + `unicorn`) |
+| `tools/ai_ref.py`, `web/test/ai-ref.test.ts` | The whole computer phase `3f32` under Unicorn vs the TS replay (game-gated) |
 
 ## Map data
 
@@ -241,6 +242,16 @@ for each record r (0..44):
     codes 4/6: (tx,ty) = r.param (2cb4:0a1c -> 9fa6)
 remaining enemy slots: 8222 (cleared)
 ```
+
+- The target lookup `2cb4:002a` scans all 45 slots for the officer, whatever their status. With
+  the formation flag, `3ab6` does not clear the slots before `3926`, so the player units picked
+  on the formation screen (status 1) are already there. An order "move to officer 0" therefore
+  gets 유비's slot as its target, and the unit heads for 유비 from any distance (`ce50` mode 0).
+- `8422(u, facing, x, y)` puts a reserve unit at the first free cell of `7b08`'s search, which
+  stands on terrain its move type can enter: (x,y) itself, then a depth-first walk N,E,S,W at most
+  5 steps deep (each branch tries the cell before going deeper). When nothing is found, the unit is
+  placed at (0xff,0xff). `model.ts place()` has the same search; the (0xff,0xff) case is not
+  reproduced.
 
 `1cb6:4b52` is the battle main loop: `3ab6` (screen setup) and `3d68` (empty), then:
 
@@ -587,8 +598,12 @@ if not scripted and mode != 4:
 - `approach(goal)` is `c772` mode 1 on the grid filled from the goal.
 - `cd4a` does not attack for scripted units, mode 4, or units that already acted.
 
-`planUnit()` / `applyMove()` / `aiTakeTurn()` implement this. The planning helpers are verified;
-the move and act glue is read.
+`planUnit()` / `applyMove()` / `aiTakeTurn()` implement this. All of it is verified end to end
+through `3f32` (see [Verification](#verification)).
+
+- `3f32` calls `ce50` for every unit of the side with mode ≠ 7, including empty slots and units
+  off the field. The target test comes first, so a unit off the field whose target has left gets
+  target 0xff and mode 1.
 
 ### `dc00`: attack nearest
 
@@ -688,7 +703,7 @@ are the battle branches:
 | 18 | REMOVE o | `0cf5:9cbc` → `2cb4:02e8` | Set flag 4, `8504` (leaves; events run), clear flag 4 |
 | 1c | SET_AI o code | `2cb4:031a` | If `0cf5:0ef6(officer)` (AI-controlled officer, *inferred*): clear flag 4 and set mode = `DS:0x4fe6[code]` |
 | 26 | MAP_CHIP x y kind | `2cb4:05e6` | Change a cell's chips and terrain; see below |
-| 27 | MAP_EFFECT b b b | `2cb4:0420` | Map effect at a cell (*not traced*) |
+| 27 | MAP_EFFECT x y kind | `2cb4:0420` | Fire / flood on a cell, or put out; see below |
 | 28 | UNIT_FORCE o b | `2cb4:08f2` | Moves the officer's unit to a free slot on the **other** side (defection): `0cf5:2228(officer, b)`, copy the record (`0b84`; mode 7 if it becomes a player unit and the officer is not AI-controlled, else 3), free the old slot. Message `DS:0x501e` if no slot is free |
 | 2b | DATA 4 w | `2cb4:0b72` | Battle state +0x24 = w (victory bonus exp) |
 | 2d | HALVE b1 b2 | `2cb4:0a9a` | For every unit on the field of one side (b1: 0 player, else enemy): b2 == 0 halves morale via `898c` (can confuse), otherwise halves troops |
@@ -751,8 +766,40 @@ The AI scratch bytes are seeded from the pre-call values (`ai0`), because the or
 values. Results: 4 seeds × 1500 cases (`BATTLE_REF_CASES=1500 BATTLE_REF_SEED=7|11|12|13`) all
 match. The default run is 140 cases at seed 7.
 
-Not executed (display-heavy), only read: `ce50` glue, `c3f4`, `cd4a`, `e91a`/`ec82` sequencing,
-`e42e`, `b2d6`, `b8c0`, `baf6`, `ab86`, `7cc8`, `898c`, `8130`, `4cac`, `6f64`.
+**Experience end to end.** `tools/exp_ref.py` runs whole routines on top of the same machine, with
+the screen, sound, message and script-event routines stubbed (a far return with the routine's own
+stack adjustment; script events answer "none"). `web/test/exp-ref.test.ts` compares:
+
+- `6f64` level-up: 100 exp per level at every level, several levels from one gain, no clamp past
+  99, generic officers and officers at 99+ unchanged;
+- `e91a` (with `df14`, `e26c`, `e2f4`, `e42e`, `ec82`, `898c`, `8504`): attacks, damage tactics
+  and scroll items (kinds 1–3), the hit and kill exp, the defender's counterattack and its own exp
+  (any player-side slot, computer-controlled allies included), level-ups, morale, departures;
+- `b2d6` (with `b8c0`, `baf6`) for a computer-controlled caster: +8 exp for tactics 15..35 that
+  are carried out (a failed confusion or morale roll still counts, a refused heal does not), +12
+  for classes 12/18 casting 21..29;
+- `4a30` victory bonus: every player-side unit on the field, only when the result is a win.
+
+Officer, unit and RNG state match. `6f64` has only three callers (`4a9e`, `b89c`, `ece4`); the
+other level writers are `ADD_STAT` (`0cf5:6bee`, level += b capped at 99, no exp), the enemy setup
+`81c4` (level straight from the deployment record) and the debug menus (`31b4`, `3228`, `41cf`).
+Results: 3000 cases at seeds 1, 2, 3, 5 and 11 all match; the default run is 600 cases at seed 11.
+
+**Computer phases end to end.** `tools/ai_ref.py` runs `1cb6:3f32` itself (both passes) on
+generated fields of 8..18 × 8..14 cells with 15–35% of the slots filled: random classes, levels,
+troops, morale, MP, items, terrain and weather; enemy modes 0..4 with targets anywhere on the map;
+allies on automatic; hidden, confused and scripted units; units in reserve or retreated; empty
+slots. That covers `7cc8` regeneration and the `8130` cure of the enemy side, the `3e12` order,
+and every unit's whole `ce50`: planning, `c3f4` move, `8a6e` arrival, `cd4a` attack with the
+counterattack, `b2d6` tactics, and the departures `8504` (유비 leaving ends the phase with result 3).
+Stubbed on top of `exp_ref.py`: the move and blink animations (`91ca`, `8e82`), the facing
+setter `8d74`, the unit's script events `8ad2`, the victory check `4abc` and the list redraws.
+`web/test/ai-ref.test.ts` replays each phase as `BattleScene.computerPhases` does and compares every
+unit (position, target, tx/ty, status, flags except 0x10/0x80, mode, morale, MP), every officer,
+the unit map, the result byte and the RNG seed. Results: 800 cases at seeds 1, 2 and 5 all match;
+the default run is 150 cases at seed 3.
+
+Not executed, only read: `ab86`, `4cac`, `8422`/`7b08`.
 
 A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path to
 `rand` (`0cf5:4884`/`48c4`). The computer move animation does not touch the RNG.
@@ -760,7 +807,7 @@ A call-graph walk to depth 5 from `1cb6:c3f4` (the move animation) finds no path
 Run:
 
 ```
-HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts
+HERO_GAME_DIR=/path/to/game npx vitest run test/battle.test.ts test/battle-ref.test.ts test/exp-ref.test.ts test/ai-ref.test.ts
 python3 -I tools/battle_ref.py /path/to/game 50 1 | head
 ```
 
@@ -904,7 +951,12 @@ animation is not.
 - **The close-up port.** The screen layout is traced (see *HEXBMAP.R3: close-up backdrops*) but not ported yet. The port's
   close-up is a simplified panel (enlarged unit sprites, troop bar, the original result strings).
 - **Status codes 5/6 and modes 5/6** are not produced by any battle routine that was read.
-- **`MAP_EFFECT`** (`2cb4:0420`) is not traced.
+- **`MAP_EFFECT`** (`2cb4:0420(kind, y, x)`): nothing happens when a unit stands on the cell
+  (`bd7e`, unit map +0x12c0). Kind 0 / 1 draws the overlay `0x2d + kind` on the cell (`be62`), logs
+  `{x, y, kind, old terrain}` in the context's effect list and sets the terrain to `DS:0x4ff4[kind]`
+  (18 / 19, impassable for every move type), with sound 0xc / 0xb. Kind 2 finds the cell's first
+  log entry, puts its terrain back, clears the overlay and drops the entry. 업2's r2 sets 22 fires
+  at the start that cut the start into three pockets; 업3 spreads them every two turns.
 - **`7b08`**, the free-cell search used when a deployment cell is taken, recurses N, E, S, W. The
   port uses a ring search, which can pick a different cell when several are free.
 - **The RNG seed source** `0cf5:48aa` (called at game start) is not documented here.

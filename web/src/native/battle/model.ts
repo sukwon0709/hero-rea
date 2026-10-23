@@ -107,6 +107,10 @@ export class Battle {
   readonly learn: Uint8Array;
   /** Map-change log of MAP_CHIP (DS:0xe5aa); kept so a reload can replay it. */
   readonly chipLog: { x: number; y: number; kind: number; terrain: number }[] = [];
+  /** Cells under a MAP_EFFECT fire or flood with the terrain they had (2cb4:0420's list). */
+  readonly effectLog: { x: number; y: number; terrain: number }[] = [];
+  /** The map as the first setup found it: a retry (총퇴각) reloads the battle (GAMEFLOW.md, result 1). */
+  private atStart: { chips: Uint8Array; terrain: Uint8Array; chipLog: number } | null = null;
 
   constructor(
     readonly state: GameState,
@@ -213,8 +217,8 @@ export class Battle {
   }
 
   /**
-   * 1cb6:8422: puts a reserve unit on the field at (x,y), or the nearest free cell its move type can
-   * stand on (7b08's search, simplified to a breadth-first ring search; the original recurses N,E,S,W).
+   * 1cb6:8422: puts a reserve unit on the field at (x,y), or at the first free cell its move type
+   * can stand on in 7b08's search: depth-first from (x,y), neighbours N,E,S,W, at most 5 steps deep.
    */
   place(slot: number, facingLeft: boolean | null, x: number, y: number): boolean {
     const u = this.units[slot];
@@ -224,11 +228,20 @@ export class Battle {
       const free = (cx: number, cy: number) =>
         cx >= 0 && cy >= 0 && cx < this.width && cy < this.height && this.s.unitAt[cy * this.width + cx] === NONE &&
         moveCost(mt, this.map.terrain[cy * this.width + cx]) !== 0xff;
-      let pos: [number, number] | null = free(x, y) ? [x, y] : null;
-      for (let r = 1; !pos && r < Math.max(this.width, this.height); r++)
-        for (let dy = -r; dy <= r && !pos; dy++)
-          for (let dx = -r; dx <= r && !pos; dx++)
-            if (Math.abs(dx) + Math.abs(dy) === r && free(x + dx, y + dy)) pos = [x + dx, y + dy];
+      const search = (cx: number, cy: number, depth: number): [number, number] | null => {
+        if (free(cx, cy)) return [cx, cy];
+        if (depth === 0) return null;
+        for (let d = 0; d < 4; d++) {
+          const nx = cx + [0, 1, 0, -1][d];
+          const ny = cy + [-1, 0, 1, 0][d];
+          if (nx < 0 || ny < 0 || nx >= this.width || ny >= this.height) continue;
+          const p = search(nx, ny, depth - 1);
+          if (p) return p;
+        }
+        return null;
+      };
+      const pos = search(x, y, 5);
+      // (nothing free within 5 steps: the original puts the unit at (0xff,0xff); not reproduced)
       if (!pos) return false;
       [x, y] = pos;
       u.status = Status.Field;
@@ -264,6 +277,18 @@ export class Battle {
     this.info.weather = 1;
     this.s.weather = 1;
     for (let i = 0; i < UNIT_SLOTS; i++) this.clearSlot(i);
+    // a retry (총퇴각, result 1) restores the pre-battle snapshot and loads the battle again: the map
+    // segment comes back as it was (map changes undone) with an empty unit map (+0x12c0). Left
+    // stale, 8422's search found every record's cell taken and put the units off it (양평관: 조조 and
+    // four more behind the castle wall on every second try)
+    if (!this.atStart) this.atStart = { chips: this.map.chips.slice(), terrain: this.map.terrain.slice(), chipLog: this.chipLog.length };
+    else {
+      this.map.chips.set(this.atStart.chips);
+      this.map.terrain.set(this.atStart.terrain);
+      this.chipLog.length = this.atStart.chipLog;
+      this.effectLog.length = 0;
+    }
+    this.s.unitAt.fill(NONE);
     this.info.turnLimit = sc.battleB;
     let ps = 0;
     let es = PLAYER_SLOTS;

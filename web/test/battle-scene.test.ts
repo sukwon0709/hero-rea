@@ -125,3 +125,77 @@ describe.skipIf(!hasGame)('battle scene: prologue (사수관)', () => {
     expect(log.some((l) => l.includes('병력을 잃었다'))).toBe(true);
   }, 120_000);
 });
+
+describe.skipIf(!hasGame)('battle scene: area heal items (ab86 -> baf6)', () => {
+  it('heals the troops / morale of every ally in the area, no exp, item used up', async () => {
+    const { maxHp } = await import('../src/engine/battle/rules');
+    const { unitAt } = await import('../src/engine/battle/hex');
+    const { NONE } = await import('../src/engine/battle/types');
+    const { scene } = await prologue({});
+    const b = scene.b;
+    b.setup();
+    const u = scene.units[0];
+    // bring 관우 and 장비 next to 유비 (area 1 = the user's cell and its neighbours)
+    const free = [[u.x + 1, u.y], [u.x - 1, u.y], [u.x, u.y + 1], [u.x, u.y - 1]].filter(
+      ([x, y]) => x >= 0 && y >= 0 && x < b.width && y < b.height && unitAt(b.s, x, y) === NONE,
+    );
+    expect(free.length).toBeGreaterThanOrEqual(2);
+    b.place(1, null, free[0][0], free[0][1]);
+    b.place(2, null, free[1][0], free[1][1]);
+    const so = b.stateOfficer(u);
+    const exp0 = [0, 1, 2].map((s) => b.stateOfficer(scene.units[s]).dyn.exp);
+    // 원부서 (0x2f): troops, power 1 -> (1+1)*600 + rand(120), capped at the missing troops
+    for (const s of [0, 1, 2]) b.officerOf(scene.units[s]).hp = 50;
+    so.dyn.items[0] = 0x2f;
+    expect(await scene.useItem(0, 0x2f, 0)).toBe(true);
+    expect(so.dyn.items[0]).toBe(0xff);
+    for (const s of [0, 1, 2]) {
+      const o = b.officerOf(scene.units[s]);
+      expect(o.hp - 50).toBeGreaterThanOrEqual(Math.min(1200, maxHp(o) - 50));
+      expect(o.hp - 50).toBeLessThanOrEqual(1319);
+    }
+    // 활기서 (0x32): morale, power 1 -> (1+3)*10 + rand(4)
+    for (const s of [0, 1, 2]) scene.units[s].morale = 40;
+    so.dyn.items[1] = 0x32;
+    expect(await scene.useItem(0, 0x32, 1)).toBe(true);
+    expect(so.dyn.items[1]).toBe(0xff);
+    for (const s of [0, 1, 2]) {
+      expect(scene.units[s].morale).toBeGreaterThanOrEqual(80);
+      expect(scene.units[s].morale).toBeLessThanOrEqual(83);
+    }
+    // items give no exp
+    expect([0, 1, 2].map((s) => b.stateOfficer(scene.units[s]).dyn.exp)).toEqual(exp0);
+  }, 60_000);
+});
+
+describe.skipIf(!hasGame)('battle scene: 폭탄 (item 0x21, 1cb6:b029)', () => {
+  it('takes min((rand(21)+90)*15, troops) and 30..39 morale, no exp; a wiped-out target leaves', async () => {
+    const { scene } = await prologue({});
+    const b = scene.b;
+    b.setup();
+    const so = b.stateOfficer(scene.units[0]);
+    const exp0 = so.dyn.exp;
+    const t = b.slotOfOfficer(5); // 화웅
+    const o = b.officerOf(scene.units[t]);
+    o.hp = 5000;
+    scene.units[t].morale = 90;
+    so.dyn.items[0] = 0x21;
+    expect(await scene.useItem(0, 0x21, 0, t)).toBe(true);
+    expect(so.dyn.items[0]).toBe(0xff);
+    const dmg = 5000 - o.hp;
+    expect(dmg % 15).toBe(0);
+    expect(dmg).toBeGreaterThanOrEqual(1350);
+    expect(dmg).toBeLessThanOrEqual(1650);
+    expect(90 - scene.units[t].morale).toBeGreaterThanOrEqual(30);
+    expect(90 - scene.units[t].morale).toBeLessThanOrEqual(39);
+    expect(so.dyn.exp).toBe(exp0);
+    // a target with fewer troops than the blast is wiped out and leaves the field
+    const t2 = scene.units.findIndex((u, i) => i >= PLAYER_SLOTS && i !== t && u.status === Status.Field);
+    b.officerOf(scene.units[t2]).hp = 100;
+    so.dyn.items[1] = 0x21;
+    expect(await scene.useItem(0, 0x21, 1, t2)).toBe(true);
+    expect(b.officerOf(scene.units[t2]).hp).toBe(0);
+    expect(scene.units[t2].status).not.toBe(Status.Field);
+    expect(so.dyn.exp).toBe(exp0);
+  }, 60_000);
+});

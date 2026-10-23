@@ -189,11 +189,11 @@ export type Trigger =
   | { type: 'talk'; officer: number } // talked to a map character (8268): trigger 3, p1 = id
   | { type: 'location'; spot: number; town: number } // town spot (8346/a0d4): trigger 2 p1=spot p2=town; on the world map (map kind 1) trigger 5 p1=town
   | { type: 'adjacent'; officer: number; other: number } // battle (82d6/a144): trigger 4 p1=other p2=officer
-  | { type: 'unitAt'; officer: number; x: number; y: number } // battle (83b6/a172): trigger 6 p1=officer p2=y<<8|x
+  | { type: 'unitAt'; officer: number; x: number; y: number } // battle (83b6/a172): trigger 6 p1=officer p2=x<<8|y (a172: unit +3 x high byte, +4 y low)
   | { type: 'targetDefeated' } // battle (842a): trigger 7
   | { type: 'leaderDefeated' } // battle (8494): trigger 8
   | { type: 'turn'; turn: number } // battle (84fe): trigger 9 p1 = turn (1-based)
-  | { type: 'unitInArea'; officer: number; x: number; y: number } // battle (856c/a200): trigger 11
+  | { type: 'unitInArea'; officer: number; x: number; y: number } // battle (856c/a200): trigger 11 x in [p2>>8, p3>>8], y in [p2&0xff, p3&0xff]
   | { type: 'unitDefeated'; officer: number }; // battle (85e0): trigger 12 p1 = officer
 
 // ---------------------------------------------------------------- host
@@ -375,7 +375,7 @@ export class ScriptVM {
       case 4:
         return t.type === 'adjacent' && r.p1 === t.other && r.p2 === t.officer;
       case 6:
-        return t.type === 'unitAt' && r.p1 === t.officer && r.p2 === ((t.y << 8) | t.x);
+        return t.type === 'unitAt' && r.p1 === t.officer && r.p2 === ((t.x << 8) | t.y);
       case 7:
         return t.type === 'targetDefeated';
       case 8:
@@ -385,7 +385,7 @@ export class ScriptVM {
       case 11:
         return (
           t.type === 'unitInArea' && r.p1 === t.officer &&
-          t.y >= r.p2 >> 8 && t.y <= r.p3 >> 8 && t.x >= (r.p2 & 0xff) && t.x <= (r.p3 & 0xff)
+          t.x >= r.p2 >> 8 && t.x <= r.p3 >> 8 && t.y >= (r.p2 & 0xff) && t.y <= (r.p3 & 0xff)
         );
       case 12:
         return t.type === 'unitDefeated' && r.p1 === t.officer;
