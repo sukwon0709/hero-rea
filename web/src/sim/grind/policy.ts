@@ -706,6 +706,21 @@ export interface GrindParams {
    */
   doorPre: number;
   /**
+   * 강하 plan, above 0.5 (a plan switch; acts at 강하 only): the party holds round its start (the
+   * hold plan's anchor, the formation's middle) whatever the plan's `hold`, until the finish; the
+   * finish estimate walks at the leader's pace (the party marches with him), its need (finNeed) is
+   * counted at least GH_FIN_NEED times, and in the finish the walk to the enemy is not capped at 40
+   * steps. 강하: the fourteen L20-23 units in two armies walk to (11,4) and (9,13) and charge at
+   * turn 4 (record 5); the plan walked 유비 south to (2,11), between the two, the L17-18 front fell by
+   * turn 9 and 유비 in the corner after (0 of 8 runs from the gen-431 carry won, 6 of them 유비 퇴각).
+   * Held in the north-west pocket (its mouth at row 4) the armies came one after the other and
+   * nobody fell; started on the plan's `finish` (turn 30) the 44-step march to 장무 lost on time,
+   * at the leader's pace it starts at turn 21-23 and 16 of 16 runs won. Let go once the armies were
+   * fought, the band farm's casters stayed at the start and 유비 walked off with three (the need
+   * counted from there); capped at 40 steps, 관우 and three more stood in the pocket all finish.
+   */
+  ghPlan: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -942,6 +957,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'doorHeal', min: 0, max: 1, def: 0.6 },
   // door ways opened before the finish: once the farm is done, each group hits the plug that shuts it off from the door
   { key: 'doorPre', min: 0, max: 1, def: 0.6 },
+  // 강하 plan: hold round the start until the two charging armies are fought, the finish at the leader's pace
+  { key: 'ghPlan', min: 0, max: 1, def: 0.6 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -994,6 +1011,14 @@ export function isSinyaAt(chapter: number, stage: number, block: number | undefi
 /** 신야2's finish need factor at least (GrindParams.syPlan): two turns or so per guard on the way where finPath counts 0.5-0.7. */
 export const SY_FIN_NEED = 2;
 
+/** 강하: chapter 2 stage 1 block 7 (장무 and 진손; 조운 next to 장무 wins it, record 4). */
+export function isGanghaAt(chapter: number, stage: number, block: number | undefined): boolean {
+  return chapter === 2 && stage === 1 && block === 7;
+}
+
+/** 강하's finish need factor at least (GrindParams.ghPlan), on the walk at the leader's pace plus the guards on the way (finPath). */
+export const GH_FIN_NEED = 1.3;
+
 /** 회남's trap strip: 유비 entering it turns every enemy on him (record 5). */
 const HN_TRAP = [3, 10, 9, 13] as const;
 
@@ -1012,7 +1037,7 @@ export function isHuainanAt(chapter: number, stage: number, block: number | unde
  * where a duel REMOVEs an army (가맹관1's 마초, 장사's 황충 pair), so it drifts the same way; and
  * wakeAvoid only where wakers stand (무릉, 남양: without it 남양's party woke the 팔문 army).
  */
-export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure', 'syPlan', 'doorHeal', 'doorPre'] as const satisfies readonly ParamKey[];
+export const PLAN_SWITCHES = ['ypPlan', 'wakeAvoid', 'wakeShut', 'yyPlan', 'yyGate', 'door', 'yePick', 'ye3Plan', 'yeLanes', 'jpPlan', 'clearDuel', 'ypLure', 'syPlan', 'doorHeal', 'doorPre', 'ghPlan'] as const satisfies readonly ParamKey[];
 
 /** The plan with every per-battle plan switched on (at least its default). */
 export function plansOn(p: GrindParams): GrindParams {
@@ -3129,7 +3154,12 @@ export class GrindPolicy {
     if (this.yy && !this.finishing && yyAnchor(this.yy, 0)) return true;
     if (this.jp && !this.finishing && this.jp.phase !== 'off') return true;
     if (this.wakeMouth()) return true;
-    return (this.p.hold > 0.5 && !this.holdBroken) || this.bracing();
+    return ((this.p.hold > 0.5 || this.ghOn()) && !this.holdBroken) || this.bracing();
+  }
+  /** 강하 plan (GrindParams.ghPlan) at 강하. */
+  private ghOn(): boolean {
+    const st = this.know.stage;
+    return paramOr(this.p, 'ghPlan') > 0.5 && !!st && isGanghaAt(st.chapter, st.index, this.know.block);
   }
   /** The cell the formation gathers around: the brace anchor while bracing, else the hold anchor. */
   private anchorNow(): [number, number] | null {
@@ -3235,7 +3265,7 @@ export class GrindPolicy {
     return best;
   }
   private updateHold() {
-    if (this.p.hold <= 0.5 || this.holdBroken) return;
+    if ((this.p.hold <= 0.5 && !this.ghOn()) || this.holdBroken) return;
     const b = this.b;
     const mine = this.scene.units.slice(0, PLAYER_SLOTS).filter((u) => u.status === Status.Field && this.controllable(u));
     if (!this.anchor) {
@@ -3256,7 +3286,10 @@ export class GrindPolicy {
     const near = this.scene.units.slice(PLAYER_SLOTS).some((e) => e.status === Status.Field && Math.abs(e.x - this.anchor![0]) + Math.abs(e.y - this.anchor![1]) <= 7);
     this.quietTurns = near ? 0 : this.quietTurns + 1;
     // broken: the wave turn is past and nobody came near for 2 turns; or time is short for the push
-    const waveDone = turn > (this.know.soft ?? 0) + 1;
+    // (강하 plan: only by the finish, decideFinish: the armies march on us from the start, no wave
+    // turn; let go once they were fought, the party went its ways, the band farm's casters stayed
+    // at the start and 유비 walked to 장무 with three, the finish's need counted from there)
+    const waveDone = turn > (this.know.soft ?? 0) + 1 && !this.ghOn();
     if ((waveDone && this.quietTurns >= 2) || turn >= b.info.turnLimit - 10) {
       this.holdBroken = true;
       this.log?.(`hold: pushing out at turn ${turn}`);
@@ -4276,6 +4309,11 @@ export class GrindPolicy {
       this.stats.kept = this.scene.units.slice(PLAYER_SLOTS).filter((u) => u.status === Status.Field).map((u) => u.officer);
       return;
     }
+    // (강하 plan: the finish need's deadline ends the hold, the march to 장무 needs its turns)
+    if (deadlineHit && !this.holdBroken && this.ghOn()) {
+      this.holdBroken = true;
+      this.log?.(`hold: the finish breaks it at turn ${b.info.turn + 1}`);
+    }
     // bracing / regrouping: no early end (Sukwon: no emergency rush; the deadline still finishes the battle)
     if (this.bracing() && !deadlineHit) return;
     if (this.holding() && b.info.turnLimit - b.info.turn > this.p.finish) return;
@@ -4657,6 +4695,8 @@ export class GrindPolicy {
     const v = this.victoryNow();
     const vs = v !== null ? this.b.slotOfOfficer(v) : NONE;
     if (vs === NONE || vs < PLAYER_SLOTS || this.scene.units[vs].status !== Status.Field) return 0;
+    // (강하: the march to 장무 and his guards took 16 turns where the estimate said 9)
+    if (this.ghOn()) f = Math.max(f, GH_FIN_NEED);
     return Math.ceil((this.finishEstimate() + paramOr(this.p, 'finPath') * this.pathFoes(this.scene.units[vs])) * f);
   }
 
@@ -4845,7 +4885,9 @@ export class GrindPolicy {
       const s2 = b.slotOfOfficer(a.other);
       if (s2 === NONE || this.scene.units[s2].status !== Status.Field) continue;
       const T = this.scene.units[s2];
-      for (const u of ours) if (u.officer === a.actor || a.actor === 0x400) return turnsTo(u, [T.x, T.y], 1) + 1;
+      // (강하 plan: at the leader's pace, as below; 조운's 6-move ride to 장무 is not the march's)
+      const L = this.ghOn() ? ours.find((v) => this.know.guarded.has(v.officer)) : undefined;
+      for (const u of ours) if (u.officer === a.actor || a.actor === 0x400) return Math.max(turnsTo(u, [T.x, T.y], 1), L ? turnsTo(L, [T.x, T.y], 1) : 0) + 1;
     }
     const v = this.victoryNow();
     const vs = v !== null ? b.slotOfOfficer(v) : NONE;
@@ -4875,6 +4917,12 @@ export class GrindPolicy {
       }
       dmgs.sort((x, y) => y - x);
       const d = Math.max(1, dmgs.slice(0, 4).reduce((a, c) => a + c, 0));
+      // (강하 plan: the finish marches at the leader's pace, the party round him; the nearest unit, a
+      // 5-move rider, saw a 9-turn walk to 장무 where 유비's is 12)
+      if (T === this.scene.units[vs] && this.ghOn()) {
+        const L = ours.find((u) => this.know.guarded.has(u.officer));
+        if (L) near = Math.max(near, turnsTo(L, [T.x, T.y], 1));
+      }
       walk = Math.max(walk, near);
       kill = Math.max(kill, Math.ceil(ot.hp / d));
       hpSum += ot.hp;
@@ -6472,7 +6520,9 @@ export class GrindPolicy {
         const apW = fin && goal ? (leadWalk ? 12 : 3) : (hw && hp >= max * 0.5) || this.idleTurns >= 2 || (ci > 0 && this.fightIdle >= ci && hp >= max * 0.5) || (farming && hp >= max * 0.5) || (this.wakeActive && this.wakeTrap().cells && hp >= max * 0.5) ? Math.max(1.5, this.p.approach * 0.3) : this.p.approach * 0.3;
         // (the idle walk pulls only over cells no enemy reaches: a step into reach gains nothing over standing)
         if (idleWalk > apW) base -= idleWalk * Math.min((dang.n ?? 0) > 0 ? Math.max(dist, idleD0) : dist, 40);
-        else base -= apW * Math.min(dist, hnEsc || (fin && goal && (this.wakeWay() || this.doorWay() || this.ye3)) ? 200 : 40);
+        // (강하 plan: 장무 and his guards wait 41-48 steps from the start pocket; capped, 관우 and three
+        // more stood there through the whole finish while 유비 marched with the rest)
+        else base -= apW * Math.min(dist, hnEsc || (fin && goal && (this.wakeWay() || this.doorWay() || this.ye3)) || (fin && this.ghOn()) ? 200 : 40);
         // the leader levels like the others: it walks up to the fight instead of waiting at the back
         if (!fin && guarded && this.p.lead && !goal) base -= this.p.lead * Math.max(0, dist - 1);
       }
