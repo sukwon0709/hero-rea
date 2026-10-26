@@ -34,7 +34,8 @@ export async function loadCached(): Promise<GameFiles | null> {
   }
 }
 
-export async function saveCached(files: GameFiles): Promise<void> {
+/** Stores the files in IndexedDB. Resolves to false when that failed (the files stay usable for this session). */
+export async function saveCached(files: GameFiles): Promise<boolean> {
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
@@ -42,9 +43,13 @@ export async function saveCached(files: GameFiles): Promise<void> {
       tx.objectStore(STORE).put(Object.fromEntries(files), KEY);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
-  } catch {
+    return true;
+  } catch (e) {
     // storage unavailable (private window etc.): the game still runs for this session
+    console.warn('hero-rea: could not store game files in IndexedDB', e);
+    return false;
   }
 }
 
