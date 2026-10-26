@@ -53,22 +53,37 @@ function loadScript(src: string): Promise<void> {
   });
 }
 
+// fsReadFile never settles when the file is missing, so a read that hangs must not block the others.
+function readWithTimeout(ci: CommandInterface, name: string, ms = 3000): Promise<Uint8Array | null> {
+  return Promise.race([
+    ci.fsReadFile(name).catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+let persisting = false;
+
 async function persistSaves(ci: CommandInterface, files: GameFiles) {
-  let changed = false;
-  for (const name of files.keys()) {
-    if (!SAVE_FILE.test(name)) continue;
-    try {
-      const data = await ci.fsReadFile(name);
+  if (persisting) return;
+  persisting = true;
+  try {
+    const previous = new Map<string, Uint8Array>();
+    for (const name of [...files.keys()]) {
+      if (!SAVE_FILE.test(name)) continue;
+      const data = await readWithTimeout(ci, name);
       const old = files.get(name)!;
-      if (data.length !== old.length || data.some((b, i) => b !== old[i])) {
+      if (data && (data.length !== old.length || data.some((b, i) => b !== old[i]))) {
+        previous.set(name, old);
         files.set(name, data);
-        changed = true;
       }
-    } catch {
-      /* file not readable right now */
     }
+    // On failure put the old bytes back so the next poll sees the change again and retries.
+    if (previous.size && !(await saveCached(files))) {
+      for (const [name, old] of previous) files.set(name, old);
+    }
+  } finally {
+    persisting = false;
   }
-  if (changed) await saveCached(files);
 }
 
 // The Korean release asks for a manual code at startup ("INPUT CODE [火地金]").
@@ -134,7 +149,9 @@ async function main() {
   let ci: CommandInterface | null = null;
   window.Dos(el, {
     dosboxConf: DOSBOX_CONF,
-    initFs: [...files].map(([path, contents]) => ({ path, contents })),
+    // js-dos transfers these buffers to its worker, which detaches them. Pass copies: if `files` held
+    // detached buffers, every later saveCached(files) would fail with a DataCloneError and saves were lost.
+    initFs: [...files].map(([path, contents]) => ({ path, contents: contents.slice() })),
     pathPrefix: `${base}js-dos/emulators/`,
     autoStart: true,
     kiosk: true,
@@ -145,6 +162,10 @@ async function main() {
   });
   // The game writes MSAVE*/ESAVE* files when saving; copy them back to IndexedDB periodically.
   setInterval(() => ci && persistSaves(ci, files), 5000);
+  // Also try when the tab is hidden or closed, so a save made just before closing is not missed.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && ci) persistSaves(ci, files);
+  });
 
   document.getElementById('forget')!.onclick = async () => {
     await clearCached();
