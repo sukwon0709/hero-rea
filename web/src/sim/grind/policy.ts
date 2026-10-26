@@ -721,6 +721,12 @@ export interface GrindParams {
    */
   ghPlan: number;
   /**
+   * 군악대 pair (Sukwon: two bands side by side refill each other's MP, so they can keep casting):
+   * extra pull of a band unit towards a cell next to the other band, counted without the full-MP cap
+   * so the two stay together before they run dry (each gives the other level/10+1 MP per turn).
+   */
+  bandPair: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -959,6 +965,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'doorPre', min: 0, max: 1, def: 0.6 },
   // 강하 plan: hold round the start until the two charging armies are fought, the finish at the leader's pace
   { key: 'ghPlan', min: 0, max: 1, def: 0.6 },
+  // two 군악대 side by side: pull towards each other, without the full-MP cap (off by default: at 1-2 it lost 가맹관1 and gave the bands no more exp in 7 battles; the evolve tries it)
+  { key: 'bandPair', min: 0, max: 3, def: 0 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -2486,7 +2494,8 @@ export class GrindPolicy {
   /**
    * 군악대 (1cb6:7cc8): at the next turn start every unit next to a class-12 unit (either side) gets
    * MP += that unit's level/10 + 1, up to its maximum. Worth about 1.3 exp per MP to a tactic user
-   * (a support tactic gives +8 for 4..10 MP). A band unit values the tactic users next to it.
+   * (a support tactic gives +8 for 4..10 MP). A band unit values the tactic users next to it, and
+   * another band unit beyond what it gives now (GrindParams.bandPair).
    */
   private bandValue(u: Unit, x: number, y: number, w: number): number {
     const b = this.b;
@@ -2502,6 +2511,7 @@ export class GrindPolicy {
       const on = b.officerOf(N);
       if (on.cls === 12 && learned(o)) v += Math.min(Math.trunc(on.level / 10) + 1, Math.max(0, maxMp(o) - u.mp)) * 1.3 * w;
       if (o.cls === 12 && s < PLAYER_SLOTS && learned(on)) v += Math.min(Math.trunc(o.level / 10) + 1, Math.max(0, maxMp(on) - N.mp)) * 1.3 * this.weight(s);
+      if (o.cls === 12 && on.cls === 12 && s < PLAYER_SLOTS) v += (Math.trunc(on.level / 10) + Math.trunc(o.level / 10) + 2) * 1.3 * w * paramOr(this.p, 'bandPair');
     }
     return v * this.p.band;
   }
