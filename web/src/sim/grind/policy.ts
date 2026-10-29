@@ -727,6 +727,13 @@ export interface GrindParams {
    */
   bandPair: number;
   /**
+   * MP pacing (Sukwon: small tactics, so the MP lasts the battle). MP only comes back from a
+   * neighbouring 군악대 (7cc8), so a cast dearer than the unit's MP per turn left (its MP plus band
+   * refills, over the turns to the deadline) takes casts from later turns: this much exp per MP of
+   * the excess is charged (an area heal at 16 MP on turn 1 for 8 exp emptied 제갈량 before the fight).
+   */
+  mpPace: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -967,6 +974,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'ghPlan', min: 0, max: 1, def: 0.6 },
   // two 군악대 side by side: pull towards each other, without the full-MP cap (off by default: at 1-2 it lost 가맹관1 and gave the bands no more exp in 7 battles; the evolve tries it)
   { key: 'bandPair', min: 0, max: 3, def: 0 },
+  // off: on battles 12-47 from the carries +5% exp in the won battles but 22 wins against 27
+  { key: 'mpPace', min: 0, max: 3, def: 0 },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -2662,6 +2671,23 @@ export class GrindPolicy {
     // bracing against a wave: thin it while it outnumbers us (the grinding resumes on what is left)
     if (this.bracing() && this.enemiesOnField() > this.oursOnField()) return true;
     return this.enemiesOnField() - 1 >= this.p.keep;
+  }
+
+  /** MP the unit can spend per turn to the deadline: its MP plus the refills of the bands next to (x, y) (GrindParams.mpPace). */
+  private mpPerTurn(u: Unit, x: number, y: number): number {
+    const b = this.b;
+    const left = Math.max(1, this.deadline() - b.info.turn);
+    let refill = 0;
+    for (const [nx, ny] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]]) {
+      if (nx < 0 || ny < 0 || nx >= b.width || ny >= b.height) continue;
+      const s = unitAt(b.s, nx, ny);
+      if (s === NONE || s === u.slot || s >= PLAYER_SLOTS) continue;
+      const N = this.scene.units[s];
+      if (N.status !== Status.Field || N.officer === 0xffff) continue;
+      const on = b.officerOf(N);
+      if (on.cls === 12) refill += Math.trunc(on.level / 10) + 1;
+    }
+    return u.mp / left + refill;
   }
 
   private deadline(): number {
@@ -6288,6 +6314,7 @@ export class GrindPolicy {
     const enemies = this.scene.units.filter((e) => e.slot >= PLAYER_SLOTS && e.status === Status.Field);
     let throwBest: Action | null = null;
     const tactics = castableTactics(o, u.mp, b.learn).filter((t) => !(t < 5 && WEATHER_TYPE[b.info.weather] === RAIN));
+    const pace = paramOr(this.p, 'mpPace');
     const held = u.officer < 0x100 ? b.stateOfficer(u).dyn.items.map((id, index) => ({ id, index })).filter((e) => e.id !== 0xff) : [];
     // danger is the sum over every enemy that can reach the cell (an overestimate: they also have
     // other targets), so the cost rises smoothly from half the troops to one and a half times them
@@ -6672,11 +6699,14 @@ export class GrindPolicy {
           if (v > best.value || alts) offer({ slot, x, y, kind: 'attack', target: d, tactic: NONE, value: v, exp: all, lethal, danger: dang.worst });
         }
       // tactics
+      const mpTurn = pace > 0 ? this.mpPerTurn(u, x, y) : 0;
       for (const tc of tactics) {
         const a = this.tacticValue(u, tc, x, y, w);
         if (!a) continue;
         // farm phase: the flat-rate tactics are the point and MP is there to be spent
         let v = (farming || (fin && endHeld) || penT || this.bandFarming) && tc >= 15 ? base + a.value * paramOr(this.p, 'farmTac') : base + a.value - this.p.mp * TACTIC_MP[tc];
+        // (the flat-rate casts only: a blow or a rescue in the fight is not put off for MP)
+        if (pace > 0 && tc >= 15) v -= pace * w * Math.max(0, TACTIC_MP[tc] - mpTurn);
         // 양평관 plan: MP is kept for the fights (the flat-rate casts on a healthy party emptied the
         // healers before r4 came)
         if (this.yp && tc >= 21 && this.ypIdleCast(u, tc, x, y, a.target)) v -= 200;
