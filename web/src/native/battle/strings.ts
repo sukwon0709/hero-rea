@@ -121,6 +121,8 @@ export const S = {
   rainNoFire: 0x4a80,
   mpShort: 0x4b84,
   confuseEnemy: 0x4ad2,
+  bombAttack: 0x4b3c, // 폭탄으로 적을 공격합니다
+  bombThrow: 0x4b55, // 폭탄을 던져라!
   alreadyConfused: 0x4ae5,
   notUsable: 0x4b64,
   confused: 0x4287,
