@@ -1,5 +1,5 @@
 // "Classic" mode: runs the original DOS executables inside js-dos (DOSBox compiled to WebAssembly).
-import { getGameFiles, saveCached, clearCached, GameFiles } from './gamefiles';
+import { getGameFiles, saveCached, clearCached, exportSaves, importSaves, isSaveFile, GameFiles } from './gamefiles';
 
 declare global {
   interface Window {
@@ -41,8 +41,6 @@ c:
 HERO.COM
 `;
 
-const SAVE_FILE = /^(MSAVE\d?|ESAVE\d)\.R3[SM]$|^MSAVE\.R3$/;
-
 function loadScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
@@ -62,14 +60,16 @@ function readWithTimeout(ci: CommandInterface, name: string, ms = 3000): Promise
 }
 
 let persisting = false;
+// Set while restoring saves from a backup, so the poll does not copy the emulator's older saves back.
+let stopped = false;
 
 async function persistSaves(ci: CommandInterface, files: GameFiles) {
-  if (persisting) return;
+  if (persisting || stopped) return;
   persisting = true;
   try {
     const previous = new Map<string, Uint8Array>();
     for (const name of [...files.keys()]) {
-      if (!SAVE_FILE.test(name)) continue;
+      if (!isSaveFile(name)) continue;
       const data = await readWithTimeout(ci, name);
       const old = files.get(name)!;
       if (data && (data.length !== old.length || data.some((b, i) => b !== old[i]))) {
@@ -166,6 +166,30 @@ async function main() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && ci) persistSaves(ci, files);
   });
+
+  document.getElementById('export')!.onclick = async () => {
+    if (ci) await persistSaves(ci, files);
+    const url = URL.createObjectURL(new Blob([exportSaves(files) as BlobPart], { type: 'application/zip' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `hero-saves-${new Date().toISOString().slice(0, 10)}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const imp = document.getElementById('import') as HTMLInputElement;
+  imp.onchange = async () => {
+    if (!imp.files?.length) return;
+    stopped = true;
+    while (persisting) await new Promise((r) => setTimeout(r, 100));
+    try {
+      await importSaves(files, imp.files);
+      location.reload(); // the running emulator still has the old files
+    } catch (e) {
+      stopped = false;
+      alert((e as Error).message);
+    }
+    imp.value = '';
+  };
 
   document.getElementById('forget')!.onclick = async () => {
     await clearCached();

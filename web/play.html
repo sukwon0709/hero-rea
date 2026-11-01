@@ -10,11 +10,13 @@
   <header>
     <a href="./">← 삼국지영걸전 Web</a>
     <span>Classic mode: original DOS executables in DOSBox (WebAssembly)</span>
-    <button id="forget" type="button">Forget game files</button>
+    <button id="export" type="button" title="Download every save slot as a zip, to keep a backup or move to another browser">Back up saves</button>
+    <label class="btn" title="Load a saves zip made with Back up saves">Restore saves<input id="import" type="file" accept=".zip,.R3S,.r3s,.R3M,.r3m,.R3,.r3" multiple hidden /></label>
+    <button id="forget" type="button" title="Remove the stored game files from this browser (saves are kept)">Forget game files</button>
   </header>
   <section id="picker" class="picker" hidden>
     <h2>Load your copy of the game</h2>
-    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. It is kept only in this browser.</p>
+    <p>Game data is not included. Drop <b>Hero.zip</b> here, or choose it or the <b>GAME</b> folder. You only need to do this once per browser: it is kept in this browser, and saves made here are kept even if you load the zip again.</p>
     <label class="btn">Choose Hero.zip<input type="file" data-kind="zip" accept=".zip" hidden /></label>
     <label class="btn">Choose GAME folder<input type="file" data-kind="dir" webkitdirectory hidden /></label>
     <p class="error"></p>
