@@ -1,15 +1,25 @@
 // Loads the original game data (GAME folder) supplied by the player and caches it in IndexedDB.
 // Game data is never bundled with this site: the player provides their own copy once.
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 
 export type GameFiles = Map<string, Uint8Array>; // key: upper-case file name, e.g. "MAIN.EXE"
 
 const DB = 'hero-rea';
 const STORE = 'files';
-const KEY = 'game';
+// The game data and the save slots are stored as two records. The game data is written once, when the
+// player loads Hero.zip; the saves are rewritten whenever the game saves. Loading Hero.zip again (on a new
+// browser profile, after "Forget game files", or after the browser evicted the data) therefore never
+// replaces the saves made in this browser with the old ones inside the zip.
+const GAME_KEY = 'game';
+const SAVES_KEY = 'saves';
 
 // Files that must be present for the data to count as a valid copy of the game.
 export const REQUIRED = ['HERO.COM', 'MAIN.EXE', 'OPEN.EXE', 'GRPDRV.EXE', 'TFDED.COM', 'SNR0D.R3'];
+
+/** Save files the game writes: MSAVEn.R3S / ESAVEn.R3S slots, plus MSAVE.R3 and the MSAVEn.R3M variants. */
+export const SAVE_FILE = /^(MSAVE\d?|ESAVE\d)\.R3[SM]$|^MSAVE\.R3$/;
+
+export const isSaveFile = (name: string) => SAVE_FILE.test(name);
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -20,46 +30,123 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
+function getRecord(db: IDBDatabase, key: string): Promise<Record<string, Uint8Array> | undefined> {
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(STORE).objectStore(STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function putRecord(db: IDBDatabase, key: string, value: Record<string, Uint8Array>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function savesOf(files: GameFiles): Record<string, Uint8Array> {
+  return Object.fromEntries([...files].filter(([name]) => isSaveFile(name)));
+}
+
+/** The game files stored in this browser with the stored saves on top, or null when no game is stored. */
 export async function loadCached(): Promise<GameFiles | null> {
   try {
     const db = await openDb();
-    const obj = await new Promise<Record<string, Uint8Array> | undefined>((resolve, reject) => {
-      const req = db.transaction(STORE).objectStore(STORE).get(KEY);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    return obj ? new Map(Object.entries(obj)) : null;
+    const game = await getRecord(db, GAME_KEY);
+    if (!game) return null;
+    const files: GameFiles = new Map(Object.entries(game));
+    const saves = await getRecord(db, SAVES_KEY);
+    if (saves) for (const [name, data] of Object.entries(saves)) files.set(name, data);
+    // Caches written before saves had their own record kept them inside the game record: move them out.
+    else await putRecord(db, SAVES_KEY, savesOf(files)).catch(() => undefined);
+    return files;
   } catch {
     return null;
   }
 }
 
-/** Stores the files in IndexedDB. Resolves to false when that failed (the files stay usable for this session). */
-export async function saveCached(files: GameFiles): Promise<boolean> {
+/** Asks the browser not to evict this site's storage when space runs low (and, in Safari, after 7 days). */
+async function requestPersistence(): Promise<void> {
+  try {
+    if (navigator.storage?.persist && !(await navigator.storage.persisted())) await navigator.storage.persist();
+  } catch {
+    /* not supported */
+  }
+}
+
+/**
+ * Stores a freshly loaded copy of the game. Saves already stored in this browser win over the ones in the
+ * zip (they are copied into `files`); slots only the zip has are kept. Resolves to false when storing failed.
+ */
+export async function storeGame(files: GameFiles): Promise<boolean> {
   try {
     const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(Object.fromEntries(files), KEY);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
+    const saves = await getRecord(db, SAVES_KEY);
+    if (saves) for (const [name, data] of Object.entries(saves)) files.set(name, data);
+    await putRecord(db, GAME_KEY, Object.fromEntries([...files].filter(([name]) => !isSaveFile(name))));
+    await putRecord(db, SAVES_KEY, savesOf(files));
+    await requestPersistence();
     return true;
   } catch (e) {
-    // storage unavailable (private window etc.): the game still runs for this session
     console.warn('hero-rea: could not store game files in IndexedDB', e);
     return false;
   }
 }
 
+/**
+ * Stores the save files of `files` in IndexedDB (the game data itself is stored once by storeGame).
+ * Resolves to false when that failed (the files stay usable for this session).
+ */
+export async function saveCached(files: GameFiles): Promise<boolean> {
+  try {
+    await putRecord(await openDb(), SAVES_KEY, savesOf(files));
+    return true;
+  } catch (e) {
+    // storage unavailable (private window etc.): the game still runs for this session
+    console.warn('hero-rea: could not store saves in IndexedDB', e);
+    return false;
+  }
+}
+
+/** Forgets the stored game files. The saves stay, so loading Hero.zip again brings them back. */
 export async function clearCached(): Promise<void> {
   try {
     const db = await openDb();
-    db.transaction(STORE, 'readwrite').objectStore(STORE).delete(KEY);
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(GAME_KEY);
+      tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+    });
   } catch {
     /* ignore */
   }
+}
+
+/** A zip of every stored save file, for moving saves to another browser or device. */
+export function exportSaves(files: GameFiles): Uint8Array {
+  return zipSync(savesOf(files));
+}
+
+/**
+ * Restores save files from a zip made by exportSaves (or loose MSAVE/ESAVE files) into `files` and stores
+ * them. Returns the names restored.
+ */
+export async function importSaves(files: GameFiles, list: FileList | File[]): Promise<string[]> {
+  const found: [string, Uint8Array][] = [];
+  for (const f of Array.from(list)) {
+    const data = new Uint8Array(await f.arrayBuffer());
+    if (/\.zip$/i.test(f.name)) {
+      for (const [p, d] of Object.entries(unzipSync(data))) found.push([p.split('/').pop()!.toUpperCase(), d]);
+    } else found.push([f.name.toUpperCase(), data]);
+  }
+  const names = found.filter(([n]) => isSaveFile(n)).map(([n, d]) => (files.set(n, d), n));
+  if (!names.length) throw new Error('No MSAVE/ESAVE files found.');
+  if (!(await saveCached(files))) throw new Error('Could not store the saves in this browser.');
+  return names;
 }
 
 // Picks the directory that contains HERO.COM out of a flat list of (path, bytes).
@@ -107,7 +194,7 @@ export function promptForFiles(root: HTMLElement): Promise<GameFiles> {
       err.textContent = '';
       try {
         const files = await fromFileList(list);
-        await saveCached(files);
+        await storeGame(files);
         resolve(files);
       } catch (e) {
         err.textContent = (e as Error).message;
@@ -130,7 +217,10 @@ export function promptForFiles(root: HTMLElement): Promise<GameFiles> {
 
 export async function getGameFiles(root: HTMLElement): Promise<GameFiles> {
   const cached = await loadCached();
-  if (cached && REQUIRED.every((f) => cached.has(f))) return cached;
+  if (cached && REQUIRED.every((f) => cached.has(f))) {
+    void requestPersistence();
+    return cached;
+  }
   root.hidden = false;
   const files = await promptForFiles(root);
   root.hidden = true;
