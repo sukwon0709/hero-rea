@@ -203,7 +203,7 @@ export function prepareState(snap: BattleSnapshot, carry: CarryState | null, par
       // first, the three strongest close-combat officers on 업2's middle-pocket places
       const ye = paramOr(params, 'yePick') > 0.5 && !!stage && isYeFirstAt(snap.chapter, snap.stage, snap.block);
       if (ye) for (const a of gainActors(stage!, YE_LAST_BLOCK)) if (!actors.includes(a)) actors.push(a);
-      const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate || door || ye ? free : params.strong, params.band > 0, params.healers, learn, actors);
+      const picks = pickFormation(state, [...fi.fixed, ...own], free, yyGate || door || ye ? free : params.strong, params.band > 0, params.healers, learn, actors, paramOr(params, 'core'));
       if (hn) picks.splice(0, picks.length, ...huainanPicks(state, fi.fixed, free, picks, params.band > 0, params.healers, learn));
       if (ye) picks.splice(0, picks.length, ...yeOrder(state, picks, paramOr(params, 'ye3Plan') > 0.5, paramOr(params, 'yeLanes') > 0.5));
       if (fi.hexFormation) extras.formation = [...fi.fixed, ...picks];

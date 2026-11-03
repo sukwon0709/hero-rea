@@ -49,7 +49,7 @@ export async function realRun(
     // the same story branches as the captures the plans were learned on
     { seed: opts.seed ?? 12345, botAttempts: 3, storyPicks: storyPicks(opts.branches ?? branchChoice()) },
     {
-      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0, params.healers, loadLearnTable(assetsFor(files).main)),
+      onFormation: (info, g) => pickFormation(g.state, info.fixed, info.records.length, params.strong, params.band > 0, params.healers, loadLearnTable(assetsFor(files).main), [], params.core ?? 0),
       // the merchant: buy in the real game (Game.shopBuy's rules); the sandbox then starts from it
       onShop: (g, items) => {
         const got = shopVisit(g.state, items, { areaHeals: params.area > 0.5, scrolls: params.scrolls });

@@ -734,6 +734,14 @@ export interface GrindParams {
    */
   mpPace: number;
   /**
+   * Sortie core: the formation's free slots go first to this many of the highest-level officers
+   * (below 99; the lowest of them first), then to the rest by lowest level; the healers are taken
+   * from the core first as well. 0: off (the lowest levels of everyone, which spreads the exp over
+   * the whole roster: in the 919 run 33 officers sortied and ~120 levels went to 손건, 미방, 유봉,
+   * 이적 and others who ended outside the top 15).
+   */
+  core: number;
+  /**
    * 총퇴각 at the first player phase this many times before playing (not learned globally, chosen
    * per battle): each retreat restarts the battle with the RNG moved on, as it does for a player.
    */
@@ -976,6 +984,8 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'bandPair', min: 0, max: 3, def: 0 },
   // off: on battles 12-47 from the carries +5% exp in the won battles but 22 wins against 27
   { key: 'mpPace', min: 0, max: 3, def: 0 },
+  // sortie core: the free slots go to the highest-level officers first (exp kept on the future top 15)
+  { key: 'core', min: 0, max: 20, def: 0, int: true },
 ];
 
 /** Worth of each enemy (besides the partner) a clearing duel sends off the field (GrindParams.clearDuel), in action value. */
@@ -1450,13 +1460,24 @@ export function scriptDoors(stage: Stage, block: number): NonNullable<BattleKnow
 
 /**
  * Picks for a FORMATION: the officers already placed by the setup, 유비, then `strong` of the
- * highest-level officers (to keep battles winnable), then the lowest levels below 99.
+ * highest-level officers (to keep battles winnable), then the lowest levels below 99 (the `core`
+ * highest-level officers before the others when core > 0).
  */
-export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false, healers = 0, learn?: Uint8Array, actors: number[] = []): number[] {
+export function pickFormation(state: GameState, fixed: number[], free: number, strong: number, band = false, healers = 0, learn?: Uint8Array, actors: number[] = [], core = 0): number[] {
   const faction = state.officers[0].dyn.flags & 0x1f;
-  const pool = state.officers
+  const all = state.officers
     .map((o, i) => ({ i, lv: o.dyn.level, ok: (o.dyn.flags & 0x80) !== 0 && (o.dyn.flags & 0x1f) === faction && i < 0x100 }))
-    .filter((o) => o.ok && !fixed.includes(o.i));
+    .filter((o) => o.ok);
+  // the core (GrindParams.core): the `core` highest levels below 99, the fixed officers counted in
+  const inCore = new Set(
+    [...all]
+      .filter((o) => o.lv < 99)
+      .sort((a, b) => b.lv - a.lv || a.i - b.i)
+      .slice(0, Math.max(0, core))
+      .map((o) => o.i),
+  );
+  const coreFirst = (a: { i: number }, b: { i: number }) => (core > 0 ? Number(inCore.has(b.i)) - Number(inCore.has(a.i)) : 0);
+  const pool = all.filter((o) => !fixed.includes(o.i));
   const picks: number[] = [];
   const take = (i: number) => {
     if (picks.length < free && !picks.includes(i)) picks.push(i);
@@ -1474,12 +1495,12 @@ export function pickFormation(state: GameState, fixed: number[], free: number, s
       for (let t = 21; t <= 35; t++) if (learn[t * CLASS_COUNT + d.cls] <= d.level) return true;
       return false;
     };
-    const hs = pool.filter((o) => o.lv < 99 && heals(o.i)).sort((a, b) => a.lv - b.lv || a.i - b.i);
+    const hs = pool.filter((o) => o.lv < 99 && heals(o.i)).sort((a, b) => coreFirst(a, b) || a.lv - b.lv || a.i - b.i);
     for (const o of hs.slice(0, healers)) take(o.i);
   }
   const byHigh = [...pool].sort((a, b) => b.lv - a.lv || a.i - b.i);
   for (const o of byHigh.slice(0, strong)) take(o.i);
-  const byLow = [...pool].sort((a, b) => (a.lv >= 99 ? 1 : 0) - (b.lv >= 99 ? 1 : 0) || a.lv - b.lv || a.i - b.i);
+  const byLow = [...pool].sort((a, b) => (a.lv >= 99 ? 1 : 0) - (b.lv >= 99 ? 1 : 0) || coreFirst(a, b) || a.lv - b.lv || a.i - b.i);
   for (const o of byLow) take(o.i);
   return picks;
 }
