@@ -33,7 +33,18 @@
   </aside>
   <aside id="customai" class="customai" hidden>
     <label><input type="checkbox" /> <b>커스텀 AI</b></label>
-    <span>자동전투 중에 이 페이지의 지휘 AI가 아군에게 명령합니다: 적 대장이나 약한 적을 함께 공격하고, 약해진 부대는 마을·요새·병영으로 물려 회복시킵니다. 끄면 게임의 원래 AI가 움직입니다.</span>
+    <span>자동전투 중에 이 페이지의 지휘 AI가 아군에게 명령합니다. 아래 <b>전략</b>에 원하는 전술을 적으면 Claude가 설정으로 바꿔 줍니다. 끄면 게임의 원래 AI가 움직입니다.</span>
+    <details class="aiprompts">
+      <summary>전략: <span class="aistrategy"></span></summary>
+      <textarea class="aiprompt" rows="3" placeholder="예: 관우와 장비는 적 대장만 노리고, 조운은 유비 곁을 지켜. 병력이 30% 아래면 후퇴."></textarea>
+      <div class="airow">
+        <input class="aikey" type="password" autocomplete="off" placeholder="Anthropic API 키 (이 브라우저에만 저장)" />
+        <button type="button" class="aiapply">전략 적용</button>
+        <button type="button" class="aireset">기본 전략</button>
+      </div>
+      <div class="aistatus"></div>
+      <details><summary>설정 보기</summary><pre class="aijson"></pre></details>
+    </details>
     <details><summary>명령 기록</summary><div class="ailog"></div></details>
   </aside>
   <div id="dos" hidden></div>

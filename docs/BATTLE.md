@@ -330,6 +330,9 @@ with `3a3c` bit 0 set it writes `AISTATE.BIN` (sequence byte + `DGROUP:0000..fff
 byte and the 15 player unit records (`DS:0xe2a2`). The page only changes mode, target and target cell,
 which `ce50` already follows. `AIORDER.BIN` starting with `0xff` means the custom AI is off: then the
 routine returns at once and the game's own AI moves the units.
+The page's settings (`Strategy` in `commander.ts`: focus rule, chase range, retreat thresholds, and
+per-officer roles `charge`/`guard`/`hold`) can come from a player's prompt through the Claude API
+(`strategyprompt.ts`); `guard` and `hold` use mode 3, `charge` mode 0 on the focus target.
 
 After each unit acts, `1cb6:8ad2` runs the unit's events and `4abc` checks victory. When there is
 no enemy on the field, `4abc` runs the "all enemies gone" events (`842a`/`8794` loop, else `81fe`).

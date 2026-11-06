@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decide, orderFile, parseState, STATE_SIZE } from '../src/commander';
+import { decide, DEFAULT_STRATEGY, orderFile, parseState, sanitizeStrategy, STATE_SIZE } from '../src/commander';
 import { maxHp } from '../src/engine/battle/rules';
 
 // A synthetic AISTATE.BIN: sequence byte, then DGROUP:0000..fff0.
@@ -23,7 +23,7 @@ function dump(units: { slot: number; officer: number; x: number; y: number; troo
     ds[r + 0xb] = 1;
     ds[r + 0xc] = u.morale ?? 100;
     const o = 0x7a94 + u.officer * 0x2c;
-    ds.set([0xc0, 0xaf, 0xba, 0xf1], o + 6); // 유비
+    ds.set(NAMES[u.officer] ?? [0xc0, 0xaf, 0xba, 0xf1], o + 6); // 유비 unless named below
     ds[o + 0x1e] = u.troops & 0xff;
     ds[o + 0x1f] = u.troops >> 8;
     ds[o + 0x20] = 0; // class 0
@@ -31,6 +31,13 @@ function dump(units: { slot: number; officer: number; x: number; y: number; troo
   }
   return file;
 }
+
+// EUC-KR names for officers 1..3 (유비, 관우, 장비)
+const NAMES: Record<number, number[]> = {
+  1: [0xc0, 0xaf, 0xba, 0xf1],
+  2: [0xb0, 0xfc, 0xbf, 0xec],
+  3: [0xc0, 0xe5, 0xba, 0xf1],
+};
 
 const full = maxHp({ cls: 0, level: 1 } as Parameters<typeof maxHp>[0]);
 
@@ -95,5 +102,58 @@ describe('commander AI', () => {
       ),
     )!;
     expect(decide(s, null)).toMatchObject([{ slot: 0, mode: 0, target: 17 }]);
+  });
+});
+
+describe('commander strategy', () => {
+  it('cleans untrusted settings', () => {
+    expect(sanitizeStrategy(null)).toEqual(DEFAULT_STRATEGY);
+    const st = sanitizeStrategy({
+      summary: ' 돌격 ',
+      focus: 'everyone',
+      chaseRange: 99,
+      retreatAt: -1,
+      leaderRetreatAt: 0.5,
+      units: [{ name: '관우', role: 'charge', retreatAt: -1 }, { name: '', role: 'hold' }, { name: '장비', role: 'fly', retreatAt: 2 }],
+    });
+    expect(st).toEqual({
+      summary: '돌격',
+      focus: 'commander',
+      chaseRange: 40,
+      retreatAt: 0,
+      leaderRetreatAt: 0.5,
+      units: [
+        { name: '관우', role: 'charge', retreatAt: null },
+        { name: '장비', role: 'free', retreatAt: 1 },
+      ],
+    });
+  });
+
+  it('gives officers their roles', () => {
+    const s = parseState(
+      dump(
+        [
+          { slot: 0, officer: 1, x: 2, y: 2, troops: Math.floor(full / 2) },
+          { slot: 1, officer: 2, x: 2, y: 8, troops: full },
+          { slot: 2, officer: 3, x: 3, y: 3, troops: Math.floor(full / 5) },
+          { slot: 15, officer: 4, x: 19, y: 19, troops: full },
+        ],
+        0b111,
+      ),
+    )!;
+    s.leader = 0;
+    const st = sanitizeStrategy({
+      focus: 'nearest',
+      retreatAt: 0.4,
+      leaderRetreatAt: 0,
+      units: [
+        { name: '관우', role: 'guard', retreatAt: -1 },
+        { name: '장비', role: 'charge', retreatAt: 0 },
+      ],
+    });
+    const by = new Map(decide(s, null, st).map((o) => [o.slot, o]));
+    expect(by.get(0)).toMatchObject({ mode: 1 }); // 유비 never retreats here; no focus -> nearest
+    expect(by.get(1)).toMatchObject({ mode: 0, target: 0xff, tx: 2, ty: 2 }); // 관우 goes to 유비
+    expect(by.get(2)).toMatchObject({ mode: 0, target: 15 }); // 장비 charges the commander although weak
   });
 });

@@ -14,6 +14,9 @@
 // - The others pick one enemy together: the enemy commander when it is close enough, else the
 //   enemy that is weakest for its distance. Units within reach chase it; the rest attack the
 //   nearest enemy as usual.
+//
+// That is DEFAULT_STRATEGY. A Strategy changes the thresholds and the focus rule and gives single
+// officers a role (charge, guard 유비, hold); the page can make one from a prompt (strategyprompt.ts).
 
 import { maxHp } from './engine/battle/rules';
 import { NONE, PLAYER_SLOTS, TERRAIN_BARRACKS, TERRAIN_FORTRESS, TERRAIN_VILLAGE, UNIT_SLOTS } from './engine/battle/types';
@@ -35,6 +38,7 @@ const ON_FIELD = 2;
 const MODE_MOVE = 0;
 const MODE_ATTACK = 1;
 const MODE_HOLD = 2;
+const MODE_WAIT = 3; // stay, attack only what is in reach
 const MODE_MOVE_ONLY = 4;
 
 const RECOVERY = new Set([TERRAIN_VILLAGE, TERRAIN_FORTRESS, TERRAIN_BARRACKS]);
@@ -140,15 +144,89 @@ export interface Order {
 const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 const ratio = (u: BattleUnit) => (u.maxTroops ? u.troops / u.maxTroops : 1);
 
-function isWeak(u: BattleUnit, leader: number): boolean {
-  return ratio(u) <= (u.slot === leader ? 0.6 : 0.4) || u.morale < 40;
+/** What a unit does when it is not retreating. */
+export type Role = 'free' | 'charge' | 'guard' | 'hold';
+export const ROLES: Role[] = ['free', 'charge', 'guard', 'hold'];
+/** Which enemy the units attack together. */
+export type FocusRule = 'commander' | 'weakest' | 'nearest';
+export const FOCUS_RULES: FocusRule[] = ['commander', 'weakest', 'nearest'];
+
+export interface UnitRule {
+  /** Officer name as the game shows it (유비, 관우, ...). */
+  name: string;
+  role: Role;
+  /** Troop fraction at which this unit retreats; null = the strategy's value. 0 = never. */
+  retreatAt: number | null;
+}
+
+/**
+ * The commander's settings. The page can fill them from a player's prompt (strategyprompt.ts);
+ * DEFAULT_STRATEGY is the behaviour described at the top of this file.
+ */
+export interface Strategy {
+  /** Korean one-line description, shown in the page. */
+  summary: string;
+  focus: FocusRule;
+  /** Cells within which units chase the focus target (role free). */
+  chaseRange: number;
+  /** Troop fraction at or below which a unit retreats to recover; 0 = never. */
+  retreatAt: number;
+  /** The same for 유비. */
+  leaderRetreatAt: number;
+  units: UnitRule[];
+}
+
+export const DEFAULT_STRATEGY: Strategy = {
+  summary: '기본 전략: 적 대장이나 약한 적을 집중 공격하고, 약해진 부대는 회복 지형으로 후퇴',
+  focus: 'commander',
+  chaseRange: CHASE_RANGE,
+  retreatAt: 0.4,
+  leaderRetreatAt: 0.6,
+  units: [],
+};
+
+const clamp = (v: unknown, lo: number, hi: number, dflt: number) =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+
+/** A Strategy from untrusted JSON (the model's answer, localStorage): unknown values fall back to the default. */
+export function sanitizeStrategy(raw: unknown): Strategy {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const d = DEFAULT_STRATEGY;
+  const units = Array.isArray(o.units) ? o.units : [];
+  return {
+    summary: typeof o.summary === 'string' && o.summary.trim() ? o.summary.trim().slice(0, 200) : d.summary,
+    focus: FOCUS_RULES.includes(o.focus as FocusRule) ? (o.focus as FocusRule) : d.focus,
+    chaseRange: Math.round(clamp(o.chaseRange, 0, 40, d.chaseRange)),
+    retreatAt: clamp(o.retreatAt, 0, 1, d.retreatAt),
+    leaderRetreatAt: clamp(o.leaderRetreatAt, 0, 1, d.leaderRetreatAt),
+    units: units
+      .map((u) => (u && typeof u === 'object' ? (u as Record<string, unknown>) : {}))
+      .filter((u) => typeof u.name === 'string' && u.name.trim() !== '')
+      .slice(0, 30)
+      .map((u) => ({
+        name: (u.name as string).trim(),
+        role: ROLES.includes(u.role as Role) ? (u.role as Role) : 'free',
+        retreatAt: typeof u.retreatAt === 'number' && u.retreatAt >= 0 ? clamp(u.retreatAt, 0, 1, 0) : null,
+      })),
+  };
+}
+
+function ruleOf(st: Strategy, u: BattleUnit): UnitRule | undefined {
+  return st.units.find((r) => r.name === u.name);
+}
+
+function isWeak(u: BattleUnit, s: BattleState, st: Strategy): boolean {
+  const rule = ruleOf(st, u);
+  const at = rule?.retreatAt ?? (u.slot === s.leader ? st.leaderRetreatAt : st.retreatAt);
+  if (at <= 0) return false;
+  return ratio(u) <= at || u.morale < 40;
 }
 
 /**
  * Orders for the player's units. `terrain` is the battle map's terrain (width*height, row-major),
  * or null when it is not known (then weak units only hold).
  */
-export function decide(s: BattleState, terrain: Uint8Array | null): Order[] {
+export function decide(s: BattleState, terrain: Uint8Array | null, st: Strategy = DEFAULT_STRATEGY): Order[] {
   const orders: Order[] = [];
   if (!s.enemies.length) return orders;
   const occupied = new Set([...s.bySlot.values()].map((u) => u.y * s.width + u.x));
@@ -156,7 +234,7 @@ export function decide(s: BattleState, terrain: Uint8Array | null): Order[] {
 
   const fighters: BattleUnit[] = [];
   for (const u of s.ours) {
-    if (!isWeak(u, s.leader)) {
+    if (!isWeak(u, s, st)) {
       fighters.push(u);
       continue;
     }
@@ -193,17 +271,39 @@ export function decide(s: BattleState, terrain: Uint8Array | null): Order[] {
   const cy = fighters.reduce((a, u) => a + u.y, 0) / fighters.length;
   const centre = { x: cx, y: cy };
   const commander = s.enemies.find((e) => e.slot === ENEMY_COMMANDER);
-  let focus: BattleUnit;
-  if (commander && Math.min(...fighters.map((u) => dist(u, commander))) <= COMMANDER_RANGE) focus = commander;
-  else {
+  const weakest = () => {
     const score = (e: BattleUnit) => dist(centre, e) + 10 * ratio(e);
-    focus = s.enemies.reduce((a, e) => (score(e) < score(a) ? e : a));
-  }
+    return s.enemies.reduce((a, e) => (score(e) < score(a) ? e : a));
+  };
+  let focus: BattleUnit | null = null;
+  if (st.focus === 'commander') {
+    focus = commander && Math.min(...fighters.map((u) => dist(u, commander))) <= COMMANDER_RANGE ? commander : weakest();
+  } else if (st.focus === 'weakest') focus = weakest();
+  const leader = s.bySlot.get(s.leader);
+
+  const attackNearest = (u: BattleUnit) =>
+    orders.push({ slot: u.slot, mode: MODE_ATTACK, target: NONE, tx: u.tx, ty: u.ty, text: `${u.name}: 가까운 적 공격` });
+  const chase = (u: BattleUnit, f: BattleUnit) =>
+    orders.push({ slot: u.slot, mode: MODE_MOVE, target: f.slot, tx: f.x, ty: f.y, text: `${u.name}: ${f.name} 집중 공격` });
+
   for (const u of fighters) {
-    if (dist(u, focus) <= CHASE_RANGE) {
-      orders.push({ slot: u.slot, mode: MODE_MOVE, target: focus.slot, tx: focus.x, ty: focus.y, text: `${u.name}: ${focus.name} 집중 공격` });
+    const role = ruleOf(st, u)?.role ?? 'free';
+    if (role === 'hold') {
+      orders.push({ slot: u.slot, mode: MODE_WAIT, target: NONE, tx: u.x, ty: u.y, text: `${u.name}: 제자리 방어` });
+    } else if (role === 'guard' && leader && leader !== u) {
+      if (dist(u, leader) > 2) {
+        orders.push({ slot: u.slot, mode: MODE_MOVE, target: NONE, tx: leader.x, ty: leader.y, text: `${u.name}: ${leader.name} 곁으로 이동` });
+      } else {
+        orders.push({ slot: u.slot, mode: MODE_WAIT, target: NONE, tx: u.x, ty: u.y, text: `${u.name}: ${leader.name} 호위` });
+      }
+    } else if (role === 'charge') {
+      // Without a focus rule, the enemy commander, else the nearest enemy.
+      const f = focus ?? commander ?? s.enemies.reduce((a, e) => (dist(u, e) < dist(u, a) ? e : a));
+      chase(u, f);
+    } else if (focus && dist(u, focus) <= st.chaseRange) {
+      chase(u, focus);
     } else {
-      orders.push({ slot: u.slot, mode: MODE_ATTACK, target: NONE, tx: u.tx, ty: u.ty, text: `${u.name}: 가까운 적 공격` });
+      attackNearest(u);
     }
   }
   return orders;
