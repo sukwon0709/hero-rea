@@ -37,3 +37,4 @@ canvas.game { image-rendering: pixelated; background: #000; max-width: 100%; }
 .customai .aikey { flex: 1 1 220px; min-width: 0; font: inherit; }
 .customai .aistatus { font-size: 13px; margin-top: 2px; }
 .customai .aijson { font-size: 12px; max-height: 160px; overflow: auto; margin: 2px 0; }
+.customai .aisettings { font: inherit; font-size: 13px; white-space: pre-wrap; margin: 2px 0; }

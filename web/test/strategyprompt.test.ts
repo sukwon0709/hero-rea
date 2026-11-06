@@ -33,7 +33,10 @@ describe('strategy prompt', () => {
     expect(st.retreatAt).toBe(0.3);
     expect(body.model).toBe('claude-opus-5-5');
     expect(body.fallbacks).toBe('default');
-    expect((body.output_config as { format: { type: string } }).format.type).toBe('json_schema');
+    const format = (body.output_config as { format: { type: string; schema: { required: string[] } } }).format;
+    expect(format.type).toBe('json_schema');
+    expect(format.schema.required).toEqual(expect.arrayContaining(['rules', 'ignored']));
+    expect(st.rules).toEqual([]);
     expect(JSON.stringify(body.messages)).toContain('유비, 관우');
     expect(headers.get('anthropic-beta')).toContain('server-side-fallback-2026-07-01');
     expect(headers.get('authorization')).toBe('Bearer sk-ant-api03-test');

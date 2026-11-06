@@ -5,10 +5,13 @@ import { AI_BLOB } from './autobattle';
 import {
   decide,
   DEFAULT_STRATEGY,
+  describeChanges,
+  describeStrategy,
   orderFile,
   ORDER_FILE,
   ORDERS_OFF,
   parseState,
+  resolveStrategy,
   sanitizeStrategy,
   STATE_FILE,
   STATE_SIZE,
@@ -117,9 +120,11 @@ export function startBridge(panel: HTMLElement, files: GameFiles, getCi: () => B
     const reset = panel.querySelector<HTMLButtonElement>('.aireset')!;
     const status = panel.querySelector<HTMLElement>('.aistatus')!;
     const shown = panel.querySelector<HTMLElement>('.aistrategy')!;
+    const settings = panel.querySelector<HTMLElement>('.aisettings')!;
     const json = panel.querySelector<HTMLElement>('.aijson')!;
     const show = () => {
       shown.textContent = strategy.summary;
+      settings.textContent = describeStrategy(strategy).join('\n');
       json.textContent = JSON.stringify(strategy, null, 2);
     };
     // js-dos listens for keys on window and cancels them (only type="text" inputs are spared), so
@@ -149,7 +154,9 @@ export function startBridge(panel: HTMLElement, files: GameFiles, getCi: () => B
         const { promptToStrategy } = await import('./strategyprompt');
         strategy = await promptToStrategy(apiKey, prompt, lastUnits);
         save(STRATEGY_KEY, JSON.stringify(strategy));
-        status.textContent = '적용했습니다. 다음 자동전투 턴부터 이 전략을 씁니다.';
+        const rules = strategy.rules.length ? ` 상황별 규칙 ${strategy.rules.length}개.` : '';
+        const ignored = strategy.ignored.length ? ` 반영하지 못한 부분 ${strategy.ignored.length}개는 설정 보기에 있습니다.` : '';
+        status.textContent = `적용했습니다. 다음 자동전투 턴부터 이 전략을 씁니다.${rules}${ignored}`;
         write(`전략 변경: ${strategy.summary}`);
         show();
       } catch (e) {
@@ -181,7 +188,12 @@ export function startBridge(panel: HTMLElement, files: GameFiles, getCi: () => B
       const orders = decide(s, terrain(s.map), strategy);
       await ci.fsWriteFile(ORDER_FILE, orderFile(s, orders));
       lastSeq = s.seq;
-      write(`${s.turn + 1}턴`, ...orders.map((o) => `  ${o.text}`));
+      const { active } = resolveStrategy(s, strategy);
+      write(
+        `${s.turn + 1}턴`,
+        ...active.map((r) => `  [규칙] ${r.note || describeChanges(r)}`),
+        ...orders.map((o) => `  ${o.text}`),
+      );
     } finally {
       busy = false;
     }

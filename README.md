@@ -19,6 +19,8 @@ The repository contains no game data. To play, load your own copy (the `Hero.zip
   Under **전략** you can describe your own tactics in words ("관우는 유비를 지켜, 장비는 적 대장만 노려");
   Claude turns them into the commander's settings with one API call (your own Anthropic API key,
   kept only in your browser), and every turn after that runs locally (`web/src/strategyprompt.ts`).
+  Situational instructions ("적 대장 병력이 절반 아래면 전원 돌격") become rules checked every turn;
+  설정 보기 lists the settings in Korean, with the parts of your prompt the AI could not apply.
 * **Native** (in progress): a TypeScript reimplementation of the engine that reads the original data files.
 
 ```bash
