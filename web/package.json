@@ -17,6 +17,7 @@
     "vitest": "^2.1.9"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
     "fflate": "^0.8.2",
     "js-dos": "^8.5.3"
   },
