@@ -161,6 +161,9 @@ export const LEARN_TABLE_OFFSET = 0x4510;
 export const WEATHER_TYPE = [0, 0, 0, 1, 2, 2];
 export const RAIN = 2;
 
+/** Target range of the confusion items 0x2b..0x2d (1cb6:add9 byte table, read at adfd; bit 0x80 added at ae00). */
+export const CONFUSE_ITEM_RANGE = [0, 1, 0];
+
 /** Deployment AI order code (deployment byte 6) to AiMode (DS:0x4fe6, used by 2cb4:031a). */
 export const ORDER_TO_MODE = [3, 1, 2, 0, 0, 4, 4];
 

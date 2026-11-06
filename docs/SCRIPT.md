@@ -212,7 +212,7 @@ come from the Shift-JIS debug strings at `DS:0x2559..0x2917` where present, othe
 | 24 | SET_FORCE | o b | 9349 / 2196 | Officer +0x1c low 5 bits = force |
 | 25 | CHOOSE | m | 9385 | Lines split on `\n`/`\r` into a menu (`2c92`); choice i jumps to record `group + i + 1` and continues |
 | 26 | MAP_CHIP | b b b | 947d | *(inferred)* change a map tile |
-| 27 | MAP_EFFECT | b b b | 94b8 | *(inferred)* map effect |
+| 27 | MAP_EFFECT | b x, b y, b kind | 94b8 | Fire (0) / flood (1) on a cell, 2 puts it out (`2cb4:0420`, BATTLE.md) |
 | 28 | UNIT_FORCE | o b | 94f3 | Battle unit side |
 | 29 | GAME_OVER | – | 980e | return 7 |
 | 2a | ENDING | b | 9826 | `int 65h`; return 8 |

@@ -23,6 +23,7 @@ import { Rng } from '../../engine/battle/rules';
 import { AiMode, NONE, PLAYER_SLOTS, Status, UNIT_SLOTS } from '../../engine/battle/types';
 import { maxHp } from '../../engine/battle/rules';
 import { battleNameLines } from '../../engine/battle/map';
+import { storyName } from '../../sim/grind/names';
 import { recordCommands } from '../battle/dev/setup';
 import { runBattle as realRunBattle, type BattleScene } from '../battle/scene';
 import type { RunBattle } from '../context';
@@ -109,7 +110,26 @@ export interface PlaythroughOptions {
   avoidChoices?: Set<string>;
   /** CHOOSE answers start at this option instead of the first (coverage runs: the other story branches). */
   choiceOffset?: number;
+  /**
+   * Called once per town between two battles when the town has a shop (a non-empty item list at
+   * DS:0x56a2 + town*8, as Game.shopItems), with that list. The harness itself never shops; a caller
+   * can buy here (the grinding simulator spends gold on promotions, heals and bombs).
+   */
+  onShop?: (game: Game, items: number[]) => void;
+  /** Story branches to take instead of the default answers (see StoryPick). */
+  storyPicks?: StoryPick[];
 }
+
+/**
+ * A story branch to take. The script offers branches in two ways:
+ *  - a CHOOSE menu (신도/광천, 거록/청하, the 소패 bandit hub, 양양/여남): `choose` lists option
+ *    indices in order of preference; the menu in that block (chapter/stage/block) takes the first one
+ *    not yet taken at that menu (an order list visits the hub's targets in that order);
+ *  - talking to one of several characters on the field, each record leading elsewhere (여포토벌
+ *    순욱 -> 하구 / 곽가 -> 팽성, 신야 장비 -> 신야1 / 제갈량 -> 박망파): `talk` is the officer whose
+ *    record is fired first in that block (chapter/stage/block), among records of the same rank.
+ */
+export type StoryPick = { at: [number, number, number]; choose: number[] } | { at: [number, number, number]; talk: number };
 
 export type PlayResult = 'ending' | 'gameOver' | 'quit' | 'stopped' | 'hang' | 'error';
 
@@ -137,7 +157,8 @@ export class Playthrough {
   private current: BattleRecord | null = null;
   /** The outcome of run(), once it returned. */
   result: PlayResult | null = null;
-  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset'>> & PlaythroughOptions;
+  readonly opts: Required<Omit<PlaythroughOptions, 'stopWhen' | 'log' | 'shot' | 'traceBattles' | 'avoidChoices' | 'choiceOffset' | 'onShop' | 'storyPicks'>> & PlaythroughOptions;
+  private shopsSeen = new Set<string>();
 
   constructor(files: Map<string, Uint8Array>, opts: PlaythroughOptions = {}) {
     this.opts = { start: 'new', seed: 12345, botAttempts: 3, forceAll: false, saveSlot: 4, hangFrames: 400_000, ...opts };
@@ -203,7 +224,7 @@ export class Playthrough {
         stage: g.script.stage,
         block: g.script.block,
         map,
-        name: dec.decode(names[map] ?? new Uint8Array(0)).trim(),
+        name: storyName(g.script.chapter, g.script.stage, g.script.block, dec.decode(names[map] ?? new Uint8Array(0)).trim()),
         outcome: 'running',
         attempts: 0,
         turns: 0,
@@ -308,6 +329,7 @@ export class Playthrough {
   /** Every CHOOSE answer given, in order ("menu key#occurrence=answer"). */
   readonly choices: string[] = [];
   private chooseCount = new Map<string, number>();
+  private chooseTaken = new Map<string, Set<number>>();
 
   /** Answers a button pick: yes / OK / the first enabled entry; shops are left. */
   private answer(buttons: Button[], cancel: boolean): number {
@@ -340,6 +362,17 @@ export class Playthrough {
       const bad = (i: number) => this.chooseUnsafe.has(i) || !!this.opts.avoidChoices?.has(`${this.chooseKey}#${n}=${i}`);
       let k = (n + (this.opts.choiceOffset ?? 0)) % buttons.length;
       for (let j = 0; j < buttons.length && bad(k); j++) k = (k + 1) % buttons.length;
+      // a story pick: the first of its options not taken at this menu yet (and safe)
+      const taken = this.chooseTaken.get(this.chooseKey) ?? new Set<number>();
+      const s = this.game.script;
+      const pick = this.opts.storyPicks?.find((p) => 'choose' in p && p.at[0] === s.chapter && p.at[1] === s.stage && p.at[2] === s.block);
+      if (pick && 'choose' in pick) {
+        // every listed option taken (a hub done): the first option not taken yet
+        const i = pick.choose.find((i) => i < buttons.length && !taken.has(i) && !bad(i)) ?? buttons.findIndex((_, i) => !taken.has(i) && !bad(i));
+        if (i >= 0) k = i;
+      }
+      taken.add(k);
+      this.chooseTaken.set(this.chooseKey, taken);
       this.choices.push(`${this.chooseKey}#${n}=${k}`);
       this.log(`CHOOSE ${k} of ${labels.join(' / ')}${this.chooseUnsafe.size ? ` (avoiding ${[...this.chooseUnsafe].join(',')})` : ''}`);
       return k;
@@ -416,6 +449,13 @@ export class Playthrough {
     return 1;
   }
 
+  /** 1 when a storyPicks entry asks for this talk record to be fired first. */
+  private picked(r: EventRecord): number {
+    if (r.trigger !== 3) return 0;
+    const s = this.game.script;
+    return this.opts.storyPicks?.some((p) => 'talk' in p && p.talk === r.p1 && p.at[0] === s.chapter && p.at[1] === s.stage && p.at[2] === s.block) ? 1 : 0;
+  }
+
   private key(r: EventRecord): string {
     const s = this.game.script;
     return `${s.chapter}/${s.stage}/${s.block}/${s.group}/${r.index}/${Array.from(s.flags).join('.')}`;
@@ -434,11 +474,25 @@ export class Playthrough {
       this.checkLocation();
     }
     const stage = g.vm.stage;
+    if (this.opts.onShop) {
+      // the town the party is in has a 도구상 when its shop list (DS:0x56a2 + town*8, as
+      // Game.shopItems) is not empty; offered once per town between two battles. The port's field
+      // engine opens the shop only through OP31 events, the original also through the 도구상
+      // building (not traced, docs/GAMEFLOW.md), so this is the stand-in for walking in there.
+      const t = g.assets.tables;
+      const town = g.state.progress.territory + (t.sectionTownBase[t.chapterSection[g.state.progress.chapter] ?? 0] ?? 0);
+      const items = Array.from(g.assets.ds(0x56a2 + town * 8, 8)).filter((v) => v !== 0xff);
+      const key = `${town}/${this.battles.length}`;
+      if (items.length && !this.shopsSeen.has(key)) {
+        this.shopsSeen.add(key);
+        this.opts.onShop(g, items);
+      }
+    }
     const cands = this.groupRecords()
       .filter((r) => r.trigger === 2 || r.trigger === 3 || r.trigger === 5)
-      .map((r) => ({ r, score: this.score(stage, r) }))
+      .map((r) => ({ r, score: this.score(stage, r), pick: this.picked(r) }))
       .filter((c) => c.score >= 0)
-      .sort((a, b) => b.score - a.score || a.r.index - b.r.index);
+      .sort((a, b) => b.score - a.score || b.pick - a.pick || a.r.index - b.r.index);
     for (const { r } of cands) {
       const k = this.key(r);
       if (this.attempted.has(k) || this.unreachable.has(`${k}@${ls}`)) continue;
@@ -701,8 +755,8 @@ export class Playthrough {
       // a position the current event group waits for, or one whose event wins the battle
       const end = cmds.findIndex((c) => c.name === 'BATTLE_END');
       if (!current.has(r.index) && end < 0) continue;
-      const x0 = r.p2 & 0xff, y0 = r.p2 >> 8;
-      const [x, y] = r.trigger === 6 ? [x0, y0] : [(x0 + (r.p3 & 0xff)) >> 1, (y0 + (r.p3 >> 8)) >> 1];
+      const x0 = r.p2 >> 8, y0 = r.p2 & 0xff;
+      const [x, y] = r.trigger === 6 ? [x0, y0] : [(x0 + (r.p3 >> 8)) >> 1, (y0 + (r.p3 & 0xff)) >> 1];
       goals.push({ officer: r.p1, x, y });
     }
     const vm = this.game.script;
@@ -792,13 +846,14 @@ export class Playthrough {
       case 4:
         return { type: 'adjacent', other: r.p1, officer: r.p2 };
       case 6:
-        return { type: 'unitAt', officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 };
+        // cells are x<<8|y (engine/script.ts, MAIN.EXE a172)
+        return { type: 'unitAt', officer: r.p1, x: r.p2 >> 8, y: r.p2 & 0xff };
       case 7:
         return { type: 'targetDefeated' };
       case 9:
         return { type: 'turn', turn: r.p1 };
       case 11:
-        return { type: 'unitInArea', officer: r.p1, x: r.p2 & 0xff, y: r.p2 >> 8 };
+        return { type: 'unitInArea', officer: r.p1, x: r.p2 >> 8, y: r.p2 & 0xff };
       case 12:
         return { type: 'unitDefeated', officer: r.p1 };
       case 0:

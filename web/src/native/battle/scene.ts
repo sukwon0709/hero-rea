@@ -7,14 +7,16 @@
 import type { GameContext, RunBattle } from '../context';
 import type { Trigger } from '../../engine/script';
 import { Rng, castableTactics, healAmounts, maxHp, maxMp, movePoints, tacticsLearnedAt, tryCure, regenerate, setMorale, tacticTerrainOk } from '../../engine/battle/rules';
-import { attack, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
+import { areaHealItem, attack, bombItem, castTactic, fight, unitLeaves, type CastResult, type HitResult } from '../../engine/battle/combat';
 import { actionOrder, applyMove, attackTargetAfterMove, planUnit, type Plan } from '../../engine/battle/ai';
 import { floodMove, rangeCells, rebuildUnitMap, terrainAt, unitAt, unitsInRange, walkPath, neighbour, sideOf } from '../../engine/battle/hex';
 import { battleNameLines } from '../../engine/battle/map';
 import {
   AiMode,
   CLASS_BAND,
+  CLASS_MOVE_TYPE,
   CLASS_RANGE,
+  CONFUSE_ITEM_RANGE,
   DIRS,
   NONE,
   PLAYER_SLOTS,
@@ -25,6 +27,7 @@ import {
   UNIT_SLOTS,
   Unit,
   UnitFlag,
+  moveCost,
 } from '../../engine/battle/types';
 import { Battle } from './model';
 import { BattleView, CELL, VIEW_H, VIEW_W, VIEW_X, VIEW_Y } from './view';
@@ -1033,8 +1036,11 @@ export class BattleScene {
     }
   }
 
-  /** ab86: item effects in battle. Returns true when the item was used up. */
-  private async useItem(slot: number, id: number, index: number): Promise<boolean> {
+  /**
+   * ab86: item effects in battle. Returns true when the item was used up. `target` skips the
+   * target pick (the grinding simulator's player, as castFlow's aiTarget does for tactics).
+   */
+  async useItem(slot: number, id: number, index: number, target = NONE): Promise<boolean> {
     const b = this.b;
     const u = this.units[slot];
     const o = b.officerOf(u);
@@ -1043,6 +1049,36 @@ export class BattleScene {
       so.dyn.items[index] = 0xff;
     };
     const name = euc(this.ctx.state.items[id]?.name ?? '');
+    const pick = (ally: boolean, range: number) => (target !== NONE ? Promise.resolve(target) : this.pickTarget(slot, ally, range));
+    if (id >= 0x13 && id <= 0x1a) {
+      // promotion (docs/BATTLE.md, read from ab86): from class FROM[k] at level >= LV[k] -> class+1
+      const k = id - 0x13;
+      if (o.cls !== [0, 1, 3, 4, 6, 7, 9, 10][k] || o.level < [15, 30, 15, 30, 15, 30, 15, 30][k]) {
+        await this.say(S.notUsable);
+        return false;
+      }
+      await this.say(S.usedItem, name);
+      o.cls += 1;
+      o.hp = Math.min(o.hp, maxHp(o));
+      consume();
+      return true;
+    }
+    if (id <= 0x02 || (id >= 0x10 && id <= 0x12)) {
+      // class change to [15,18,12,3,6,0][...]: refused for 유비, the same class, the same class line,
+      // or a move type that cannot stand on the current terrain
+      const to = [15, 18, 12, 3, 6, 0][id <= 0x02 ? id : id - 0x10 + 3];
+      const refused =
+        u.officer === 0 || o.cls === to || Math.trunc(o.cls / 3) * 3 === to || moveCost(CLASS_MOVE_TYPE[to], terrainAt(b.s, u.x, u.y)) === 0xff;
+      if (refused) {
+        await this.say(S.notUsable);
+        return false;
+      }
+      await this.say(S.usedItem, name);
+      o.cls = to;
+      o.hp = Math.min(o.hp, maxHp(o));
+      consume();
+      return true;
+    }
     if (id >= 0x22 && id <= 0x2a) {
       // bombs: element 2 - (id-0x22)/3, power (id-0x22)%3, e91a kind 3
       const element = 2 - Math.trunc((id - 0x22) / 3);
@@ -1051,7 +1087,7 @@ export class BattleScene {
         await this.say(S.rainNoFire);
         return false;
       }
-      const t = await this.pickTarget(slot, false, power | 0x80);
+      const t = await pick(false, power | 0x80);
       if (t === NONE || sideOf(t) === sideOf(slot)) return false;
       const tu = this.units[t];
       if (!tacticTerrainOk(element, terrainAt(b.s, tu.x, tu.y))) return false;
@@ -1066,7 +1102,7 @@ export class BattleScene {
     if ((id >= 0x1b && id <= 0x20) || (id >= 0x34 && id <= 0x36)) {
       const power = id >= 0x34 ? id - 0x34 : id % 3;
       const kind = id >= 0x34 ? 3 : id >= 0x1e ? 1 : 2;
-      const t = await this.pickTarget(slot, true, power | 0x80);
+      const t = await pick(true, power | 0x80);
       if (t === NONE) return false;
       const tu = this.units[t];
       const to = b.officerOf(tu);
@@ -1078,9 +1114,45 @@ export class BattleScene {
       consume();
       return true;
     }
+    if (id === 0x21) {
+      // 폭탄 (b029): one enemy in range 0x81, fixed damage, no exp (bombItem)
+      await this.say(S.bombAttack);
+      const t = await pick(false, 0x81);
+      if (t === NONE || sideOf(t) === sideOf(slot)) return false;
+      await this.say(S.bombThrow);
+      const tu = this.units[t];
+      const r = bombItem(b.s, t);
+      this.v.ensureVisible(tu.x, tu.y);
+      this.sfx(SFX.hit);
+      for (let i = 0; i < 2; i++) {
+        this.v.hidden.add(t);
+        await this.frames(4);
+        this.v.hidden.delete(t);
+        await this.frames(4);
+      }
+      consume();
+      for (const v of r.left) await this.leave(v);
+      return true;
+    }
+    if (id >= 0x2e && id <= 0x33) {
+      // area heals (ab86 -> baf6, no caster): troops for 0x2e..0x30, morale for 0x31..0x33, area and
+      // power (id-0x2e)%3 around the user; kept when no ally is in the area
+      const watch = [slot, ...unitsInRange(b.s, u, ((id - 0x2e) % 3) | 0x80, u.x, u.y, true)];
+      const before = this.snapshotHp(watch);
+      const res = areaHealItem(b.s, slot, id);
+      if (!res.ok) {
+        await this.say(S.noAllyInRange);
+        return false;
+      }
+      consume();
+      await this.showCast(slot, 30, res, before);
+      return true;
+    }
     if (id >= 0x2b && id <= 0x2d) {
       await this.say(S.confuseEnemy);
-      const t = await this.pickTarget(slot, false, 0x80);
+      // the range is the byte table built at 1cb6:add9 ([bp-0x10..-0xe] = 0, 1, 0, read at adfd):
+      // 기상서 (0x2c) reaches one cell further, 농무서 and 호우서 only the four neighbours
+      const t = await pick(false, CONFUSE_ITEM_RANGE[id - 0x2b] | 0x80);
       if (t === NONE) return false;
       if (this.units[t].flags & UnitFlag.Confused) {
         await this.say(S.alreadyConfused);
@@ -1126,9 +1198,11 @@ export class BattleScene {
         if (b.info.result) return;
         const u = this.units[slot];
         if (u.mode === AiMode.Player) continue;
-        if (u.status !== Status.Field) continue;
+        // ce50 runs for units off the field too: it drops a target that left (mode 1) before the status test
         await this.aiUnit(slot);
         if (b.info.result) return;
+        // ce50:d0b6: the unit's events (8ad2) and the victory check (4abc) only after it moved or acted
+        if (!(u.flags & (UnitFlag.Moved | UnitFlag.Acted))) continue;
         if (this.units[slot].status === Status.Field) await this.unitEvents(slot);
         await this.victoryCheck();
       }
@@ -1163,7 +1237,7 @@ export class BattleScene {
     } else {
       await this.castFlow(slot, b.s.ai.tactic, false, b.s.ai.target);
     }
-    u.flags |= UnitFlag.Acted;
+    // (flag 0x80 comes from the attack or a tactic that was carried out, as in cd4a/b2d6)
   }
 
   /** The walk applyMove makes (Plan.route), for the animation. */

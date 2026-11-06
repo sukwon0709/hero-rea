@@ -128,6 +128,7 @@ export class BattleHost {
         b.info.bonus = value;
       },
       mapChip: (x: number, y: number, kind: number) => this.mapChip(x, y, kind),
+      mapEffect: async (x: number, y: number, kind: number) => this.mapEffect(x, y, kind),
       duel: async (a: number, bb: number) => {
         this.duel = { a, b: bb };
         await duelStart(sc, a, bb);
@@ -211,6 +212,29 @@ export class BattleHost {
     d.mode = toPlayer && factionOf(so) === 0 ? AiMode.Player : AiMode.Wait;
     b.clearSlot(slot);
     rebuildUnitMap(b.s);
+  }
+
+  /**
+   * MAP_EFFECT (2cb4:0420, docs/BATTLE.md): kind 0/1 sets a fire (or flood) on a cell no unit
+   * stands on: the terrain becomes DS:0x4ff4[kind] (18 / 19, impassable) and the old terrain goes
+   * to the effect list; kind 2 puts the first listed terrain of the cell back. The overlay drawn on
+   * the cell (1cb6:be62, 0x2d + kind) is not shown here.
+   */
+  private mapEffect(x: number, y: number, kind: number) {
+    const b = this.scene.b;
+    if (x >= b.width || y >= b.height) return;
+    const ti = y * b.width + x;
+    if (b.s.unitAt[ti] !== NONE) return;
+    if (kind !== 2) {
+      const to = readDgroup(this.scene.ctx.assets.main, 0x4ff4 + kind, 1)[0];
+      b.effectLog.push({ x, y, terrain: b.map.terrain[ti] });
+      b.map.terrain[ti] = to;
+      return;
+    }
+    const i = b.effectLog.findIndex((e) => e.x === x && e.y === y);
+    if (i < 0) return;
+    b.map.terrain[ti] = b.effectLog[i].terrain;
+    b.effectLog.splice(i, 1);
   }
 
   /** MAP_CHIP (2cb4:05e6) with the tables at DS:0x4ff5..0x5015 (docs/BATTLE.md). */
