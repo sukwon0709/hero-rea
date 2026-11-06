@@ -16,7 +16,10 @@
 //   nearest enemy as usual.
 //
 // That is DEFAULT_STRATEGY. A Strategy changes the thresholds and the focus rule and gives single
-// officers a role (charge, guard 유비, hold); the page can make one from a prompt (strategyprompt.ts).
+// officers a role (charge, guard 유비, hold). Its situation rules change those settings while their
+// conditions hold ("when the enemy commander is below half, everyone charges"); they are checked
+// every turn here, so a battle never waits for the API. The page can make a Strategy from a
+// prompt (strategyprompt.ts).
 
 import { maxHp } from './engine/battle/rules';
 import { NONE, PLAYER_SLOTS, TERRAIN_BARRACKS, TERRAIN_FORTRESS, TERRAIN_VILLAGE, UNIT_SLOTS } from './engine/battle/types';
@@ -174,6 +177,58 @@ export interface Strategy {
   /** The same for 유비. */
   leaderRetreatAt: number;
   units: UnitRule[];
+  /** Situational changes, checked every turn in order; a later rule that holds wins. */
+  rules: SituationRule[];
+  /** Korean notes on the parts of the player's prompt these settings cannot express. */
+  ignored: string[];
+}
+
+/** A battle situation a rule can test. `value` and `name` are read only by the kinds that need them. */
+export type ConditionKind =
+  | 'turnAtLeast' // the turn shown in the game (1, 2, ...) >= value
+  | 'turnBelow' // ... < value
+  | 'enemyCommanderBelow' // enemy commander's troop fraction <= value
+  | 'enemyCommanderWithin' // some unit of ours within value cells of the enemy commander
+  | 'leaderBelow' // 유비's troop fraction <= value
+  | 'unitBelow' // the officer `name`: troop fraction <= value
+  | 'unitGone' // the officer `name` is not on the field any more
+  | 'oursAtMost' // our units on the field <= value
+  | 'enemiesAtMost' // enemy units on the field <= value
+  | 'outnumbered' // fewer units than the enemy
+  | 'strengthBelow'; // our total troops / enemy total troops <= value
+export const CONDITION_KINDS: ConditionKind[] = [
+  'turnAtLeast',
+  'turnBelow',
+  'enemyCommanderBelow',
+  'enemyCommanderWithin',
+  'leaderBelow',
+  'unitBelow',
+  'unitGone',
+  'oursAtMost',
+  'enemiesAtMost',
+  'outnumbered',
+  'strengthBelow',
+];
+
+export interface Condition {
+  kind: ConditionKind;
+  value: number;
+  name: string;
+}
+
+/** While every condition holds, the given settings replace the strategy's. */
+export interface SituationRule {
+  /** Korean, for the page and the log. */
+  note: string;
+  when: Condition[];
+  focus: FocusRule | null;
+  chaseRange: number | null;
+  retreatAt: number | null;
+  leaderRetreatAt: number | null;
+  /** One role for every unit (unit rules below still win). */
+  allRole: Role | null;
+  /** Replace these officers' rules. */
+  units: UnitRule[];
 }
 
 export const DEFAULT_STRATEGY: Strategy = {
@@ -183,32 +238,124 @@ export const DEFAULT_STRATEGY: Strategy = {
   retreatAt: 0.4,
   leaderRetreatAt: 0.6,
   units: [],
+  rules: [],
+  ignored: [],
 };
 
 const clamp = (v: unknown, lo: number, hi: number, dflt: number) =>
   typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
 
+const objects = (v: unknown, max: number) =>
+  (Array.isArray(v) ? v : [])
+    .filter((x) => x && typeof x === 'object')
+    .slice(0, max) as Record<string, unknown>[];
+const text = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+/** A number in [lo, hi], or null when it is missing or negative ("keep"). */
+const optional = (v: unknown, lo: number, hi: number) =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(hi, Math.max(lo, v)) : null;
+
+function sanitizeUnits(v: unknown): UnitRule[] {
+  return objects(v, 30)
+    .filter((u) => text(u.name, 12) !== '')
+    .map((u) => ({
+      name: text(u.name, 12),
+      role: ROLES.includes(u.role as Role) ? (u.role as Role) : 'free',
+      retreatAt: optional(u.retreatAt, 0, 1),
+    }));
+}
+
+function sanitizeRule(r: Record<string, unknown>): SituationRule {
+  const chase = optional(r.chaseRange, 0, 40);
+  return {
+    note: text(r.note, 120),
+    when: objects(r.when, 4)
+      .filter((c) => CONDITION_KINDS.includes(c.kind as ConditionKind))
+      .map((c) => ({
+        kind: c.kind as ConditionKind,
+        value: typeof c.value === 'number' && Number.isFinite(c.value) ? c.value : 0,
+        name: text(c.name, 12),
+      })),
+    focus: FOCUS_RULES.includes(r.focus as FocusRule) ? (r.focus as FocusRule) : null,
+    chaseRange: chase === null ? null : Math.round(chase),
+    retreatAt: optional(r.retreatAt, 0, 1),
+    leaderRetreatAt: optional(r.leaderRetreatAt, 0, 1),
+    allRole: ROLES.includes(r.allRole as Role) ? (r.allRole as Role) : null,
+    units: sanitizeUnits(r.units),
+  };
+}
+
 /** A Strategy from untrusted JSON (the model's answer, localStorage): unknown values fall back to the default. */
 export function sanitizeStrategy(raw: unknown): Strategy {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const d = DEFAULT_STRATEGY;
-  const units = Array.isArray(o.units) ? o.units : [];
   return {
-    summary: typeof o.summary === 'string' && o.summary.trim() ? o.summary.trim().slice(0, 200) : d.summary,
+    summary: text(o.summary, 200) || d.summary,
     focus: FOCUS_RULES.includes(o.focus as FocusRule) ? (o.focus as FocusRule) : d.focus,
     chaseRange: Math.round(clamp(o.chaseRange, 0, 40, d.chaseRange)),
     retreatAt: clamp(o.retreatAt, 0, 1, d.retreatAt),
     leaderRetreatAt: clamp(o.leaderRetreatAt, 0, 1, d.leaderRetreatAt),
-    units: units
-      .map((u) => (u && typeof u === 'object' ? (u as Record<string, unknown>) : {}))
-      .filter((u) => typeof u.name === 'string' && u.name.trim() !== '')
-      .slice(0, 30)
-      .map((u) => ({
-        name: (u.name as string).trim(),
-        role: ROLES.includes(u.role as Role) ? (u.role as Role) : 'free',
-        retreatAt: typeof u.retreatAt === 'number' && u.retreatAt >= 0 ? clamp(u.retreatAt, 0, 1, 0) : null,
-      })),
+    units: sanitizeUnits(o.units),
+    // A rule without conditions would always hold: it belongs in the base settings, so drop it.
+    rules: objects(o.rules, 20)
+      .map(sanitizeRule)
+      .filter((r) => r.when.length > 0),
+    ignored: (Array.isArray(o.ignored) ? o.ignored : [])
+      .map((x) => text(x, 200))
+      .filter(Boolean)
+      .slice(0, 10),
   };
+}
+
+function holds(c: Condition, s: BattleState): boolean {
+  const commander = s.enemies.find((e) => e.slot === ENEMY_COMMANDER);
+  const named = s.ours.find((u) => u.name === c.name) ?? [...s.bySlot.values()].find((u) => u.slot < PLAYER_SLOTS && u.name === c.name);
+  const total = (us: BattleUnit[]) => us.reduce((a, u) => a + u.troops, 0);
+  const leader = s.bySlot.get(s.leader);
+  switch (c.kind) {
+    case 'turnAtLeast':
+      return s.turn + 1 >= c.value;
+    case 'turnBelow':
+      return s.turn + 1 < c.value;
+    case 'enemyCommanderBelow':
+      return !!commander && ratio(commander) <= c.value;
+    case 'enemyCommanderWithin':
+      return !!commander && s.ours.some((u) => dist(u, commander) <= c.value);
+    case 'leaderBelow':
+      return !!leader && ratio(leader) <= c.value;
+    case 'unitBelow':
+      return !!named && ratio(named) <= c.value;
+    case 'unitGone':
+      return c.name !== '' && !named;
+    case 'oursAtMost':
+      return s.ours.length <= c.value;
+    case 'enemiesAtMost':
+      return s.enemies.length <= c.value;
+    case 'outnumbered':
+      return s.ours.length < s.enemies.length;
+    case 'strengthBelow':
+      return total(s.enemies) > 0 && total(s.ours) / total(s.enemies) <= c.value;
+  }
+}
+
+/** The settings for this turn: `st` with every rule whose conditions hold applied in order. */
+export function resolveStrategy(s: BattleState, st: Strategy): { strategy: Strategy; active: SituationRule[] } {
+  const active = st.rules.filter((r) => r.when.every((c) => holds(c, s)));
+  if (!active.length) return { strategy: st, active };
+  const out: Strategy = { ...st, units: [...st.units] };
+  for (const r of active) {
+    if (r.focus) out.focus = r.focus;
+    if (r.chaseRange !== null) out.chaseRange = r.chaseRange;
+    if (r.retreatAt !== null) out.retreatAt = r.retreatAt;
+    if (r.leaderRetreatAt !== null) out.leaderRetreatAt = r.leaderRetreatAt;
+    if (r.allRole) {
+      const role = r.allRole;
+      const others = out.units.filter((x) => !s.ours.some((u) => u.name === x.name));
+      // Every unit takes the role; an officer keeps their own retreat threshold.
+      out.units = [...s.ours.map((u) => ({ name: u.name, role, retreatAt: ruleOf(out, u)?.retreatAt ?? null })), ...others];
+    }
+    for (const u of r.units) out.units = [u, ...out.units.filter((x) => x.name !== u.name)];
+  }
+  return { strategy: out, active };
 }
 
 function ruleOf(st: Strategy, u: BattleUnit): UnitRule | undefined {
@@ -226,7 +373,8 @@ function isWeak(u: BattleUnit, s: BattleState, st: Strategy): boolean {
  * Orders for the player's units. `terrain` is the battle map's terrain (width*height, row-major),
  * or null when it is not known (then weak units only hold).
  */
-export function decide(s: BattleState, terrain: Uint8Array | null, st: Strategy = DEFAULT_STRATEGY): Order[] {
+export function decide(s: BattleState, terrain: Uint8Array | null, base: Strategy = DEFAULT_STRATEGY): Order[] {
+  const st = resolveStrategy(s, base).strategy;
   const orders: Order[] = [];
   if (!s.enemies.length) return orders;
   const occupied = new Set([...s.bySlot.values()].map((u) => u.y * s.width + u.x));
@@ -322,4 +470,76 @@ export function orderFile(s: BattleState, orders: Order[]): Uint8Array {
     out[r + 0xb] = o.mode;
   }
   return out;
+}
+
+// Korean text for the page.
+
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+const FOCUS_TEXT: Record<FocusRule, string> = {
+  commander: '적 대장 (멀면 약한 적)',
+  weakest: '가까운 약한 적',
+  nearest: '각자 가까운 적',
+};
+const ROLE_TEXT: Record<Role, string> = { free: '자유', charge: '돌격', guard: '유비 호위', hold: '제자리 고수' };
+const retreatText = (v: number) => (v <= 0 ? '후퇴 안 함' : `병력 ${pct(v)} 이하면 후퇴`);
+
+export function describeCondition(c: Condition): string {
+  switch (c.kind) {
+    case 'turnAtLeast':
+      return `${c.value}턴부터`;
+    case 'turnBelow':
+      return `${c.value}턴 전까지`;
+    case 'enemyCommanderBelow':
+      return `적 대장 병력 ${pct(c.value)} 이하`;
+    case 'enemyCommanderWithin':
+      return `적 대장이 ${c.value}칸 안`;
+    case 'leaderBelow':
+      return `유비 병력 ${pct(c.value)} 이하`;
+    case 'unitBelow':
+      return `${c.name} 병력 ${pct(c.value)} 이하`;
+    case 'unitGone':
+      return `${c.name} 퇴각`;
+    case 'oursAtMost':
+      return `아군 ${c.value}부대 이하`;
+    case 'enemiesAtMost':
+      return `적 ${c.value}부대 이하`;
+    case 'outnumbered':
+      return '아군 부대 수가 적보다 적음';
+    case 'strengthBelow':
+      return `아군 총병력이 적의 ${pct(c.value)} 이하`;
+  }
+}
+
+function describeUnit(u: UnitRule): string {
+  return `${u.name}: ${ROLE_TEXT[u.role]}${u.retreatAt === null ? '' : `, ${retreatText(u.retreatAt)}`}`;
+}
+
+/** What a rule changes, in Korean. */
+export function describeChanges(r: SituationRule): string {
+  const parts: string[] = [];
+  if (r.allRole) parts.push(`전원 ${ROLE_TEXT[r.allRole]}`);
+  if (r.focus) parts.push(`집중 대상 ${FOCUS_TEXT[r.focus]}`);
+  if (r.chaseRange !== null) parts.push(`추격 ${r.chaseRange}칸`);
+  if (r.retreatAt !== null) parts.push(`부대 ${retreatText(r.retreatAt)}`);
+  if (r.leaderRetreatAt !== null) parts.push(`유비 ${retreatText(r.leaderRetreatAt)}`);
+  for (const u of r.units) parts.push(describeUnit(u));
+  return parts.join(', ') || '변경 없음';
+}
+
+/** The whole strategy as Korean lines, for 설정 보기. */
+export function describeStrategy(st: Strategy): string[] {
+  const lines = [
+    `집중 대상: ${FOCUS_TEXT[st.focus]}`,
+    `추격 거리: ${st.chaseRange}칸`,
+    `후퇴: 부대 ${retreatText(st.retreatAt)}, 유비 ${retreatText(st.leaderRetreatAt)}`,
+  ];
+  if (st.units.length) lines.push('장수별 역할:', ...st.units.map((u) => `  ${describeUnit(u)}`));
+  if (st.rules.length) {
+    lines.push('상황별 규칙 (매 턴 확인, 뒤의 규칙이 우선):');
+    st.rules.forEach((r, i) =>
+      lines.push(`  ${i + 1}. ${r.when.map(describeCondition).join(' 그리고 ')} → ${describeChanges(r)}${r.note ? ` (${r.note})` : ''}`),
+    );
+  }
+  if (st.ignored.length) lines.push('반영하지 못한 부분:', ...st.ignored.map((x) => `  - ${x}`));
+  return lines;
 }

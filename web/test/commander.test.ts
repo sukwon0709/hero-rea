@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { decide, DEFAULT_STRATEGY, orderFile, parseState, sanitizeStrategy, STATE_SIZE } from '../src/commander';
+import {
+  decide,
+  DEFAULT_STRATEGY,
+  describeStrategy,
+  orderFile,
+  parseState,
+  resolveStrategy,
+  sanitizeStrategy,
+  STATE_SIZE,
+} from '../src/commander';
 import { maxHp } from '../src/engine/battle/rules';
 
 // A synthetic AISTATE.BIN: sequence byte, then DGROUP:0000..fff0.
@@ -126,7 +135,23 @@ describe('commander strategy', () => {
         { name: '관우', role: 'charge', retreatAt: null },
         { name: '장비', role: 'free', retreatAt: 1 },
       ],
+      rules: [],
+      ignored: [],
     });
+  });
+
+  it('cleans situation rules', () => {
+    const st = sanitizeStrategy({
+      rules: [
+        { note: '적 대장 약하면 돌격', when: [{ kind: 'enemyCommanderBelow', value: 0.5, name: '' }, { kind: 'bogus' }], focus: 'keep', chaseRange: -1, retreatAt: 0, leaderRetreatAt: -1, allRole: 'charge', units: [] },
+        { note: '조건 없음', when: [], allRole: 'hold' },
+      ],
+      ignored: ['책략 사용', 3, ''],
+    });
+    expect(st.rules).toEqual([
+      { note: '적 대장 약하면 돌격', when: [{ kind: 'enemyCommanderBelow', value: 0.5, name: '' }], focus: null, chaseRange: null, retreatAt: 0, leaderRetreatAt: null, allRole: 'charge', units: [] },
+    ]);
+    expect(st.ignored).toEqual(['책략 사용']);
   });
 
   it('gives officers their roles', () => {
@@ -155,5 +180,60 @@ describe('commander strategy', () => {
     expect(by.get(0)).toMatchObject({ mode: 1 }); // 유비 never retreats here; no focus -> nearest
     expect(by.get(1)).toMatchObject({ mode: 0, target: 0xff, tx: 2, ty: 2 }); // 관우 goes to 유비
     expect(by.get(2)).toMatchObject({ mode: 0, target: 15 }); // 장비 charges the commander although weak
+  });
+
+  it('changes the settings while a rule holds', () => {
+    const units = (cmdTroops: number) =>
+      parseState(
+        dump(
+          [
+            { slot: 0, officer: 1, x: 2, y: 2, troops: full },
+            { slot: 1, officer: 2, x: 2, y: 3, troops: Math.floor(full / 5) },
+            { slot: 15, officer: 3, x: 19, y: 19, troops: cmdTroops },
+            { slot: 16, officer: 4, x: 4, y: 2, troops: full },
+          ],
+          0b11,
+        ),
+      )!;
+    const st = sanitizeStrategy({
+      focus: 'nearest',
+      rules: [
+        {
+          note: '적 대장이 약하면 총공격',
+          when: [{ kind: 'enemyCommanderBelow', value: 0.5 }, { kind: 'turnAtLeast', value: 2 }],
+          allRole: 'charge',
+          retreatAt: 0,
+          units: [{ name: '유비', role: 'hold', retreatAt: -1 }],
+        },
+      ],
+    });
+    // Commander healthy: no rule; 관우 is weak and retreats, 유비 attacks the nearest enemy.
+    const calm = units(full);
+    expect(resolveStrategy(calm, st).active).toEqual([]);
+    const a = new Map(decide(calm, null, st).map((o) => [o.slot, o]));
+    expect(a.get(0)).toMatchObject({ mode: 1 });
+    expect(a.get(1)).toMatchObject({ mode: 2 });
+    // Commander below half on turn 2 (dump sets turn index 1): 관우 charges it, 유비 holds.
+    const weak = units(Math.floor(full / 3));
+    expect(resolveStrategy(weak, st).active.map((r) => r.note)).toEqual(['적 대장이 약하면 총공격']);
+    const b = new Map(decide(weak, null, st).map((o) => [o.slot, o]));
+    expect(b.get(1)).toMatchObject({ mode: 0, target: 15 });
+    expect(b.get(0)).toMatchObject({ mode: 3 });
+    // The turn condition fails on turn 1.
+    const early = sanitizeStrategy({ ...st, rules: [{ ...st.rules[0], when: [{ kind: 'turnAtLeast', value: 3 }] }] });
+    expect(resolveStrategy(weak, early).active).toEqual([]);
+  });
+
+  it('describes the strategy in Korean', () => {
+    const lines = describeStrategy(
+      sanitizeStrategy({
+        units: [{ name: '관우', role: 'charge', retreatAt: 0 }],
+        rules: [{ note: '', when: [{ kind: 'unitGone', name: '관우' }], allRole: 'keep', focus: 'keep', units: [{ name: '장비', role: 'guard', retreatAt: -1 }] }],
+        ignored: ['책략은 쓸 수 없음'],
+      }),
+    );
+    expect(lines).toContain('  관우: 돌격, 후퇴 안 함');
+    expect(lines).toContain('  1. 관우 퇴각 → 장비: 유비 호위');
+    expect(lines).toContain('  - 책략은 쓸 수 없음');
   });
 });
