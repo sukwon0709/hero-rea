@@ -26,3 +26,8 @@ main { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
 .card { border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 16px; text-decoration: none; color: var(--fg); }
 .card h3 { margin: 0 0 6px; color: var(--accent); }
 canvas.game { image-rendering: pixelated; background: #000; max-width: 100%; }
+
+.customai { padding: 6px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+.customai label { margin-right: 8px; }
+.customai .ailog { max-height: 160px; overflow-y: auto; font-size: 13px; white-space: pre-wrap; }
+.customai .ailog > div { padding: 2px 0; border-top: 1px solid var(--border); }

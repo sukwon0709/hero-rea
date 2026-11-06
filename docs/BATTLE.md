@@ -321,6 +321,16 @@ the start of every battle.
 The web app's Classic mode patches its copy of MAIN.EXE to offer case 2 as a battle-menu entry named
 자동전투, with a keyboard exit and a fairer exit path; `web/src/autobattle.ts` lists every byte.
 
+It also adds a hook for the page's **custom AI** (커스텀 AI, `web/src/commander.ts`): `3f7f`, the
+compare at the start of each pass of `3f32`, calls a stub at `418f` that far-calls a routine loaded
+once from the file `AI` (`web/src/classic/asm/`). The routine goes to image `0000:a9a0`, inside the
+copy-protection answer table `0000:a997`, which nothing reads after the startup code check. In pass 0
+with `3a3c` bit 0 set it writes `AISTATE.BIN` (sequence byte + `DGROUP:0000..fff0`) and polls
+`AIORDER.BIN` once per timer tick, for up to 10 seconds, until the page answers with the same sequence
+byte and the 15 player unit records (`DS:0xe2a2`). The page only changes mode, target and target cell,
+which `ce50` already follows. `AIORDER.BIN` starting with `0xff` means the custom AI is off: then the
+routine returns at once and the game's own AI moves the units.
+
 After each unit acts, `1cb6:8ad2` runs the unit's events and `4abc` checks victory. When there is
 no enemy on the field, `4abc` runs the "all enemies gone" events (`842a`/`8794` loop, else `81fe`).
 The victory itself is set by the script's `BATTLE_END`.

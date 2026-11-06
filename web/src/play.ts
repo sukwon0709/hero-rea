@@ -1,6 +1,7 @@
 // "Classic" mode: runs the original DOS executables inside js-dos (DOSBox compiled to WebAssembly).
 import { getGameFiles, saveCached, clearCached, exportSaves, importSaves, isSaveFile, GameFiles } from './gamefiles';
 import { canPatchAutoBattle, patchAutoBattle } from './autobattle';
+import { bridgeFiles, startBridge, type BridgeCI } from './aibridge';
 
 declare global {
   interface Window {
@@ -8,7 +9,7 @@ declare global {
   }
 }
 
-interface CommandInterface {
+interface CommandInterface extends BridgeCI {
   fsReadFile(file: string): Promise<Uint8Array>;
 }
 
@@ -145,7 +146,8 @@ async function main() {
   await loadScript(`${base}js-dos/js-dos.js`);
 
   setupCodeHelper(files);
-  document.getElementById('autohelp')!.hidden = !canPatchAutoBattle(files.get('MAIN.EXE')!);
+  const patched = canPatchAutoBattle(files.get('MAIN.EXE')!);
+  document.getElementById('autohelp')!.hidden = !patched;
   const el = document.getElementById('dos')!;
   el.hidden = false;
   let ci: CommandInterface | null = null;
@@ -154,18 +156,25 @@ async function main() {
     // js-dos transfers these buffers to its worker, which detaches them. Pass copies: if `files` held
     // detached buffers, every later saveCached(files) would fail with a DataCloneError and saves were lost.
     // MAIN.EXE gets the 자동전투 (AI auto-battle) entry in the battle menu; see autobattle.ts.
-    initFs: [...files].map(([path, contents]) => ({
-      path,
-      contents: (path === 'MAIN.EXE' && patchAutoBattle(contents)) || contents.slice(),
-    })),
+    // The custom AI (aibridge.ts) adds its own files next to the game's.
+    initFs: [
+      ...[...files].map(([path, contents]) => ({
+        path,
+        contents: (path === 'MAIN.EXE' && patchAutoBattle(contents)) || contents.slice(),
+      })),
+      ...(patched ? bridgeFiles() : []),
+    ],
     pathPrefix: `${base}js-dos/emulators/`,
     autoStart: true,
     kiosk: true,
     noCloud: true,
     onEvent: (name: string, arg: unknown) => {
       if (name === 'ci-ready') ci = arg as CommandInterface;
+      // For the Playwright checks of the custom AI (dev server only).
+      if (name === 'ci-ready' && import.meta.env.DEV) (window as unknown as { heroCi: unknown }).heroCi = ci;
     },
   });
+  if (patched) startBridge(document.getElementById('customai')!, files, () => ci);
   // The game writes MSAVE*/ESAVE* files when saving; copy them back to IndexedDB periodically.
   setInterval(() => ci && persistSaves(ci, files), 5000);
   // Also try when the tab is hidden or closed, so a save made just before closing is not missed.

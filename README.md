@@ -13,6 +13,9 @@ The repository contains no game data. To play, load your own copy (the `Hero.zip
   Saves written by the game are copied back to IndexedDB every few seconds.
   The battle menu gets a **자동전투** (AI auto-battle) entry: the computer then plays your units
   every turn with the game's own AI, until you press any key during its moves.
+  With **커스텀 AI** ticked above the game, the page's own commander gives the orders instead:
+  it focuses the enemy commander or the weakest nearby enemy and pulls weak units back to villages
+  and forts to recover (`web/src/commander.ts`).
 * **Native** (in progress): a TypeScript reimplementation of the engine that reads the original data files.
 
 ```bash

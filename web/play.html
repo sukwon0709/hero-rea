@@ -31,6 +31,11 @@
     <b>AI 자동전투</b>: 전투 중 메뉴 맨 아래 <b>자동전투</b>를 고르면 아군 부대를 컴퓨터가 움직입니다.
     끄려면 컴퓨터가 움직이는 동안 아무 키나 누르세요. 다음 턴부터 직접 조작합니다. 전투가 끝나면 자동으로 꺼집니다.
   </aside>
+  <aside id="customai" class="customai" hidden>
+    <label><input type="checkbox" /> <b>커스텀 AI</b></label>
+    <span>자동전투 중에 이 페이지의 지휘 AI가 아군에게 명령합니다: 적 대장이나 약한 적을 함께 공격하고, 약해진 부대는 마을·요새·병영으로 물려 회복시킵니다. 끄면 게임의 원래 AI가 움직입니다.</span>
+    <details><summary>명령 기록</summary><div class="ailog"></div></details>
+  </aside>
   <div id="dos" hidden></div>
   <script type="module" src="./src/play.ts"></script>
 </body>

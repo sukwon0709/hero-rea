@@ -1,5 +1,9 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { AUTO_BATTLE_PATCHES, canPatchAutoBattle, patchAutoBattle } from '../src/autobattle';
+import { AI_BLOB, AUTO_BATTLE_PATCHES, canPatchAutoBattle, patchAutoBattle } from '../src/autobattle';
 import { gameFile, hasGame } from './gamedir';
 
 /** Load-image offsets of every word DOS relocates (far-call segments etc.). */
@@ -54,5 +58,41 @@ describe('auto-battle patch', () => {
     const end = out.indexOf(0, ds + ptr);
     expect(new TextDecoder('euc-kr').decode(out.subarray(ds + ptr, end))).toBe('자동전투');
     expect(out[hdr + 0x1cb60 + 0x47b3]).toBe(10); // menu entries
+  });
+});
+
+// The patch bytes and AI_BLOB are the assembled asm/hook.asm and asm/aiblob.asm. Checked when nasm is installed.
+const nasm = (() => {
+  try {
+    execFileSync('nasm', ['-v']);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function assemble(name: string): Uint8Array {
+  const dir = mkdtempSync(join(tmpdir(), 'hero-asm-'));
+  const out = join(dir, 'out.bin');
+  execFileSync('nasm', ['-f', 'bin', '-o', out, join(__dirname, '../src/classic/asm', name)]);
+  return new Uint8Array(readFileSync(out));
+}
+
+describe('custom-AI bridge code', () => {
+  const put = (what: string) => AUTO_BATTLE_PATCHES.find((p) => p.what.startsWith(what))!.put;
+
+  it.skipIf(!nasm)('matches asm/hook.asm', () => {
+    const bin = assemble('hook.asm');
+    const stub = put('custom-AI stub');
+    expect([...bin.subarray(0, stub.length)]).toEqual(stub);
+    expect([...bin.subarray(stub.length)]).toEqual(put('custom-AI loader'));
+  });
+
+  it.skipIf(!nasm)('matches asm/aiblob.asm', () => {
+    const bin = assemble('aiblob.asm');
+    expect(AI_BLOB.length).toBeLessThan(bin.length);
+    expect(bin.subarray(0, AI_BLOB.length)).toEqual(AI_BLOB);
+    expect(bin.subarray(AI_BLOB.length).every((b) => b === 0)).toBe(true);
+    expect(bin.length).toBeLessThanOrEqual(0x7c0); // room at image 0000:a9a0
   });
 });
