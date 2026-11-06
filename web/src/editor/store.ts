@@ -29,7 +29,7 @@ export function listSlots(files: GameFiles): SlotInfo[] {
 export async function writeSlot(files: GameFiles, slot: number, msave: Uint8Array, esave?: Uint8Array | null): Promise<void> {
   files.set(msaveName(slot), msave);
   if (esave) files.set(esaveName(slot), esave);
-  await saveCached(files);
+  await saveCached(files, esave ? [msaveName(slot), esaveName(slot)] : [msaveName(slot)]);
 }
 
 export interface Upload {

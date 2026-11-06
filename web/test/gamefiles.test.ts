@@ -46,6 +46,19 @@ describe('game file cache', () => {
     expect(cached?.get('ESAVE1.R3S')).toEqual(b(0)); // slots only the zip has are kept
   });
 
+  it('a page storing its own save does not undo saves another page made since it loaded', async () => {
+    await storeGame(zipGame(0));
+    const classic = (await loadCached())!; // two pages open at the same time
+    const native = (await loadCached())!;
+    native.set('MSAVE2.R3S', b(4));
+    await saveCached(native, ['MSAVE2.R3S']);
+    classic.set('MSAVE1.R3S', b(8)); // this page still holds the old slot 2
+    await saveCached(classic, ['MSAVE1.R3S']);
+    const cached = await loadCached();
+    expect(cached?.get('MSAVE1.R3S')).toEqual(b(8));
+    expect(cached?.get('MSAVE2.R3S')).toEqual(b(4));
+  });
+
   it('backs saves up and restores them', async () => {
     const files = zipGame(5);
     await storeGame(files);

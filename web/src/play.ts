@@ -1,5 +1,6 @@
 // "Classic" mode: runs the original DOS executables inside js-dos (DOSBox compiled to WebAssembly).
 import { getGameFiles, saveCached, clearCached, exportSaves, importSaves, isSaveFile, GameFiles } from './gamefiles';
+import { ESAVE_SIZE, MSAVE_SIZE } from './formats/save';
 
 declare global {
   interface Window {
@@ -62,25 +63,44 @@ function readWithTimeout(ci: CommandInterface, name: string, ms = 3000): Promise
 let persisting = false;
 // Set while restoring saves from a backup, so the poll does not copy the emulator's older saves back.
 let stopped = false;
+// Save files the emulator has changed that are not in IndexedDB yet (read, but the write is still on its
+// way or failed). Closing the page now would lose them.
+const pending = new Set<string>();
 
+// Sizes of the slot files; a slot file of any other length is one the game is still writing.
+const SLOT_SIZE: Record<string, number> = { M: MSAVE_SIZE, E: ESAVE_SIZE };
+const complete = (name: string, data: Uint8Array) => {
+  const m = /^([ME])SAVE\d\.R3S$/.exec(name);
+  return !m || data.length === SLOT_SIZE[m[1]];
+};
+const same = (a: Uint8Array, b: Uint8Array | undefined) => !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+
+/** Copies the save files the game changed into IndexedDB (only those files, see saveCached). */
 async function persistSaves(ci: CommandInterface, files: GameFiles) {
   if (persisting || stopped) return;
   persisting = true;
   try {
-    const previous = new Map<string, Uint8Array>();
+    const changed = new Map<string, Uint8Array>();
     for (const name of [...files.keys()]) {
       if (!isSaveFile(name)) continue;
       const data = await readWithTimeout(ci, name);
-      const old = files.get(name)!;
-      if (data && (data.length !== old.length || data.some((b, i) => b !== old[i]))) {
-        previous.set(name, old);
-        files.set(name, data);
+      if (!data) continue;
+      if (same(data, files.get(name))) {
+        pending.delete(name);
+        continue;
       }
+      pending.add(name);
+      if (complete(name, data)) changed.set(name, data);
     }
+    if (!changed.size) return;
+    const previous = new Map<string, Uint8Array>();
+    for (const [name, data] of changed) {
+      previous.set(name, files.get(name)!);
+      files.set(name, data);
+    }
+    if (await saveCached(files, changed.keys())) for (const name of changed.keys()) pending.delete(name);
     // On failure put the old bytes back so the next poll sees the change again and retries.
-    if (previous.size && !(await saveCached(files))) {
-      for (const [name, old] of previous) files.set(name, old);
-    }
+    else for (const [name, old] of previous) files.set(name, old);
   } finally {
     persisting = false;
   }
@@ -160,11 +180,17 @@ async function main() {
       if (name === 'ci-ready') ci = arg as CommandInterface;
     },
   });
-  // The game writes MSAVE*/ESAVE* files when saving; copy them back to IndexedDB periodically.
-  setInterval(() => ci && persistSaves(ci, files), 5000);
-  // Also try when the tab is hidden or closed, so a save made just before closing is not missed.
+  // The game writes MSAVE*/ESAVE* files when saving; copy them back to IndexedDB. Reading the save files
+  // takes a few milliseconds, so poll often: with the old 5 s poll a save made in the last seconds before
+  // reloading or closing the page was lost, and loading it later gave back an older game.
+  setInterval(() => ci && persistSaves(ci, files), 250);
+  // Also try when the tab is hidden or closed. The page may be gone before this finishes, hence the poll.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && ci) persistSaves(ci, files);
+  });
+  // A save that is not stored yet: let the browser ask before the page goes away.
+  window.addEventListener('beforeunload', (e) => {
+    if (!stopped && pending.size) e.preventDefault();
   });
 
   document.getElementById('export')!.onclick = async () => {
