@@ -122,6 +122,9 @@ export function startBridge(panel: HTMLElement, files: GameFiles, getCi: () => B
       shown.textContent = strategy.summary;
       json.textContent = JSON.stringify(strategy, null, 2);
     };
+    // js-dos listens for keys on window and cancels them (only type="text" inputs are spared), so
+    // typing in the textarea or the password field would go to the game. Keep keys in the panel.
+    for (const type of ['keydown', 'keyup', 'keypress']) panel.addEventListener(type, (e) => e.stopPropagation());
     text.value = load(PROMPT_KEY) ?? '';
     key.value = load(API_KEY) ?? '';
     show();
