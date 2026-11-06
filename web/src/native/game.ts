@@ -759,7 +759,10 @@ export class Game implements GameContext {
   private async mainLoop() {
     // new game: run events until the script sets the first location (main() step 5)
     for (;;) {
-      if (this.state.status & 0x6c) return;
+      // Only an ending, a game over or a quit leave the loop. STATUS.LOADED (0x08, a game loaded from the
+      // 기능 menu) must not: it is part of 0x6c, and returning here dropped the player at the title menu
+      // with the loaded game discarded.
+      if (this.state.status & (STATUS.ENDING | STATUS.GAME_OVER | STATUS.QUIT)) return;
       if (this.state.status & STATUS.LOCATION_CHANGED) {
         await this.enterLocation();
         continue;
