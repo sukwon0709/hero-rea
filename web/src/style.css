@@ -20,6 +20,7 @@ body.play #dos { width: 100%; height: calc(100vh - 92px); }
 .codehelp .keys button { padding: 2px 8px; margin-right: 2px; }
 .codehelp .picked { font-size: 18px; letter-spacing: 2px; min-width: 3em; }
 .codehelp .code { font-size: 18px; color: var(--accent); min-width: 4em; }
+.autohelp { padding: 6px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
 main { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
 .card { border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 16px; text-decoration: none; color: var(--fg); }

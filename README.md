@@ -11,6 +11,8 @@ The repository contains no game data. To play, load your own copy (the `Hero.zip
 * **Classic**: the original executables in js-dos (DOSBox compiled to WebAssembly), with a helper
   that answers the startup manual-code prompt using the table inside your `MAIN.EXE`.
   Saves written by the game are copied back to IndexedDB every few seconds.
+  The battle menu gets a **자동전투** (AI auto-battle) entry: the computer then plays your units
+  every turn with the game's own AI, until you press any key during its moves.
 * **Native** (in progress): a TypeScript reimplementation of the engine that reads the original data files.
 
 ```bash

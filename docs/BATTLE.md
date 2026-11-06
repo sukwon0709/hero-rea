@@ -203,7 +203,7 @@ The best value per type counts; items do not stack.
 | `DS:0xe5aa` | script-battle object: +1 far pointer and +5 length of the map-change log (4-byte records) |
 | `DS:0xe5b4` | duel scene object (script ops 10/33/34/35) |
 | `DS:0x7a84` | options. `& 0xf0` = close-up battle scenes on |
-| `DS:0x3a3c` | bit 0: allies on automatic, and a keypress returns them to mode 7 (`3f32`). Bit 2 skips the computer phase (debug, *inferred*) |
+| `DS:0x3a3c` | bit 0: zero-player mode (0인 플레이), player units on automatic; the right mouse button held between two computer moves (`0cf5:10d6`, int 33h fn 3, BX bit 1) returns them to mode 7 (`3f32`). Bit 2 skips the computer phase (debug, *inferred*). See [Debug menu](#debug-menu-and-zero-player-mode) |
 | `DS:0xd4dc` + 0x1cd | deployment records (see below) |
 
 ### Deployment records: script context DS:0xd4dc + 0x1cd, 45 × 11 bytes
@@ -281,7 +281,7 @@ pass 0: player side units whose mode != 7 (allies on automatic)
 pass 1: message 0x3ba8; for slot 15..44: regen 7cc8(slot), cure attempt 8130(slot)
         then the enemy side
 each pass: 3e12 ordering; for o in 0..44 while result == 0:
-   if DS:0x3a3c&1 and a key was pressed: clear bit 0, all player units mode 7, stop
+   if DS:0x3a3c&1 and the right mouse button is down: clear bit 0, all player units mode 7, stop
    the first unit of the side with order == o and mode != 7: ce50(unit)
 ```
 
@@ -294,6 +294,32 @@ each pass: 3e12 ordering; for o in 0..44 while result == 0:
 4. Then number all the rest.
 
 Each group is in slot order, regardless of status. Code: `actionOrder()`.
+
+### Debug menu and zero-player mode
+
+The battle menu (`1cb6:47c5`, list `DS:0x3aa0`) has 10 entries, but the call passes a count of 9, so the
+last one, `DEBUG`, is never shown in the DOS/V release. Its handler `1cb6:4072` opens a second menu
+(`DS:0x3b16`, Japanese labels left in Shift-JIS) and switches on the choice (table `cs:40a7`):
+
+| # | Label | Effect |
+|---|---|---|
+| 0 | 丙璟ON/OFF | toggles `DS:0x3a3c` bit 3 (message `0x3bc8`/`0x3bd1`) |
+| 1 | ＨＥＸ勝利 | "HEX를 강제적으로 승리하게 합니다": runs the victory events |
+| 2 | ０人ﾌﾟﾚｲ | zero-player mode: `3a3c |= 1`; every player unit in mode 7 gets mode 1 (attack nearest); message `0x3bfb` "0인 플레이에 들어갑니다" |
+| 3 | PLAYER軍全入力 | every player unit gets mode 7; message `0x3c13` |
+| 4 | 対戦ON/OFF | toggles bit 2 (computer phase skipped) |
+| 5 | (level)+5 | every player unit on the field: level + 5 (*inferred* from `0cf5:7572`/`7580`) |
+| 6 | ﾀｰﾝ+5 | turn + 5 |
+
+Cases 1 and 2 return 1, which ends the player phase. With every player unit in mode 1 the player phase
+(`44de`) is skipped from then on (it only runs when a unit on the field is in mode 7), and pass 0 of the
+computer phase moves the player's units with the enemy AI (`ce50`). The exit (`403b`, message `0x3bb2`
+"0인 플레이를 나갑니다") gives every player-side unit mode 7, allies included, and returns from `3f32`, so the
+units that have not moved yet that turn, enemies included, lose their move. `3ab6` clears `3a3c` at
+the start of every battle.
+
+The web app's Classic mode patches its copy of MAIN.EXE to offer case 2 as a battle-menu entry named
+자동전투, with a keyboard exit and a fairer exit path; `web/src/autobattle.ts` lists every byte.
 
 After each unit acts, `1cb6:8ad2` runs the unit's events and `4abc` checks victory. When there is
 no enemy on the field, `4abc` runs the "all enemies gone" events (`842a`/`8794` loop, else `81fe`).

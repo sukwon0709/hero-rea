@@ -1,5 +1,6 @@
 // "Classic" mode: runs the original DOS executables inside js-dos (DOSBox compiled to WebAssembly).
 import { getGameFiles, saveCached, clearCached, exportSaves, importSaves, isSaveFile, GameFiles } from './gamefiles';
+import { canPatchAutoBattle, patchAutoBattle } from './autobattle';
 
 declare global {
   interface Window {
@@ -144,6 +145,7 @@ async function main() {
   await loadScript(`${base}js-dos/js-dos.js`);
 
   setupCodeHelper(files);
+  document.getElementById('autohelp')!.hidden = !canPatchAutoBattle(files.get('MAIN.EXE')!);
   const el = document.getElementById('dos')!;
   el.hidden = false;
   let ci: CommandInterface | null = null;
@@ -151,7 +153,11 @@ async function main() {
     dosboxConf: DOSBOX_CONF,
     // js-dos transfers these buffers to its worker, which detaches them. Pass copies: if `files` held
     // detached buffers, every later saveCached(files) would fail with a DataCloneError and saves were lost.
-    initFs: [...files].map(([path, contents]) => ({ path, contents: contents.slice() })),
+    // MAIN.EXE gets the 자동전투 (AI auto-battle) entry in the battle menu; see autobattle.ts.
+    initFs: [...files].map(([path, contents]) => ({
+      path,
+      contents: (path === 'MAIN.EXE' && patchAutoBattle(contents)) || contents.slice(),
+    })),
     pathPrefix: `${base}js-dos/emulators/`,
     autoStart: true,
     kiosk: true,
