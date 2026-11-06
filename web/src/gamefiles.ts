@@ -99,11 +99,33 @@ export async function storeGame(files: GameFiles): Promise<boolean> {
 
 /**
  * Stores the save files of `files` in IndexedDB (the game data itself is stored once by storeGame).
+ * With `names`, only those files are written into the stored record and every other stored save is kept
+ * as it is: another tab (Classic and Native open at the same time, or two Classic tabs) may have saved
+ * other slots since this page loaded, and writing this page's whole copy back would undo them.
  * Resolves to false when that failed (the files stay usable for this session).
  */
-export async function saveCached(files: GameFiles): Promise<boolean> {
+export async function saveCached(files: GameFiles, names?: Iterable<string>): Promise<boolean> {
   try {
-    await putRecord(await openDb(), SAVES_KEY, savesOf(files));
+    const db = await openDb();
+    if (!names) {
+      await putRecord(db, SAVES_KEY, savesOf(files));
+      return true;
+    }
+    const list = [...names].filter((n) => isSaveFile(n) && files.has(n));
+    await new Promise<void>((resolve, reject) => {
+      // one transaction: read the stored saves, put these files over them, write the record back
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      const req = store.get(SAVES_KEY);
+      req.onsuccess = () => {
+        const stored: Record<string, Uint8Array> = req.result ?? savesOf(files);
+        for (const n of list) stored[n] = files.get(n)!;
+        store.put(stored, SAVES_KEY);
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
     return true;
   } catch (e) {
     // storage unavailable (private window etc.): the game still runs for this session

@@ -60,7 +60,7 @@ export class SaveStore {
   async write(slot: number, msave: Uint8Array, esave: Uint8Array) {
     this.files.set(msaveName(slot), msave);
     this.files.set(esaveName(slot), esave);
-    await saveCached(this.files);
+    await saveCached(this.files, [msaveName(slot), esaveName(slot)]);
   }
 
   /** A zip holding MSAVEn.R3S and ESAVEn.R3S of a slot. */
@@ -97,7 +97,7 @@ export class SaveStore {
       this.files.set(kind === 'M' ? msaveName(s) : esaveName(s), f.data);
       written.add(s);
     }
-    if (written.size) await saveCached(this.files);
+    if (written.size) await saveCached(this.files, [...written].flatMap((s) => [msaveName(s), esaveName(s)]));
     return [...written].sort();
   }
 }
