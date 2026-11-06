@@ -45,6 +45,37 @@ describe.skipIf(!hasGame)('native: shipped save slots load and continue', () => 
   }
 });
 
+describe.skipIf(!hasGame)('native: loading from the 기능 menu', () => {
+  it('goes on with the loaded game instead of dropping to the title menu', async () => {
+    const { Playthrough } = await import('../src/native/dev/playthrough');
+    let loaded: { chapter: number; stage: number; block: number } | null = null;
+    let steps = 0;
+    const p = new Playthrough(loadFiles(), {
+      start: { slot: 0 },
+      forceAll: true,
+      stopWhen: () => loaded !== null && ++steps > 3,
+    });
+    const g = p.game as unknown as { inputFrame: () => Promise<boolean>; loadMenu: () => Promise<boolean>; state: { status: number }; script: { chapter: number; stage: number; block: number } };
+    const inputFrame = g.inputFrame.bind(g);
+    // the first time the player has control: 기능 -> 로드 of the third shipped slot, chapter 1 (what systemMenu case 3 does)
+    g.inputFrame = async () => {
+      if (loaded) return inputFrame();
+      (p as unknown as { loadingSlot: number }).loadingSlot = 2;
+      if (await g.loadMenu()) g.state.status |= 0x08; // STATUS.LOADED
+      loaded = { chapter: g.script.chapter, stage: g.script.stage, block: g.script.block };
+      return true;
+    };
+    const r = await p.run();
+    expect(loaded).not.toBeNull();
+    expect(p.issues).toEqual([]);
+    // the story went on from the loaded position (before the fix the title menu came back at once and
+    // ended the run with no progress after the load)
+    expect(r).toBe('stopped');
+    expect(steps).toBeGreaterThan(3);
+    expect(p.game.state.progress.chapter).toBe(p.game.script.chapter);
+  }, 120_000);
+});
+
 const long = hasGame && process.env.HERO_PLAYTHROUGH === '1';
 
 describe.skipIf(!long)('native: whole game playthrough (HERO_PLAYTHROUGH=1)', () => {
